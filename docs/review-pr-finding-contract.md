@@ -77,9 +77,19 @@ keys remain language-independent.
   publishing canonical JSON or Markdown.
 - A truncated stream without `complete` is a failed report even if earlier records parse. Preserve
   those records as diagnostics; never publish them as a successful review.
-- Allow one bounded repair attempt with exact schema errors. Preserve both responses. The repaired
-  report must pass the full schema; fields that were already valid must remain semantically stable.
-  If stability cannot be established, fail closed instead of silently changing a finding.
+- Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
+  already a parseable object with a unique `source_id` and every substantive field present. Leading
+  or trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
+  completion record are repairable. Broken JSON-looking records, unknown record types, duplicate
+  completion records, and missing substantive finding fields are ineligible because recovery would
+  require guessing.
+- Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
+  and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
+  for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,
+  `severity`, `category`, `contributing_agents`, `verification_limitations`, and
+  `existing_feedback`. No finding may be added, removed, reordered, split, merged, translated, or
+  rewritten. Preserve valid completion prose; when none is safely recoverable, require an empty
+  summary and arrays. If stability cannot be established, fail closed instead of publishing repair.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

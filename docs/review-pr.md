@@ -660,6 +660,12 @@ REVIEW_PR_HEAD_REF
 
 `REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` only for an opted-in primary phase and `markdown` for the current legacy primary, cross-review, final, and comparison phases. A runner should still treat the prompt as authoritative for the complete schema and phase rules.
 
+When an opted-in primary response is structurally repairable, the same agent may receive one
+additional `REVIEW_PR_PHASE=primary findings repair` invocation with
+`REVIEW_PR_OUTPUT_CONTRACT=ndjson-v1`. This pass is formatting/schema repair only: it must not inspect
+source or change, add, remove, split, merge, translate, or reorder findings. The orchestrator compares
+all substantive fields against a parsed baseline and rejects the repair on any difference.
+
 Every configured reviewer runs once successfully during primary review and once successfully during cross-review, subject to the configured attempt limit. A cross-reviewer receives every other primary report but never its own. The configured synthesizer then receives all primary and cross-review reports, producing the core `N -> N -> 1` pipeline. When final comparison mode is `standalone`, one additional, bounded synthesis pass produces the optional companion comparison report without changing the core final verdict.
 
 ## Parallel pull requests and Git worktrees

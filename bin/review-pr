@@ -2851,6 +2851,254 @@ process_primary_ndjson_output() {
     PRIMARY_FINDINGS_OUTPUTS[$agent]=$findings_target
 }
 
+build_primary_repair_baseline() {
+    local input_file=$1
+    local baseline_file=$2
+    local parsed_file
+    local line
+    local trimmed
+    local object_count=0
+    local saw_trailing_prose=false
+
+    new_temp_file "primary-repair-parsed"; parsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        trimmed=${line#"${line%%[![:space:]]*}"}
+        trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+        [[ -n "$trimmed" ]] || continue
+        [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
+        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+            [[ "$saw_trailing_prose" == false ]] || return 1
+            object_count=$((object_count + 1))
+            continue
+        fi
+        # Plain transport prose can be removed safely. A JSON-looking line is
+        # an unparseable record whose substantive content cannot be recovered
+        # without guessing, so it is deliberately ineligible for repair.
+        if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
+            return 1
+        fi
+        if (( object_count > 0 )); then
+            saw_trailing_prose=true
+        fi
+    done <"$input_file"
+    (( object_count > 0 )) || return 1
+
+    jq -e -s '
+        def finding_content:
+            {
+                source_id, title, claim, anchor, evidence, failure_scenario,
+                recommendation, classification, severity, category,
+                contributing_agents, verification_limitations, existing_feedback
+            };
+        def has_finding_content:
+            . as $record |
+            all([
+                "source_id", "title", "claim", "anchor", "evidence",
+                "failure_scenario", "recommendation", "classification", "severity",
+                "category", "contributing_agents", "verification_limitations",
+                "existing_feedback"
+            ][]; . as $key | $record | has($key));
+        def valid_completion_content:
+            has("summary") and (.summary | type == "string") and
+            has("verification_limitations") and (.verification_limitations | type == "array") and
+            has("positive_evidence") and (.positive_evidence | type == "array");
+
+        ([.[] | select(.record == "finding")]) as $findings |
+        ([.[] | select(.record == "complete")]) as $completions |
+        if (
+            (all(.[]; .record == "finding" or .record == "complete")) and
+            (all($findings[]; has_finding_content)) and
+            (([$findings[].source_id] | unique | length) == ($findings | length)) and
+            ($completions | length) <= 1 and
+            (($findings | length) > 0 or ($completions | length) == 1)
+        ) then
+            {
+                findings: [$findings[] | finding_content],
+                completion:
+                    (if (($completions | length) == 1 and ($completions[0] | valid_completion_content))
+                     then ($completions[0] | {
+                        summary, verification_limitations, positive_evidence
+                     })
+                     else {
+                        summary: "", verification_limitations: [], positive_evidence: []
+                     }
+                     end)
+            }
+        else
+            error("unsafe primary repair baseline")
+        end
+    ' "$parsed_file" >"$baseline_file" 2>/dev/null
+}
+
+validate_primary_repair_stability() {
+    local baseline_file=$1
+    local canonical_file=$2
+
+    jq -e --slurpfile baseline "$baseline_file" '
+        def finding_content:
+            {
+                source_id, title, claim, anchor, evidence, failure_scenario,
+                recommendation, classification, severity, category,
+                contributing_agents, verification_limitations, existing_feedback
+            };
+        {
+            findings: [.findings[] | finding_content],
+            completion: {
+                summary, verification_limitations, positive_evidence
+            }
+        } == $baseline[0]
+    ' "$canonical_file" >/dev/null
+}
+
+write_primary_finding_repair_prompt() {
+    local prompt_file=$1
+    local failure_reason=$2
+    local baseline_file=$3
+    local draft_file=$4
+
+    cat >"$prompt_file" <<EOF
+This is one bounded schema-repair pass for an already completed independent primary review. It is not a new code review.
+
+Return only a complete ndjson-v1 stream: one JSON object per physical line, without a Markdown fence, preamble, commentary, or trailing text. Do not inspect the repository or use tools.
+
+The rejected draft failed with: ${failure_reason}
+
+You MUST preserve every finding exactly, in the same order, with the same source_id. Do not add, remove, split, merge, reorder, rephrase, translate, or otherwise change any finding. The orchestrator compares these substantive fields structurally and rejects any difference: title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback.
+
+You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. Each finding needs record "finding" and schema_version 1. Finish with exactly one complete record using finding_count equal to the preserved finding count. Preserve the complete record's summary, verification_limitations, and positive_evidence when present in the supplied baseline; when the baseline contains empty values, use them exactly. Do not output records after complete.
+
+The complete preserved-content baseline is authoritative:
+
+===== BEGIN PRESERVED BASELINE =====
+$(cat -- "$baseline_file")
+===== END PRESERVED BASELINE =====
+
+===== BEGIN REJECTED NDJSON DRAFT =====
+$(cat -- "$draft_file")
+===== END REJECTED NDJSON DRAFT =====
+EOF
+}
+
+attempt_primary_ndjson_repair() {
+    local agent=$1
+    local attempt=$2
+    local output_file=$3
+    local log_file=$4
+    local usage_file=$5
+    local usage_json_file=$6
+    local started_at=$7
+    local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
+    local baseline_file
+    local repair_prompt
+    local repair_output
+    local repair_log
+    local repair_usage
+    local repair_usage_json
+    local combined_usage_json
+    local scratch_raw
+    local scratch_findings
+    local actual_raw=${PRIMARY_RAW_OUTPUTS[$agent]}
+    local actual_findings=${PRIMARY_FINDINGS_OUTPUTS[$agent]}
+    local repair_pid
+    local repair_heartbeat_pid
+    local repair_status
+    local repair_stop_reason
+    local diagnostic_base="${ERROR_LOGS[$agent]%.log}-schema-repair-attempt-${attempt}"
+    local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
+    local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
+    local log_diagnostic="${diagnostic_base}.log"
+    local usage_diagnostic="${diagnostic_base}-usage.json"
+
+    new_temp_file "primary-${agent}-repair-baseline"; baseline_file=$NEW_TEMP_FILE
+    if ! build_primary_repair_baseline "$output_file" "$baseline_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
+        return 1
+    fi
+
+    new_temp_file "primary-${agent}-repair-prompt"; repair_prompt=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-output"; repair_output=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-log"; repair_log=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-usage"; repair_usage=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-usage-json"; repair_usage_json=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-combined-usage"; combined_usage_json=$NEW_TEMP_FILE
+    new_temp_file "primary-${agent}-repair-raw"; scratch_raw=$NEW_TEMP_FILE; rm -- "$scratch_raw"
+    new_temp_file "primary-${agent}-repair-findings"; scratch_findings=$NEW_TEMP_FILE; rm -- "$scratch_findings"
+    write_primary_finding_repair_prompt "$repair_prompt" "$original_failure_reason" "$baseline_file" "$output_file"
+
+    activity_log "Primary ndjson-v1 output from ${agent} is structurally repairable; starting one bounded schema-repair pass"
+    start_agent "$agent" "primary findings repair" "$repair_prompt" "$repair_output" "$repair_log" "$repair_usage" "$repair_usage_json" "$attempt"
+    repair_pid=$STARTED_PID
+    set_dashboard_status primary "$agent" RUNNING "$repair_pid" "$started_at" 0
+    heartbeat_agent "primary findings repair" "$agent" "$repair_pid" "$started_at" &
+    repair_heartbeat_pid=$!
+    RUNNING_PIDS+=("$repair_heartbeat_pid")
+    if wait "$repair_pid"; then
+        repair_status=0
+    else
+        repair_status=$?
+    fi
+    kill "$repair_heartbeat_pid" 2>/dev/null || true
+    wait "$repair_heartbeat_pid" 2>/dev/null || true
+    repair_stop_reason=$(jq -r '.stop_reason // ""' "$repair_usage_json" 2>/dev/null || true)
+
+    if (( repair_status == 0 )) && [[ "$repair_stop_reason" != length && -s "$repair_output" ]]; then
+        PRIMARY_RAW_OUTPUTS[$agent]=$scratch_raw
+        PRIMARY_FINDINGS_OUTPUTS[$agent]=$scratch_findings
+        if process_primary_ndjson_output "$repair_output" "$agent" \
+            && validate_primary_repair_stability "$baseline_file" "$scratch_findings"; then
+            PRIMARY_RAW_OUTPUTS[$agent]=$actual_raw
+            PRIMARY_FINDINGS_OUTPUTS[$agent]=$actual_findings
+            assert_new_target "$actual_raw"
+            assert_new_target "$actual_findings"
+            mv -- "$scratch_raw" "$actual_raw"
+            mv -- "$scratch_findings" "$actual_findings"
+            assert_new_target "$source_diagnostic"
+            cp -- "$output_file" "$source_diagnostic"
+            mv -- "$repair_output" "$output_file"
+            merge_usage_summaries "$usage_json_file" "$repair_usage_json" "$combined_usage_json"
+            mv -- "$combined_usage_json" "$usage_json_file"
+            jq -r '.reported_total_tokens // empty' "$usage_json_file" >"$usage_file"
+            if [[ -s "$repair_log" ]]; then
+                printf '\n--- bounded schema-repair diagnostics ---\n' >>"$log_file"
+                cat -- "$repair_log" >>"$log_file"
+            fi
+            preserve_error_log "$log_file" "$log_diagnostic"
+            activity_log "Primary ndjson-v1 schema repaired for ${agent} without changing finding content"
+            FINDING_CONTRACT_FAILURE_REASON=""
+            return 0
+        fi
+        PRIMARY_RAW_OUTPUTS[$agent]=$actual_raw
+        PRIMARY_FINDINGS_OUTPUTS[$agent]=$actual_findings
+        if [[ -s "$scratch_raw" ]]; then
+            assert_new_target "$output_diagnostic"
+            mv -- "$scratch_raw" "$output_diagnostic"
+        elif [[ -s "$repair_output" ]]; then
+            assert_new_target "$output_diagnostic"
+            mv -- "$repair_output" "$output_diagnostic"
+        fi
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_changed_finding_content_or_remained_invalid"
+    elif (( repair_status != 0 )); then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_exit_${repair_status}"
+    elif [[ "$repair_stop_reason" == length ]]; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_output_token_limit"
+    else
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_empty_output"
+    fi
+
+    preserve_error_log "$repair_log" "$log_diagnostic"
+    if [[ -s "$repair_usage_json" ]]; then
+        assert_new_target "$usage_diagnostic"
+        mv -- "$repair_usage_json" "$usage_diagnostic"
+    fi
+    if [[ -s "$repair_output" && ! -e "$output_diagnostic" ]]; then
+        assert_new_target "$output_diagnostic"
+        mv -- "$repair_output" "$output_diagnostic"
+    fi
+    return 1
+}
+
 preserve_error_log() {
     local source_log=$1
     local destination_log=$2
@@ -3521,7 +3769,7 @@ run_configured_command_in_worktree() {
     local output_contract=markdown
     local -a EXPANDED_COMMAND=()
 
-    if [[ "$phase" == "primary review" ]]; then
+    if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
     fi
 
@@ -3669,7 +3917,7 @@ start_agent() {
         agent_working_directory=$REPORT_DIR
         artifact_only=true
     fi
-    if [[ "$phase" == "primary review" ]]; then
+    if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete ndjson-v1 stream with no Markdown or prose'
@@ -3796,7 +4044,11 @@ start_agent() {
             new_temp_file "pi-${attempt}-control"
             pi_control_file=$NEW_TEMP_FILE
             write_pi_control_prompt "$prompt_file" "$pi_control_file"
-            if [[ "$phase" == "comparison synthesis" ]]; then
+            if [[ "$phase" == "primary findings repair" ]]; then
+                pi_system_prompt_arguments=(--system-prompt "$pi_control_file")
+                pi_tool_arguments=(--no-tools)
+                pi_tail_control="FINAL ORCHESTRATOR CONTROL: perform only the bounded ndjson-v1 schema repair defined by the system contract. Do not inspect source or change finding content. Return only the repaired NDJSON stream."
+            elif [[ "$phase" == "comparison synthesis" ]]; then
                 new_temp_file "pi-${attempt}-comparison-payload"
                 pi_payload_file=$NEW_TEMP_FILE
                 write_pi_comparison_payload "$prompt_file" "$pi_payload_file"
@@ -4451,8 +4703,21 @@ run_review_phase() {
             fi
             if [[ -z "$failure_reason" && "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
                 if ! process_primary_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
-                    failure_reason="invalid ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-                    printf 'ndjson-v1 validation failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    printf 'ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    if attempt_primary_ndjson_repair \
+                        "$agent" \
+                        "$attempt" \
+                        "${TEMP_OUTPUTS[$agent]}" \
+                        "${TEMP_LOGS[$agent]}" \
+                        "${TEMP_USAGE_FILES[$agent]}" \
+                        "${TEMP_USAGE_JSON_FILES[$agent]}" \
+                        "${phase_started_at[$agent]}"; then
+                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                        token_display=$TOKEN_USAGE_DISPLAY
+                    else
+                        failure_reason="invalid ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
+                        printf 'ndjson-v1 schema repair failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    fi
                 fi
             fi
             if [[ -z "$failure_reason" ]]; then

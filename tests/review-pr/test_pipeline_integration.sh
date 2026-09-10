@@ -623,6 +623,124 @@ run_ndjson_primary_case() {
         grep -Fq -- '"record":"finding"' "$alpha_cross_prompt"
 }
 
+run_ndjson_schema_repair_case() {
+    local case_dir="$suite_root/ndjson-schema-repair"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local capture="$case_dir/captured-prompts"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest
+    local work_dir
+    local stem
+    local source_diagnostic
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured primary schema repair.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1"} | .reporting.comparison_sections.final = "none"' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' 'ndjson-preamble' >"$scenarios/beta-primary-review"
+    printf '%s\n' 'valid-ndjson' >"$scenarios/beta-primary-findings-repair"
+
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    source_diagnostic=$(find "$work_dir" -type f -name '*primary-beta-error-schema-repair-attempt-1-source-raw.ndjson' -print | sed -n '1p')
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'bounded primary schema repair lets the pipeline complete'
+    assert_file_exists "$capture/primary-findings-repair-beta-attempt-1.prompt" \
+        'repair pass receives a dedicated no-new-review prompt'
+    [[ -n "$source_diagnostic" ]] || fail 'schema repair did not preserve the rejected source response'
+    pass 'schema repair preserves the rejected source response'
+    assert_file_contains "$source_diagnostic" 'Here is the requested structured review:' \
+        'preserved source response retains the invalid transport prose'
+    assert_false 'canonical raw response excludes repaired transport prose' \
+        grep -Fq -- 'Here is the requested structured review:' "$work_dir/${stem}-beta-raw.ndjson"
+    assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-beta-usage.json")" \
+        'primary usage includes generation and bounded repair passes'
+    assert_eq 'The fixture changed branch can fail.' \
+        "$(jq -r '.findings[0].claim' "$work_dir/${stem}-beta-findings.json")" \
+        'schema repair preserves substantive finding content'
+}
+
+run_ndjson_unsafe_schema_repair_case() {
+    local case_dir="$suite_root/ndjson-unsafe-schema-repair"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest
+    local work_dir
+    local stem
+    local rejected_source
+    local rejected_repair
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture unsafe structured repair.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1"} | .reporting.comparison_sections.final = "none"' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' 'ndjson-preamble' >"$scenarios/beta-primary-review"
+    printf '%s\n' 'unsafe-ndjson-repair' >"$scenarios/beta-primary-findings-repair"
+
+    if PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'content-changing primary schema repair must fail closed'
+    fi
+    pass 'content-changing primary schema repair fails closed'
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    rejected_source=$(find "$work_dir" -type f -name '*primary-beta-error-partial-raw.ndjson' -print | sed -n '1p')
+    rejected_repair=$(find "$work_dir" -type f -name '*primary-beta-error-schema-repair-attempt-1-invalid-raw.ndjson' -print | sed -n '1p')
+    [[ -n "$rejected_source" ]] || fail 'unsafe repair did not preserve the original response'
+    pass 'unsafe repair preserves the original response'
+    [[ -n "$rejected_repair" ]] || fail 'unsafe repair did not preserve the repair response'
+    pass 'unsafe repair preserves the rejected repair response'
+    assert_file_contains "$rejected_repair" 'The repair rewrote the finding claim.' \
+        'unsafe repair diagnostic exposes the changed substantive field'
+    assert_file_not_exists "$work_dir/${stem}-beta.md" \
+        'unsafe repair cannot publish primary Markdown'
+    assert_file_not_exists "$work_dir/${stem}-beta-findings.json" \
+        'unsafe repair cannot publish canonical findings'
+}
+
 run_ndjson_resume_case() {
     local case_dir="$suite_root/ndjson-resume"
     local reviews="$case_dir/reviews"
@@ -699,6 +817,8 @@ run_ndjson_resume_case() {
 
 run_full_success_case
 run_ndjson_primary_case
+run_ndjson_schema_repair_case
+run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case
 run_resume_case
 run_comparison_failure_case

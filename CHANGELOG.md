@@ -16,6 +16,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   portable JSON Schema, strict completeness/anchor/provenance validation, exact raw responses,
   canonical findings sidecars, deterministic EN/UA Markdown rendering, manifest-backed resume, and
   mock fixtures.
+- One bounded primary `ndjson-v1` schema-repair pass for structurally recoverable output, with
+  substantive-field stability checks, original/rejected-response diagnostics, and multi-pass usage.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
 
 ### Changed

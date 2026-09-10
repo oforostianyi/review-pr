@@ -38,6 +38,44 @@ assert_file_contains "$input" 'Line: `10`' \
 assert_file_contains "$input" '## Verification limitations' \
     'renderer emits an explicit limitations section'
 
+valid_canonical="$test_root/valid-canonical.json"
+cp -- "${PRIMARY_FINDINGS_OUTPUTS[codex]}" "$valid_canonical"
+repairable_preamble="$test_root/repairable-preamble.ndjson"
+{
+    printf '%s\n' 'Here is the requested structured review:'
+    cat -- "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$repairable_preamble"
+repair_baseline="$test_root/repair-baseline.json"
+assert_true 'leading transport prose produces a safe repair baseline' \
+    build_primary_repair_baseline "$repairable_preamble" "$repair_baseline"
+assert_true 'unchanged canonical findings satisfy repair stability' \
+    validate_primary_repair_stability "$repair_baseline" "$valid_canonical"
+
+changed_canonical="$test_root/changed-canonical.json"
+jq '.findings[0].claim = "The repair rewrote the claim."' "$valid_canonical" >"$changed_canonical"
+assert_false 'repair stability rejects changed finding content' \
+    validate_primary_repair_stability "$repair_baseline" "$changed_canonical"
+
+broken_record="$test_root/broken-record.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    printf '%s\n' '{"record":"finding","source_id":"broken"'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$broken_record"
+assert_false 'an unparseable JSON-looking record is ineligible for repair' \
+    build_primary_repair_baseline "$broken_record" "$test_root/broken-baseline.json"
+
+unknown_record="$test_root/unknown-record.ndjson"
+printf '%s\n' '{"record":"unknown","schema_version":1}' >"$unknown_record"
+assert_false 'an unknown record type is ineligible for repair' \
+    build_primary_repair_baseline "$unknown_record" "$test_root/unknown-baseline.json"
+
+missing_claim="$test_root/missing-claim.ndjson"
+jq -c 'del(.claim)' < <(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson") >"$missing_claim"
+sed -n '$p' "$test_dir/fixtures/primary-findings-valid.ndjson" >>"$missing_claim"
+assert_false 'a finding missing substantive content is ineligible for repair' \
+    build_primary_repair_baseline "$missing_claim" "$test_root/missing-claim-baseline.json"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

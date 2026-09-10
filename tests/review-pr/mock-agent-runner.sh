@@ -204,7 +204,7 @@ case "$behavior" in
         ;;
     valid-ndjson)
         sleep "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}"
-        if [[ "$phase" == 'primary review' ]]; then
+        if [[ "$phase" == 'primary review' || "$phase" == 'primary findings repair' ]]; then
             if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" != ndjson-v1 ]]; then
                 printf 'structured primary mock received the wrong output contract: %s\n' "${REVIEW_PR_OUTPUT_CONTRACT:-unset}" >&2
                 exit 65
@@ -214,6 +214,15 @@ case "$behavior" in
             emit_valid_output
         fi
         write_usage null 55
+        ;;
+    ndjson-preamble)
+        printf '%s\n' 'Here is the requested structured review:'
+        emit_valid_ndjson_primary
+        write_usage null 58
+        ;;
+    unsafe-ndjson-repair)
+        emit_valid_ndjson_primary | sed '0,/The fixture changed branch can fail\./s//The repair rewrote the finding claim./'
+        write_usage null 59
         ;;
     fail-once)
         if (( attempt == 1 )); then
