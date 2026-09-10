@@ -111,12 +111,18 @@
         "finding_contract": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Versioned machine-readable finding contract. Markdown remains the default; ndjson-v1 is currently opt-in for primary reviews only.",
+          "description": "Versioned machine-readable finding contract. Markdown remains the default; ndjson-v1 is opt-in per implemented phase.",
           "properties": {
             "primary": {
               "type": "string",
               "enum": ["markdown", "ndjson-v1"],
               "default": "markdown"
+            },
+            "cross_review": {
+              "type": "string",
+              "enum": ["markdown", "ndjson-v1"],
+              "default": "markdown",
+              "description": "Structured cross-review requires primary=ndjson-v1 and comparison_sections.cross_review=none."
             }
           }
         },

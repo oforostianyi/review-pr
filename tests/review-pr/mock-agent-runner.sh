@@ -165,6 +165,39 @@ emit_valid_ndjson_primary() {
     }'
 }
 
+emit_valid_ndjson_cross() {
+    local source_agent=alpha
+    if [[ "$agent" == alpha ]]; then
+        source_agent=beta
+    fi
+    jq -nc --arg agent "$agent" --arg source_agent "$source_agent" '{
+        record: "finding",
+        schema_version: 1,
+        source_id: ($agent + ":C-001"),
+        source_refs: [{agent: $source_agent, source_id: ($source_agent + ":F-001")}],
+        title: "Fixture changed-line defect",
+        claim: "The fixture changed branch can fail.",
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+        evidence: ["The exact changed branch confirms the supplied finding."],
+        failure_scenario: "The fixture request reaches the changed branch and fails.",
+        recommendation: "Correct the changed branch.",
+        classification: "CONFIRMED",
+        severity: "P1",
+        category: "correctness",
+        contributing_agents: [$source_agent],
+        verification_limitations: [],
+        existing_feedback: {state: "new", thread_ids: []}
+    }'
+    jq -nc '{
+        record: "complete",
+        schema_version: 1,
+        finding_count: 1,
+        summary: "The supplied fixture finding is confirmed.",
+        verification_limitations: [],
+        positive_evidence: []
+    }'
+}
+
 emit_anchor_output() {
     local anchor_line=$1
     local problem_text=${2:-The fixture finding remains byte-for-byte stable.}
@@ -210,6 +243,12 @@ case "$behavior" in
                 exit 65
             fi
             emit_valid_ndjson_primary
+        elif [[ "$phase" == 'cross-review' ]]; then
+            if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
+                emit_valid_ndjson_cross
+            else
+                emit_valid_output
+            fi
         else
             emit_valid_output
         fi

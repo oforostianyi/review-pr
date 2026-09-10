@@ -271,7 +271,7 @@ Override only a stage when needed with `languages.primary`, `languages.cross_rev
 
 The legacy `finalization.language` remains readable for existing configurations, but new configurations should use `language` and optional stage overrides. The orchestrator tells every stage its resolved output language; this takes precedence over a conflicting skill or custom formatting instruction. It also localizes built-in cross-review headings and table columns. `CONFIRMED`, `REJECTED`, `UNCERTAIN`, and `P0`–`P3` deliberately remain fixed in both languages.
 
-## Structured primary finding contract (opt-in)
+## Structured finding contracts (opt-in)
 
 Markdown remains the default primary-agent output contract. To evaluate the versioned machine contract for new runs, enable it explicitly:
 
@@ -279,15 +279,18 @@ Markdown remains the default primary-agent output contract. To evaluate the vers
 {
   "reporting": {
     "finding_contract": {
-      "primary": "ndjson-v1"
+      "primary": "ndjson-v1",
+      "cross_review": "ndjson-v1"
     }
   }
 }
 ```
 
-In `ndjson-v1` mode each primary agent returns one complete JSON object per physical line, followed by exactly one terminal `complete` record. The orchestrator validates required fields, enums, unique source IDs, completeness, producer identity, and changed-line anchors before anything is published. It then preserves the exact response as `work/*-raw.ndjson`, writes normalized `work/*-findings.json`, and deterministically renders the usual localized `work/*.md` report for cross-review and humans. The portable record schema is installed as `review-pr-findings-v1.schema.json`; the full design is documented in `review-pr-finding-contract.md`.
+In `ndjson-v1` mode each agent returns one complete JSON object per physical line, followed by exactly one terminal `complete` record. The orchestrator validates required fields, enums, unique source IDs, completeness, producer identity, and changed-line anchors before anything is published. It then preserves the exact response as `work/*-raw.ndjson`, writes normalized `work/*-findings.json`, and deterministically renders localized `work/*.md` for humans and the next stage.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output consumes the normal configured agent attempts and fails closed if no attempt validates; attempt-scoped raw output and diagnostics are preserved. Resume uses the contract recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Historical manifests without this field continue as Markdown. This staged implementation applies the machine contract to primary reviews only; cross-review and final synthesis still use their established Markdown contracts.
+Structured cross-review requires `primary: "ndjson-v1"` and `reporting.comparison_sections.cross_review: "none"`. It receives the other agents' canonical primary sidecars rather than localized Markdown. Every input finding must be covered by at least one cross-review record using a unique `{agent, source_id}` reference; unknown references and missing coverage fail validation. Genuine duplicates may be consolidated with multiple references, while a compound source claim may be split across independently classified records. `CONFIRMED` requires `P0`–`P3`; `REJECTED` and `UNCERTAIN` use `null` severity. The portable record schema is installed as `review-pr-findings-v1.schema.json`; the full design is documented in `review-pr-finding-contract.md`.
+
+There is no automatic fallback to Markdown. Invalid or truncated structured output consumes the normal configured agent attempts and fails closed if no attempt validates; attempt-scoped raw output and diagnostics are preserved. A structurally recoverable primary response first receives the dedicated field-stable repair pass. Resume uses both contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Historical manifests without these fields continue as Markdown. Final synthesis still uses its established Markdown contract.
 
 ## Optional comparison reports
 
@@ -297,7 +300,8 @@ Comparison material can be controlled independently for cross-review and final s
 {
   "reporting": {
     "finding_contract": {
-      "primary": "markdown"
+      "primary": "markdown",
+      "cross_review": "markdown"
     },
     "comparison_sections": {
       "cross_review": "none",
@@ -627,7 +631,7 @@ Use an executable `runner` only when the CLI cannot use the standard input/Markd
 
 - runs with the review repository as its working directory;
 - reads the complete orchestration prompt from stdin;
-- writes only the phase payload to stdout: Markdown by default, or primary NDJSON when `reporting.finding_contract.primary` selects `ndjson-v1`;
+- writes only the phase payload to stdout: Markdown by default, or NDJSON when the current primary or cross-review phase selects `ndjson-v1`;
 - writes diagnostics to stderr;
 - exits non-zero on failure;
 - must not switch branches or modify repository files.
@@ -658,7 +662,7 @@ REVIEW_PR_BASE_REF
 REVIEW_PR_HEAD_REF
 ```
 
-`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` only for an opted-in primary phase and `markdown` for the current legacy primary, cross-review, final, and comparison phases. A runner should still treat the prompt as authoritative for the complete schema and phase rules.
+`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` for an opted-in primary or cross-review phase and `markdown` for legacy phases, final synthesis, and comparison synthesis. A runner should still treat the prompt as authoritative for the complete phase-specific schema and rules.
 
 When an opted-in primary response is structurally repairable, the same agent may receive one
 additional `REVIEW_PR_PHASE=primary findings repair` invocation with

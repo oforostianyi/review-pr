@@ -623,6 +623,147 @@ run_ndjson_primary_case() {
         grep -Fq -- '"record":"finding"' "$alpha_cross_prompt"
 }
 
+run_ndjson_cross_case() {
+    local case_dir="$suite_root/ndjson-cross"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local capture="$case_dir/captured-prompts"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest work_dir stem alpha_raw alpha_findings alpha_report alpha_prompt
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured cross-review.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    alpha_raw="$work_dir/${stem}-cross-alpha-raw.ndjson"
+    alpha_findings="$work_dir/${stem}-cross-alpha-findings.json"
+    alpha_report="$work_dir/${stem}-cross-alpha.md"
+    alpha_prompt="$capture/cross-review-alpha-attempt-1.prompt"
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'structured cross-review pipeline completes'
+    assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.cross_review' "$manifest")" \
+        'manifest records the cross-review finding contract'
+    assert_file_exists "$alpha_raw" 'structured cross-review preserves exact raw NDJSON'
+    assert_file_exists "$alpha_findings" 'structured cross-review publishes canonical findings JSON'
+    assert_file_exists "$alpha_report" 'structured cross-review publishes deterministic Markdown'
+    assert_eq 'cross-review' "$(jq -r '.phase' "$alpha_findings")" \
+        'cross-review sidecar records its phase'
+    assert_eq 'beta:beta:F-001' "$(jq -r '.input_refs[0] | .agent + ":" + .source_id' "$alpha_findings")" \
+        'cross-review sidecar preserves namespaced primary provenance'
+    assert_eq "${stem}-cross-alpha-raw.ndjson" "$(jq -r '.artifacts.cross_review_raw.alpha' "$manifest")" \
+        'manifest points to cross-review raw output'
+    assert_eq "${stem}-cross-alpha-findings.json" "$(jq -r '.artifacts.cross_review_findings.alpha' "$manifest")" \
+        'manifest points to canonical cross-review findings'
+    assert_file_contains "$alpha_report" '### [CONFIRMED/P1] Fixture changed-line defect' \
+        'cross-review Markdown is rendered from canonical classifications'
+    assert_file_contains "$alpha_prompt" '"source_id": "beta:F-001"' \
+        'structured cross-review receives the other canonical primary report'
+    assert_false 'structured cross-review does not receive its own canonical primary report' \
+        grep -Fq -- '"source_id": "alpha:F-001"' "$alpha_prompt"
+    assert_file_contains "$alpha_prompt" 'BEGIN RIGHT-SIDE CHANGED-LINE MAP' \
+        'structured cross-review receives the authoritative changed-line map'
+}
+
+run_ndjson_cross_resume_case() {
+    local case_dir="$suite_root/ndjson-cross-resume"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest work_dir stem timestamp alpha_report_checksum alpha_raw_checksum alpha_findings_checksum
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured cross-review resume.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' nonzero >"$scenarios/beta-cross-review"
+
+    if PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/first-output.txt" 2>"$case_dir/first-stderr.log"; then
+        fail 'failed structured cross-review must pause final synthesis'
+    fi
+    pass 'failed structured cross-review pauses final synthesis'
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    timestamp=$(jq -r '.timestamp' "$manifest")
+    alpha_report_checksum=$(cksum "$work_dir/${stem}-cross-alpha.md")
+    alpha_raw_checksum=$(cksum "$work_dir/${stem}-cross-alpha-raw.ndjson")
+    alpha_findings_checksum=$(cksum "$work_dir/${stem}-cross-alpha-findings.json")
+    assert_file_not_exists "$work_dir/${stem}-cross-beta.md" \
+        'failed structured cross-review publishes no Markdown artifact'
+    assert_file_not_exists "$work_dir/${stem}-cross-beta-findings.json" \
+        'failed structured cross-review publishes no canonical sidecar'
+
+    rm -- "$scenarios/beta-cross-review"
+    jq '.reporting.finding_contract = {primary: "markdown", cross_review: "markdown"}' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" --run "$timestamp" 123 \
+        >"$case_dir/resume-output.txt" 2>"$case_dir/resume-stderr.log"
+
+    assert_eq "$alpha_report_checksum" "$(cksum "$work_dir/${stem}-cross-alpha.md")" \
+        'structured resume preserves successful cross-review Markdown byte-for-byte'
+    assert_eq "$alpha_raw_checksum" "$(cksum "$work_dir/${stem}-cross-alpha-raw.ndjson")" \
+        'structured resume preserves successful cross-review raw NDJSON byte-for-byte'
+    assert_eq "$alpha_findings_checksum" "$(cksum "$work_dir/${stem}-cross-alpha-findings.json")" \
+        'structured resume preserves successful canonical cross-review findings'
+    assert_file_exists "$work_dir/${stem}-cross-beta-raw.ndjson" \
+        'structured resume publishes the missing cross-review raw response'
+    assert_file_exists "$work_dir/${stem}-cross-beta-findings.json" \
+        'structured resume publishes the missing canonical cross-review findings'
+    assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.cross_review' "$manifest")" \
+        'structured resume honors the manifest cross-review contract'
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'structured cross-review resume completes the remaining pipeline'
+}
+
 run_ndjson_schema_repair_case() {
     local case_dir="$suite_root/ndjson-schema-repair"
     local reviews="$case_dir/reviews"
@@ -817,6 +958,8 @@ run_ndjson_resume_case() {
 
 run_full_success_case
 run_ndjson_primary_case
+run_ndjson_cross_case
+run_ndjson_cross_resume_case
 run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case

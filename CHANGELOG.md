@@ -18,6 +18,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   mock fixtures.
 - One bounded primary `ndjson-v1` schema-repair pass for structurally recoverable output, with
   substantive-field stability checks, original/rejected-response diagnostics, and multi-pass usage.
+- Opt-in structured cross-review with namespaced source provenance, complete input coverage,
+  phase-specific severity validation, deterministic EN/UA Markdown, and manifest-backed resume.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
 
 ### Changed

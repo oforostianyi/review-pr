@@ -57,12 +57,33 @@ assert_file_contains "$show_output" 'Primary review language: EN (English)' 'glo
 assert_file_contains "$show_output" 'Cross-review language: UA (Ukrainian)' 'phase language overrides the global language'
 assert_file_contains "$show_output" 'alpha: skill=' 'empty optional skill configuration is accepted'
 assert_file_contains "$show_output" 'Primary finding contract: markdown' 'Markdown remains the backward-compatible primary contract default'
+assert_file_contains "$show_output" 'Cross-review finding contract: markdown' 'Markdown remains the backward-compatible cross-review contract default'
 
 ndjson_config="$test_root/ndjson.json"
 ndjson_output="$test_root/ndjson-show-config.txt"
 jq '.reporting.finding_contract = {primary: "ndjson-v1"}' "$config_file" >"$ndjson_config"
 "$repo_root/bin/review-pr" --config "$ndjson_config" --show-config >"$ndjson_output"
 assert_file_contains "$ndjson_output" 'Primary finding contract: ndjson-v1' 'ndjson-v1 can be enabled explicitly for primary reviews'
+
+cross_ndjson_config="$test_root/cross-ndjson.json"
+cross_ndjson_output="$test_root/cross-ndjson-show-config.txt"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"}' "$config_file" >"$cross_ndjson_config"
+"$repo_root/bin/review-pr" --config "$cross_ndjson_config" --show-config >"$cross_ndjson_output"
+assert_file_contains "$cross_ndjson_output" 'Cross-review finding contract: ndjson-v1' 'ndjson-v1 can be enabled explicitly for cross-review'
+
+invalid_cross_dependency="$test_root/invalid-cross-dependency.json"
+jq '.reporting.finding_contract = {primary: "markdown", cross_review: "ndjson-v1"}' "$config_file" >"$invalid_cross_dependency"
+if "$repo_root/bin/review-pr" --config "$invalid_cross_dependency" --show-config >/dev/null 2>&1; then
+    fail 'structured cross-review without structured primary findings must fail'
+fi
+pass 'structured cross-review requires structured primary findings'
+
+invalid_cross_comparison="$test_root/invalid-cross-comparison.json"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"} | .reporting.comparison_sections.cross_review = "inline"' "$config_file" >"$invalid_cross_comparison"
+if "$repo_root/bin/review-pr" --config "$invalid_cross_comparison" --show-config >/dev/null 2>&1; then
+    fail 'structured cross-review with inline comparison must fail'
+fi
+pass 'structured cross-review rejects incompatible inline comparison output'
 
 invalid_config="$test_root/invalid.json"
 jq '.reviewers = ["alpha"]' "$config_file" >"$invalid_config"

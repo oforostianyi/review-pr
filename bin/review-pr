@@ -66,6 +66,8 @@ declare -A PRIMARY_OUTPUTS=()
 declare -A PRIMARY_RAW_OUTPUTS=()
 declare -A PRIMARY_FINDINGS_OUTPUTS=()
 declare -A CROSS_OUTPUTS=()
+declare -A CROSS_RAW_OUTPUTS=()
+declare -A CROSS_FINDINGS_OUTPUTS=()
 declare -A PROMPT_FILES=()
 declare -A TEMP_OUTPUTS=()
 declare -A TEMP_LOGS=()
@@ -144,6 +146,7 @@ INCLUDE_COMPARISON_SECTIONS_CONFIGURED=false
 CROSS_COMPARISON_MODE=inline
 FINAL_COMPARISON_MODE=inline
 PRIMARY_FINDING_CONTRACT_MODE=markdown
+CROSS_FINDING_CONTRACT_MODE=markdown
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
@@ -510,8 +513,9 @@ load_config() {
                 (if has("finding_contract") then
                     (.finding_contract |
                         type == "object" and
-                        ((keys - ["primary"]) | length == 0) and
-                        (if has("primary") then (.primary | type == "string" and IN("markdown", "ndjson-v1")) else true end))
+                        ((keys - ["cross_review", "primary"]) | length == 0) and
+                        (if has("primary") then (.primary | type == "string" and IN("markdown", "ndjson-v1")) else true end) and
+                        (if has("cross_review") then (.cross_review | type == "string" and IN("markdown", "ndjson-v1")) else true end))
                  else true end) and
                 (if has("comparison_sections") then
                     (.comparison_sections |
@@ -675,6 +679,13 @@ load_config() {
         end
     ' "$CONFIG_FILE")
     PRIMARY_FINDING_CONTRACT_MODE=$(jq -r '.reporting.finding_contract.primary // "markdown"' "$CONFIG_FILE")
+    CROSS_FINDING_CONTRACT_MODE=$(jq -r '.reporting.finding_contract.cross_review // "markdown"' "$CONFIG_FILE")
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
+            || die 'reporting.finding_contract.cross_review=ndjson-v1 requires primary=ndjson-v1'
+        [[ "$CROSS_COMPARISON_MODE" == none ]] \
+            || die 'Structured cross-review requires reporting.comparison_sections.cross_review=none'
+    fi
     STATUS_INTERVAL_SECONDS=$(jq -r '.status.log_interval_seconds // .status_interval_seconds // 30' "$CONFIG_FILE")
     STATUS_MODE=$(jq -r '.status.mode // "auto"' "$CONFIG_FILE")
     STATUS_COLOR_MODE=$(jq -r '.status.color // "auto"' "$CONFIG_FILE")
@@ -2544,6 +2555,7 @@ show_configuration() {
     printf 'Status log interval: %ss\n' "$STATUS_INTERVAL_SECONDS"
     printf 'Show process IDs: %s\n' "$STATUS_SHOW_PID"
     printf 'Primary finding contract: %s\n' "$PRIMARY_FINDING_CONTRACT_MODE"
+    printf 'Cross-review finding contract: %s\n' "$CROSS_FINDING_CONTRACT_MODE"
     printf 'Cross-review prompt: %s\n' "$CROSS_PROMPT_SOURCE"
     printf 'Final prompt: %s\n' "$FINAL_PROMPT_SOURCE"
     for agent in "${CONFIGURED_REVIEWERS[@]}" "$FINAL_SYNTHESIZER"; do
@@ -2851,6 +2863,267 @@ process_primary_ndjson_output() {
     PRIMARY_FINDINGS_OUTPUTS[$agent]=$findings_target
 }
 
+build_cross_expected_refs() {
+    local reviewer=$1
+    local output_file=$2
+    local agent
+    local -a input_files=()
+
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        [[ "$agent" == "$reviewer" ]] && continue
+        [[ -s "${PRIMARY_FINDINGS_OUTPUTS[$agent]:-}" ]] || return 1
+        input_files+=("${PRIMARY_FINDINGS_OUTPUTS[$agent]}")
+    done
+    (( ${#input_files[@]} > 0 )) || return 1
+    jq -s '
+        [ .[] as $report |
+          $report.agent as $agent |
+          $report.findings[] |
+          {agent: $agent, source_id: .source_id}
+        ] | sort_by(.agent, .source_id)
+    ' "${input_files[@]}" >"$output_file"
+}
+
+validate_cross_ndjson_records() {
+    local records_file=$1
+    local canonical_file=$2
+    local agent=$3
+    local expected_refs_file=$4
+
+    [[ -s "$CHANGED_LINE_MAP_FILE" && -s "$expected_refs_file" ]] || return 1
+    jq -e --arg agent "$agent" \
+        --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
+        --slurpfile expected_refs "$expected_refs_file" '
+        def string_array:
+            type == "array" and all(.[]; type == "string");
+        def exact_keys($allowed):
+            ((keys - $allowed) | length) == 0;
+        def valid_anchor:
+            type == "object" and
+            exact_keys(["end", "file", "kind", "start"]) and
+            has("kind") and has("file") and has("start") and has("end") and
+            if .kind == "changed-line" then
+                (.file | type == "string" and length > 0) and
+                (.start | type == "number" and floor == . and . >= 1) and
+                (.end | type == "number" and floor == . and . >= 1) and
+                (.start <= .end) and
+                (. as $anchor |
+                    any($changed_lines[0].files[];
+                        .path == $anchor.file and
+                        .inline_anchorable == true and
+                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+            elif .kind == "pr-level" then
+                .file == null and .start == null and .end == null
+            else false
+            end;
+        def valid_existing_feedback:
+            type == "object" and
+            exact_keys(["state", "thread_ids"]) and
+            has("state") and has("thread_ids") and
+            (.state | IN("new", "confirmed-existing", "historical", "unknown")) and
+            (.thread_ids | type == "array" and all(.[]; type == "string" and length > 0) and (unique | length) == length) and
+            (if .state == "new" then (.thread_ids | length) == 0
+             elif (.state == "confirmed-existing" or .state == "historical") then (.thread_ids | length) > 0
+             else true end);
+        def valid_source_ref:
+            type == "object" and exact_keys(["agent", "source_id"]) and
+            (.agent | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+            (.source_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"));
+        def valid_finding:
+            . as $record |
+            type == "object" and
+            exact_keys(["anchor", "category", "claim", "classification", "contributing_agents", "evidence", "existing_feedback", "failure_scenario", "recommendation", "record", "schema_version", "severity", "source_id", "source_refs", "title", "verification_limitations"]) and
+            has("anchor") and has("category") and has("claim") and has("classification") and
+            has("contributing_agents") and has("evidence") and has("existing_feedback") and
+            has("failure_scenario") and has("recommendation") and has("record") and
+            has("schema_version") and has("severity") and has("source_id") and has("source_refs") and
+            has("title") and has("verification_limitations") and
+            .record == "finding" and .schema_version == 1 and
+            (.source_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]*$")) and
+            (.title | type == "string" and length > 0) and
+            (.claim | type == "string" and length > 0) and
+            (.anchor | valid_anchor) and
+            (.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
+            (.failure_scenario | type == "string" and length > 0) and
+            (.recommendation | type == "string" and length > 0) and
+            (.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) and
+            (if .classification == "CONFIRMED" then (.severity | IN("P0", "P1", "P2", "P3")) else .severity == null end) and
+            (.category | type == "string" and length > 0) and
+            (.source_refs | type == "array" and length > 0 and all(.[]; valid_source_ref) and (unique_by(.agent, .source_id) | length) == length) and
+            (.contributing_agents | type == "array" and length > 0 and all(.[]; type == "string" and length > 0) and
+                (sort == ([$record.source_refs[].agent] | unique | sort))) and
+            (.verification_limitations | string_array) and
+            (.existing_feedback | valid_existing_feedback);
+        def valid_complete:
+            type == "object" and
+            exact_keys(["finding_count", "positive_evidence", "record", "schema_version", "summary", "verification_limitations"]) and
+            has("finding_count") and has("positive_evidence") and has("record") and
+            has("schema_version") and has("summary") and has("verification_limitations") and
+            .record == "complete" and .schema_version == 1 and
+            (.finding_count | type == "number" and floor == . and . >= 0) and
+            (.summary | type == "string") and
+            (.verification_limitations | string_array) and
+            (.positive_evidence | string_array);
+
+        type == "array" and length >= 1 and
+        (.[-1] | valid_complete) and
+        ([.[] | select(.record == "complete")] | length) == 1 and
+        (all(.[0:-1][]; valid_finding)) and
+        (.[-1].finding_count == (length - 1)) and
+        (([.[0:-1][].source_id] | unique | length) == (length - 1)) and
+        (([.[0:-1][].source_refs[]] | unique_by(.agent, .source_id) | sort_by(.agent, .source_id)) == $expected_refs[0])
+    ' "$records_file" >/dev/null || return 1
+
+    jq --arg agent "$agent" --slurpfile expected_refs "$expected_refs_file" '{
+        contract: "ndjson-v1",
+        schema_version: 1,
+        phase: "cross-review",
+        agent: $agent,
+        complete: true,
+        finding_count: .[-1].finding_count,
+        input_refs: $expected_refs[0],
+        findings: .[0:-1],
+        summary: .[-1].summary,
+        verification_limitations: .[-1].verification_limitations,
+        positive_evidence: .[-1].positive_evidence
+    }' "$records_file" >"$canonical_file"
+}
+
+render_cross_findings_markdown() {
+    local canonical_file=$1
+    local output_file=$2
+    local language=$3
+    local heading='## Finding classifications'
+    local no_findings='_No source findings were supplied._'
+    local source_label='Source findings'
+    local claim_label='Claim'
+    local file_label='File'
+    local line_label='Line'
+    local failure_label='Failure scenario'
+    local evidence_label='Verification evidence'
+    local recommendation_label='Recommendation'
+    local category_label='Category'
+    local feedback_label='Existing feedback'
+    local limitation_label='Verification limitations'
+    local summary_heading='## Cross-review summary'
+    local limitations_heading='## Verification limitations'
+    local positive_heading='## Positive evidence'
+    local none='_None._'
+
+    if [[ "$language" == UA ]]; then
+        heading='## Класифікація знахідок'
+        no_findings='_Вхідних знахідок немає._'
+        source_label='Вхідні знахідки'
+        claim_label='Твердження'
+        file_label='Файл'
+        line_label='Рядок'
+        failure_label='Сценарій збою'
+        evidence_label='Докази перевірки'
+        recommendation_label='Рекомендація'
+        category_label='Категорія'
+        feedback_label='Наявний зворотний зв’язок'
+        limitation_label='Обмеження перевірки'
+        summary_heading='## Підсумок cross-review'
+        limitations_heading='## Обмеження перевірки'
+        positive_heading='## Позитивні докази'
+        none='_Немає._'
+    fi
+
+    jq -r \
+        --arg heading "$heading" --arg no_findings "$no_findings" \
+        --arg source_label "$source_label" --arg claim_label "$claim_label" \
+        --arg file_label "$file_label" --arg line_label "$line_label" \
+        --arg failure_label "$failure_label" --arg evidence_label "$evidence_label" \
+        --arg recommendation_label "$recommendation_label" --arg category_label "$category_label" \
+        --arg feedback_label "$feedback_label" --arg limitation_label "$limitation_label" \
+        --arg summary_heading "$summary_heading" --arg limitations_heading "$limitations_heading" \
+        --arg positive_heading "$positive_heading" --arg none "$none" '
+        def bullets($values):
+            if ($values | length) == 0 then $none else ($values | map("- " + .) | join("\n")) end;
+        def anchor_text:
+            if .kind == "changed-line" then
+                $file_label + ": `" + .file + "`\n" + $line_label + ": `" +
+                (if .start == .end then (.start | tostring) else ((.start | tostring) + "-" + (.end | tostring)) end) + "`"
+            else $file_label + ": —\n" + $line_label + ": —" end;
+        $heading + "\n\n" +
+        (if (.findings | length) == 0 then $no_findings
+         else ([.findings[] |
+            (if .anchor.kind == "changed-line" then "<!-- review-pr:anchor:changed-line -->" else "<!-- review-pr:anchor:pr-level -->" end) + "\n" +
+            "### [" + .classification + (if .severity == null then "" else "/" + .severity end) + "] " + .title + "\n\n" +
+            $source_label + ": " + ([.source_refs[] | "`" + .agent + ":" + .source_id + "`"] | join(", ")) + "\n\n" +
+            (.anchor | anchor_text) + "\n\n" +
+            $claim_label + ":\n\n" + .claim + "\n\n" +
+            $failure_label + ":\n\n" + .failure_scenario + "\n\n" +
+            $evidence_label + ":\n\n" + bullets(.evidence) + "\n\n" +
+            $recommendation_label + ":\n\n" + .recommendation + "\n\n" +
+            $category_label + ": `" + .category + "`\n\n" +
+            $feedback_label + ": `" + .existing_feedback.state + "`" +
+                (if (.existing_feedback.thread_ids | length) == 0 then "" else " — " + (.existing_feedback.thread_ids | join(", ")) end) + "\n\n" +
+            $limitation_label + ":\n\n" + bullets(.verification_limitations)
+         ] | join("\n\n")) end) + "\n\n" +
+        $summary_heading + "\n\n" + (if .summary == "" then $none else .summary end) + "\n\n" +
+        $limitations_heading + "\n\n" + bullets(.verification_limitations) + "\n\n" +
+        $positive_heading + "\n\n" + bullets(.positive_evidence)
+    ' "$canonical_file" >"$output_file"
+}
+
+process_cross_ndjson_output() {
+    local output_file=$1
+    local agent=$2
+    local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line
+    local line_number=0
+    local raw_target=${CROSS_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson}
+    local findings_target=${CROSS_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json}
+
+    FINDING_CONTRACT_FAILURE_REASON=""
+    new_temp_file "cross-${agent}-ndjson-normalized"; normalized_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-ndjson-records"; records_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-findings"; canonical_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-rendered"; rendered_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-raw"; raw_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-ndjson-array"; records_array_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-expected-refs"; expected_refs_file=$NEW_TEMP_FILE
+    cp -- "$output_file" "$raw_file"
+
+    if ! build_cross_expected_refs "$agent" "$expected_refs_file"; then
+        FINDING_CONTRACT_FAILURE_REASON=missing_canonical_primary_inputs
+        return 1
+    fi
+    if ! normalize_primary_ndjson_stream "$output_file" "$normalized_file" || [[ ! -s "$normalized_file" ]]; then
+        FINDING_CONTRACT_FAILURE_REASON=invalid_transport_wrapper
+        return 1
+    fi
+    : >"$records_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
+        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
+            FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
+            return 1
+        fi
+    done <"$normalized_file"
+    jq -s '.' "$records_file" >"$records_array_file" || {
+        FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
+        return 1
+    }
+    mv -- "$records_array_file" "$records_file"
+    if ! validate_cross_ndjson_records "$records_file" "$canonical_file" "$agent" "$expected_refs_file"; then
+        FINDING_CONTRACT_FAILURE_REASON=schema_provenance_or_completeness_validation_failed
+        return 1
+    fi
+    if ! render_cross_findings_markdown "$canonical_file" "$rendered_file" "$CROSS_REVIEW_LANGUAGE" || [[ ! -s "$rendered_file" ]]; then
+        FINDING_CONTRACT_FAILURE_REASON=markdown_render_failed
+        return 1
+    fi
+
+    assert_new_target "$raw_target"
+    assert_new_target "$findings_target"
+    mv -- "$raw_file" "$raw_target"
+    mv -- "$canonical_file" "$findings_target"
+    mv -- "$rendered_file" "$output_file"
+    CROSS_RAW_OUTPUTS[$agent]=$raw_target
+    CROSS_FINDINGS_OUTPUTS[$agent]=$findings_target
+}
+
 build_primary_repair_baseline() {
     local input_file=$1
     local baseline_file=$2
@@ -3140,7 +3413,8 @@ preserve_agent_failure_artifacts() {
         activity_log "Raw Pi events: ${destination}"
     fi
     if [[ -s "$output_file" ]]; then
-        if [[ "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        if [[ "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
+            || [[ "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
             destination="${artifact_base}-${partial_suffix}-raw.ndjson"
         else
             destination="${artifact_base}-${partial_suffix}.md"
@@ -3230,6 +3504,9 @@ write_cross_prompt() {
     local report_label
     local report_path
     local comparison_prompt_block
+    local output_contract_block
+    local header_instruction
+    local input_agent
     shift 2
 
     (( $# >= 2 && $# % 2 == 0 )) || die "Cross-review prompt for ${reviewer} needs label/report pairs"
@@ -3250,6 +3527,28 @@ EOF
 )
     else
         comparison_prompt_block='Extended comparison sections are disabled for cross-review by reporting.comparison_sections.cross_review. Do not add Conclusion, Sources, reviewer-attribution matrix, Agreements/Disagreements, Review-depth comparison, or Agreed actions sections, even if a custom prompt or skill requests them. Return the required classification content and any configured new-findings content only.'
+    fi
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        comparison_prompt_block='Extended comparison sections are disabled for structured cross-review. Do not add comparison prose, tables, or new findings; return only the required source classifications.'
+        header_instruction='The orchestrator renders and adds the canonical PR/author/agent/model metadata header. Do not emit a Markdown header or any prose.'
+        output_contract_block=$(cat <<'EOF'
+Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text.
+
+Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of {"agent":"input-agent-key","source_id":"input-source-id"}. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
+
+- record must be "finding", schema_version 1, and source_id unique within this cross-review.
+- classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN.
+- CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
+- contributing_agents must equal the unique agent keys in source_refs.
+- Preserve the standard anchor, evidence, failure_scenario, recommendation, category, verification_limitations, and existing_feedback shapes defined for ndjson-v1.
+- A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Use pr-level only for a genuine PR-wide issue.
+
+Finish with exactly one complete record and nothing after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs.
+EOF
+)
+    else
+        header_instruction='The orchestrator adds the canonical PR/author/agent/model metadata header after you return. Do not output or repeat that header yourself; begin directly with the required classification section.'
+        output_contract_block='Return the complete Markdown cross-review as your final response. Do not wrap the entire response in a code fence.'
     fi
 
     cat >"$prompt_file" <<EOF
@@ -3275,31 +3574,45 @@ ${EXISTING_FEEDBACK_INSTRUCTION}
 
 Do not check out or switch branches. Do not modify production code. Do not create directories or review files, and do not decide an output path. Filesystem persistence is handled externally by the orchestrator.
 
-The orchestrator adds the canonical PR/author/agent/model metadata header after you return. Do not output or repeat that header yourself; begin directly with the required classification section.
+${header_instruction}
 
 ${CROSS_REVIEW_INSTRUCTIONS}
 
 ${comparison_prompt_block}
 
-Output language: ${CROSS_REVIEW_LANGUAGE_NAME} (${CROSS_REVIEW_LANGUAGE}). Write all reader-facing cross-review prose and localized table headings/column labels in this language. Keep the classification values CONFIRMED, REJECTED, and UNCERTAIN and severity values P0, P1, P2, and P3 exactly as written. If an available skill or custom formatting instruction specifies another report language, this orchestrator requirement takes precedence.
+Output language: ${CROSS_REVIEW_LANGUAGE_NAME} (${CROSS_REVIEW_LANGUAGE}). Write all reader-facing strings, prose, and any localized labels in this language. Keep the classification values CONFIRMED, REJECTED, and UNCERTAIN and severity values P0, P1, P2, and P3 exactly as written. If an available skill or custom formatting instruction specifies another report language, this orchestrator requirement takes precedence.
 
-Return the complete Markdown cross-review as your final response. Do not wrap the entire response in a code fence.
+${output_contract_block}
 EOF
 
     append_configured_skill_to_prompt "$prompt_file"
     append_repository_facts_to_prompt "$prompt_file"
-    while (( $# >= 2 )); do
-        report_label=$1
-        report_path=$2
-        shift 2
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        for input_agent in "${REVIEW_AGENTS[@]}"; do
+            [[ "$input_agent" == "$reviewer" ]] && continue
+            report_path=${PRIMARY_FINDINGS_OUTPUTS[$input_agent]}
+            [[ -s "$report_path" ]] || die "Canonical primary findings are missing for structured cross-review: ${input_agent}"
+            {
+                printf '\n===== BEGIN CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
+                cat -- "$report_path"
+                printf '\n===== END CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
+            } >>"$prompt_file"
+        done
+        append_changed_line_map_to_prompt "$prompt_file"
+    else
+        while (( $# >= 2 )); do
+            report_label=$1
+            report_path=$2
+            shift 2
 
-        {
-            printf '\n===== BEGIN PRIMARY REPORT: %s =====\n' "$report_label"
-            printf 'Artifact: `%s`\n\n' "${report_path##*/}"
-            cat -- "$report_path"
-            printf '\n===== END PRIMARY REPORT: %s =====\n' "$report_label"
-        } >>"$prompt_file"
-    done
+            {
+                printf '\n===== BEGIN PRIMARY REPORT: %s =====\n' "$report_label"
+                printf 'Artifact: `%s`\n\n' "${report_path##*/}"
+                cat -- "$report_path"
+                printf '\n===== END PRIMARY REPORT: %s =====\n' "$report_label"
+            } >>"$prompt_file"
+        done
+    fi
 
     append_github_context_to_prompt "$prompt_file"
 }
@@ -3771,6 +4084,8 @@ run_configured_command_in_worktree() {
 
     if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
+    elif [[ "$phase" == "cross-review" ]]; then
+        output_contract=$CROSS_FINDING_CONTRACT_MODE
     fi
 
     if [[ "$RERUN_FINAL" == true && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) ]]; then
@@ -3921,6 +4236,11 @@ start_agent() {
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete ndjson-v1 stream with no Markdown or prose'
+        fi
+    elif [[ "$phase" == "cross-review" ]]; then
+        output_contract=$CROSS_FINDING_CONTRACT_MODE
+        if [[ "$output_contract" == ndjson-v1 ]]; then
+            output_contract_description='complete cross-review ndjson-v1 stream with explicit source_refs and no Markdown or prose'
         fi
     fi
 
@@ -4720,6 +5040,12 @@ run_review_phase() {
                     fi
                 fi
             fi
+            if [[ -z "$failure_reason" && "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+                if ! process_cross_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
+                    failure_reason="invalid cross-review ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
+                    printf 'cross-review ndjson-v1 validation failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                fi
+            fi
             if [[ -z "$failure_reason" ]]; then
                 prepend_agent_report_header \
                     "${TEMP_OUTPUTS[$agent]}" \
@@ -4843,6 +5169,8 @@ create_full_manifest() {
     local cross_usage_json='{}'
     local primary_raw_json='{}'
     local primary_findings_json='{}'
+    local cross_raw_json='{}'
+    local cross_findings_json='{}'
     local configured_concurrency_json=null
     local agent
     local temp_manifest
@@ -4876,6 +5204,14 @@ create_full_manifest() {
             --arg agent "$agent" \
             --arg file "${REPORT_STEM}-${agent}-findings.json" \
             '. + {($agent): $file}' <<<"$primary_findings_json")
+        cross_raw_json=$(jq -c \
+            --arg agent "$agent" \
+            --arg file "${REPORT_STEM}-cross-${agent}-raw.ndjson" \
+            '. + {($agent): $file}' <<<"$cross_raw_json")
+        cross_findings_json=$(jq -c \
+            --arg agent "$agent" \
+            --arg file "${REPORT_STEM}-cross-${agent}-findings.json" \
+            '. + {($agent): $file}' <<<"$cross_findings_json")
         cross_usage_json=$(jq -c \
             --arg agent "$agent" \
             --arg file "${WORK_DIR}/${REPORT_STEM}-cross-${agent}-usage.json" \
@@ -4924,6 +5260,7 @@ create_full_manifest() {
         --arg cross_comparison_mode "$CROSS_COMPARISON_MODE" \
         --arg final_comparison_mode "$FINAL_COMPARISON_MODE" \
         --arg primary_finding_contract "$PRIMARY_FINDING_CONTRACT_MODE" \
+        --arg cross_finding_contract "$CROSS_FINDING_CONTRACT_MODE" \
         --arg comparison "${COMPARISON_REPORT##*/}" \
         --arg comparison_usage "${COMPARISON_USAGE_OUTPUT##*/}" \
         --arg comparison_status "$([[ "$FINAL_COMPARISON_MODE" == standalone ]] && printf pending || printf skipped)" \
@@ -4934,6 +5271,8 @@ create_full_manifest() {
         --argjson primary_usage "$primary_usage_json" \
         --argjson primary_raw "$primary_raw_json" \
         --argjson primary_findings "$primary_findings_json" \
+        --argjson cross_raw "$cross_raw_json" \
+        --argjson cross_findings "$cross_findings_json" \
         --argjson cross_review_usage "$cross_usage_json" \
         --arg github_context "${PR_CONTEXT_FILE##*/}" \
         --arg repository_facts_json "${REPOSITORY_FACTS_JSON_FILE##*/}" \
@@ -4993,7 +5332,8 @@ create_full_manifest() {
             reporting: {
                 include_comparison_sections: $include_comparison_sections,
                 finding_contract: {
-                    primary: $primary_finding_contract
+                    primary: $primary_finding_contract,
+                    cross_review: $cross_finding_contract
                 },
                 comparison_sections: {
                     cross_review: $cross_comparison_mode,
@@ -5011,6 +5351,8 @@ create_full_manifest() {
                 primary_raw: (if $primary_finding_contract == "ndjson-v1" then $primary_raw else null end),
                 primary_findings: (if $primary_finding_contract == "ndjson-v1" then $primary_findings else null end),
                 cross_review: $cross_review,
+                cross_review_raw: (if $cross_finding_contract == "ndjson-v1" then $cross_raw else null end),
+                cross_review_findings: (if $cross_finding_contract == "ndjson-v1" then $cross_findings else null end),
                 final: $final,
                 final_anchor_validation: $anchor_validation,
                 comparison: (if $comparison == "" then null else $comparison end),
@@ -5536,6 +5878,8 @@ load_resume_run() {
     local expected_file
     local phase_status
     local manifest_contract
+    local manifest_cross_contract
+    local manifest_cross_comparison
 
     [[ -n "$RUN_SELECTOR" ]] || die "Resume requires --run <timestamp>"
     candidate="${WORK_DIR}/${REVIEW_ID}-${RUN_SELECTOR}-manifest.json"
@@ -5566,11 +5910,27 @@ load_resume_run() {
     [[ "$manifest_contract" == markdown || "$manifest_contract" == ndjson-v1 ]] \
         || die "Selected run uses an unsupported primary finding contract: ${manifest_contract}"
     PRIMARY_FINDING_CONTRACT_MODE=$manifest_contract
+    manifest_cross_contract=$(jq -r '.reporting.finding_contract.cross_review // "markdown"' "$SOURCE_MANIFEST")
+    [[ "$manifest_cross_contract" == markdown || "$manifest_cross_contract" == ndjson-v1 ]] \
+        || die "Selected run uses an unsupported cross-review finding contract: ${manifest_cross_contract}"
+    if [[ "$manifest_cross_contract" == ndjson-v1 && "$manifest_contract" != ndjson-v1 ]]; then
+        die 'Selected run has structured cross-review without structured primary findings'
+    fi
+    CROSS_FINDING_CONTRACT_MODE=$manifest_cross_contract
+    manifest_cross_comparison=$(jq -r '.reporting.comparison_sections.cross_review // "none"' "$SOURCE_MANIFEST")
+    [[ "$manifest_cross_comparison" == none || "$manifest_cross_comparison" == inline ]] \
+        || die "Selected run uses an unsupported cross-review comparison mode: ${manifest_cross_comparison}"
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 && "$manifest_cross_comparison" != none ]]; then
+        die 'Selected run combines structured cross-review with incompatible inline comparison output'
+    fi
+    CROSS_COMPARISON_MODE=$manifest_cross_comparison
     mapfile -t REVIEW_AGENTS < <(jq -r '.reviewers[]' "$SOURCE_MANIFEST")
     PRIMARY_OUTPUTS=()
     PRIMARY_RAW_OUTPUTS=()
     PRIMARY_FINDINGS_OUTPUTS=()
     CROSS_OUTPUTS=()
+    CROSS_RAW_OUTPUTS=()
+    CROSS_FINDINGS_OUTPUTS=()
     for agent in "${REVIEW_AGENTS[@]}"; do
         [[ "$agent" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid reviewer in selected run manifest: ${agent}"
         [[ "${AGENT_ENABLED[$agent]:-false}" == true ]] || die "Reviewer ${agent} from the selected run is disabled or missing in the current configuration"
@@ -5606,6 +5966,22 @@ load_resume_run() {
         configured_file=$(jq -r --arg agent "$agent" '.artifacts.cross_review[$agent] // ""' "$SOURCE_MANIFEST")
         [[ "$configured_file" == "$expected_file" ]] || die "Unexpected cross-review artifact for ${agent} in selected run"
         CROSS_OUTPUTS[$agent]="${WORK_DIR}/${expected_file}"
+        if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+            expected_file="${REPORT_STEM}-cross-${agent}-raw.ndjson"
+            configured_file=$(jq -r --arg agent "$agent" '.artifacts.cross_review_raw[$agent] // ""' "$SOURCE_MANIFEST")
+            [[ "$configured_file" == "$expected_file" ]] || die "Unexpected cross-review raw artifact for ${agent} in selected run"
+            CROSS_RAW_OUTPUTS[$agent]="${WORK_DIR}/${expected_file}"
+            expected_file="${REPORT_STEM}-cross-${agent}-findings.json"
+            configured_file=$(jq -r --arg agent "$agent" '.artifacts.cross_review_findings[$agent] // ""' "$SOURCE_MANIFEST")
+            [[ "$configured_file" == "$expected_file" ]] || die "Unexpected cross-review findings artifact for ${agent} in selected run"
+            CROSS_FINDINGS_OUTPUTS[$agent]="${WORK_DIR}/${expected_file}"
+            if [[ -s "${CROSS_OUTPUTS[$agent]}" ]]; then
+                [[ -s "${CROSS_RAW_OUTPUTS[$agent]}" && ! -L "${CROSS_RAW_OUTPUTS[$agent]}" ]] \
+                    || die "Selected run is missing cross-review raw NDJSON for ${agent}"
+                [[ -s "${CROSS_FINDINGS_OUTPUTS[$agent]}" && ! -L "${CROSS_FINDINGS_OUTPUTS[$agent]}" ]] \
+                    || die "Selected run is missing canonical cross-review findings for ${agent}"
+            fi
+        fi
     done
 
     configured_file=$(jq -r '.artifacts.github_context // ""' "$SOURCE_MANIFEST")
@@ -7293,6 +7669,10 @@ for agent in "${REVIEW_AGENTS[@]}"; do
         PRIMARY_RAW_OUTPUTS[$agent]="${WORK_DIR}/${REPORT_STEM}-${agent}-raw.ndjson"
         PRIMARY_FINDINGS_OUTPUTS[$agent]="${WORK_DIR}/${REPORT_STEM}-${agent}-findings.json"
     fi
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        CROSS_RAW_OUTPUTS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson"
+        CROSS_FINDINGS_OUTPUTS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json"
+    fi
 done
 FINAL_REPORT="${REPORT_DIR}/${REPORT_STEM}-final.md"
 FINAL_USAGE_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-usage.json"
@@ -7310,6 +7690,11 @@ for target in "${PRIMARY_OUTPUTS[@]}" "${CROSS_OUTPUTS[@]}" "$FINAL_REPORT" "$FI
 done
 if [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
     for target in "${PRIMARY_RAW_OUTPUTS[@]}" "${PRIMARY_FINDINGS_OUTPUTS[@]}"; do
+        assert_new_target "$target"
+    done
+fi
+if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+    for target in "${CROSS_RAW_OUTPUTS[@]}" "${CROSS_FINDINGS_OUTPUTS[@]}"; do
         assert_new_target "$target"
     done
 fi

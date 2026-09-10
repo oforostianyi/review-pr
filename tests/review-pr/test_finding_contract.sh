@@ -76,6 +76,44 @@ sed -n '$p' "$test_dir/fixtures/primary-findings-valid.ndjson" >>"$missing_claim
 assert_false 'a finding missing substantive content is ineligible for repair' \
     build_primary_repair_baseline "$missing_claim" "$test_root/missing-claim-baseline.json"
 
+cross_records="$test_root/cross-records.json"
+cross_expected_refs="$test_root/cross-expected-refs.json"
+cross_canonical="$test_root/cross-canonical.json"
+printf '%s\n' '[{"agent":"beta","source_id":"beta:F-001"}]' >"$cross_expected_refs"
+jq -n '{
+    record: "finding", schema_version: 1, source_id: "alpha:C-001",
+    source_refs: [{agent: "beta", source_id: "beta:F-001"}],
+    title: "Fixture cross classification", claim: "The changed branch can fail.",
+    anchor: {kind: "changed-line", file: "src/Changed.php", start: 10, end: 10},
+    evidence: ["The changed line confirms the failure path."],
+    failure_scenario: "The request reaches the changed branch.",
+    recommendation: "Correct the changed branch.", classification: "CONFIRMED",
+    severity: "P1", category: "correctness", contributing_agents: ["beta"],
+    verification_limitations: [], existing_feedback: {state: "new", thread_ids: []}
+}, {
+    record: "complete", schema_version: 1, finding_count: 1,
+    summary: "One source finding confirmed.", verification_limitations: [], positive_evidence: []
+}' | jq -s '.' >"$cross_records"
+assert_true 'valid cross-review records preserve complete source provenance' \
+    validate_cross_ndjson_records "$cross_records" "$cross_canonical" alpha "$cross_expected_refs"
+assert_eq 'beta:beta:F-001' "$(jq -r '.input_refs[0] | .agent + ":" + .source_id' "$cross_canonical")" \
+    'canonical cross-review stores namespaced input provenance'
+
+missing_cross_ref="$test_root/cross-missing-ref.json"
+jq '.[0].source_refs = [{agent: "beta", source_id: "beta:F-002"}]' "$cross_records" >"$missing_cross_ref"
+assert_false 'cross-review rejects missing and unknown source provenance' \
+    validate_cross_ndjson_records "$missing_cross_ref" "$test_root/cross-missing-ref-canonical.json" alpha "$cross_expected_refs"
+
+rejected_with_severity="$test_root/cross-rejected-severity.json"
+jq '.[0].classification = "REJECTED"' "$cross_records" >"$rejected_with_severity"
+assert_false 'rejected cross-review findings cannot retain actionable severity' \
+    validate_cross_ndjson_records "$rejected_with_severity" "$test_root/cross-rejected-severity-canonical.json" alpha "$cross_expected_refs"
+
+wrong_contributor="$test_root/cross-wrong-contributor.json"
+jq '.[0].contributing_agents = ["alpha"]' "$cross_records" >"$wrong_contributor"
+assert_false 'cross-review contributing agents must match source provenance' \
+    validate_cross_ndjson_records "$wrong_contributor" "$test_root/cross-wrong-contributor-canonical.json" alpha "$cross_expected_refs"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

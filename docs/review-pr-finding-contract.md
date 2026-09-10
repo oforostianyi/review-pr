@@ -1,9 +1,9 @@
 # Portable atomic-finding contract
 
 Status: accepted on 2026-09-10; implementation is proceeding as an opt-in staged rollout.
-The primary-review parser, canonical sidecar, and deterministic renderer are implemented; structured
-cross-review/final output remains a later rollout step. Primary output also has a bounded,
-field-stable schema-repair pass before any ordinary whole-review retry.
+The primary and cross-review parsers, canonical sidecars, and deterministic renderers are
+implemented; structured final output remains a later rollout step. Primary output also has a
+bounded, field-stable schema-repair pass before any ordinary whole-review retry.
 
 ## Problem
 
@@ -52,9 +52,11 @@ Required finding fields:
 - `verification_limitations`;
 - `existing_feedback.state`: `new`, `confirmed-existing`, `historical`, or `unknown`, with thread IDs when known.
 
-Cross-review records additionally reference the input `source_id` values they classify. A compound
-source claim must become multiple records so each classification remains atomic. Consolidation may
-merge duplicate records, but it must retain every source ID and contributing agent.
+Cross-review records additionally contain `source_refs`, a non-empty array of `{agent, source_id}`
+objects. The agent key makes source-local IDs unambiguous across reports. Every supplied source ref
+must be covered and unknown refs are rejected. A compound source claim may become multiple records
+so each classification remains atomic. Consolidation may merge duplicate records, but it retains
+every source ref and contributing agent.
 
 ## Artifact flow
 

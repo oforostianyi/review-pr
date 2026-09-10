@@ -122,6 +122,21 @@
         }
       ]
     },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "source_id"],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        }
+      }
+    },
     "finding": {
       "type": "object",
       "additionalProperties": false,
@@ -206,6 +221,14 @@
         },
         "existing_feedback": {
           "$ref": "#/$defs/existingFeedback"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
         }
       }
     },
