@@ -58,6 +58,42 @@ must be covered and unknown refs are rejected. A compound source claim may becom
 so each classification remains atomic. Consolidation may merge duplicate records, but it retains
 every source ref and contributing agent.
 
+## Accepted structured final-synthesis design
+
+The final phase will use the same NDJSON transport and finding vocabulary, but its `source_refs`
+point to cross-review records rather than directly to primary records. The phase is therefore
+unambiguous without globally unique model-generated IDs: `{agent, source_id}` is interpreted against
+the canonical sidecars supplied for that phase.
+
+The final runtime must enforce these rules:
+
+- `final: "ndjson-v1"` is opt-in and requires structured primary and cross-review inputs;
+- the finalizer receives canonical cross-review JSON, never localized cross-review Markdown as its
+  machine input, and never receives report text as executable instructions;
+- every cross-review `{agent, source_id}` must be referenced by at least one final record, while an
+  unknown reference is invalid;
+- genuine duplicates may be merged and compound claims may be split, but source provenance cannot
+  be dropped; no source-free new finding is allowed in synthesis;
+- classification is `CONFIRMED`, `REJECTED`, or `UNCERTAIN`; only `CONFIRMED` carries `P0`–`P3`;
+- the orchestrator derives transitive primary provenance from the validated cross-review graph. The
+  model does not restate or invent primary provenance;
+- source code and concrete evidence remain authoritative: coverage proves that a claim was
+  considered, not that majority voting decided it;
+- one additional final-only boolean will state whether an important rejected decision belongs in
+  the human `Rejected findings` section. It does not affect classification;
+- the terminal `complete` record remains mandatory and no records may follow it.
+
+The deterministic final renderer will own the PR heading and two-column metadata table, the full
+classification table, detailed actionable sections for confirmed findings, and the optional
+important-rejections section. It will generate the existing language-independent anchor markers so
+the current exact RIGHT-side anchor validator remains authoritative. Reader-facing strings are
+localized; enums, IDs, provenance, and validation controls are not.
+
+Final schema repair will be bounded separately from semantic synthesis. It may repair transport or
+record metadata only after all decision records are safely parseable, and must keep classification,
+severity, cross-review refs, derived primary provenance, anchors, and substantive fields stable.
+Failure preserves the original and repair responses and publishes no canonical final report.
+
 ## Artifact flow
 
 For each phase, the orchestrator should preserve three distinct artifacts:

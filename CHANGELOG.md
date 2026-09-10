@@ -26,6 +26,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Changed
 
+- Documented the accepted structured final-synthesis provenance, coverage, rendering, and bounded
+  repair design before enabling the runtime contract.
 - Extracted the utility into a standalone, repository-neutral source layout with root installation,
   release, and documentation files.
 - The distributed example now uses neutral repository/profile placeholders and no preconfigured
