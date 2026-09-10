@@ -2,7 +2,8 @@
 
 Status: accepted on 2026-09-10; implementation is proceeding as an opt-in staged rollout.
 The primary-review parser, canonical sidecar, and deterministic renderer are implemented; structured
-cross-review/final output and the dedicated schema-repair pass remain later rollout steps.
+cross-review/final output remains a later rollout step. Primary output also has a bounded,
+field-stable schema-repair pass before any ordinary whole-review retry.
 
 ## Problem
 
