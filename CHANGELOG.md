@@ -20,6 +20,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   substantive-field stability checks, original/rejected-response diagnostics, and multi-pass usage.
 - Opt-in structured cross-review with namespaced source provenance, complete input coverage,
   phase-specific severity validation, deterministic EN/UA Markdown, and manifest-backed resume.
+- One bounded structured cross-review schema-repair pass that freezes classification, severity,
+  source provenance, contributing agents, anchors, and substantive content.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
 
 ### Changed

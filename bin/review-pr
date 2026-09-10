@@ -3124,6 +3124,166 @@ process_cross_ndjson_output() {
     CROSS_FINDINGS_OUTPUTS[$agent]=$findings_target
 }
 
+build_cross_repair_baseline() {
+    local input_file=$1 baseline_file=$2 parsed_file line trimmed
+    local object_count=0 saw_trailing_prose=false
+
+    new_temp_file "cross-repair-parsed"; parsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        trimmed=${line#"${line%%[![:space:]]*}"}
+        trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+        [[ -n "$trimmed" ]] || continue
+        [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
+        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+            [[ "$saw_trailing_prose" == false ]] || return 1
+            object_count=$((object_count + 1))
+            continue
+        fi
+        [[ "$trimmed" == \{* || "$trimmed" == \[* ]] && return 1
+        (( object_count == 0 )) || saw_trailing_prose=true
+    done <"$input_file"
+    (( object_count > 0 )) || return 1
+
+    jq -e -s '
+        def content:
+            {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
+             recommendation, classification, severity, category, contributing_agents,
+             verification_limitations, existing_feedback};
+        def has_content:
+            . as $r | all(["source_id", "source_refs", "title", "claim", "anchor", "evidence",
+                "failure_scenario", "recommendation", "classification", "severity", "category",
+                "contributing_agents", "verification_limitations", "existing_feedback"][];
+                . as $key | $r | has($key));
+        def valid_completion_content:
+            has("summary") and (.summary | type == "string") and
+            has("verification_limitations") and (.verification_limitations | type == "array") and
+            has("positive_evidence") and (.positive_evidence | type == "array");
+        ([.[] | select(.record == "finding")]) as $findings |
+        ([.[] | select(.record == "complete")]) as $completions |
+        if ((all(.[]; .record == "finding" or .record == "complete")) and
+            (all($findings[]; has_content)) and
+            (([$findings[].source_id] | unique | length) == ($findings | length)) and
+            ($completions | length) <= 1 and
+            (($findings | length) > 0 or ($completions | length) == 1))
+        then {
+            findings: [$findings[] | content],
+            completion: (if (($completions | length) == 1 and ($completions[0] | valid_completion_content))
+                then ($completions[0] | {summary, verification_limitations, positive_evidence})
+                else {summary: "", verification_limitations: [], positive_evidence: []} end)
+        }
+        else error("unsafe cross-review repair baseline") end
+    ' "$parsed_file" >"$baseline_file" 2>/dev/null
+}
+
+validate_cross_repair_stability() {
+    local baseline_file=$1 canonical_file=$2
+    jq -e --slurpfile baseline "$baseline_file" '
+        def content:
+            {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
+             recommendation, classification, severity, category, contributing_agents,
+             verification_limitations, existing_feedback};
+        {findings: [.findings[] | content],
+         completion: {summary, verification_limitations, positive_evidence}} == $baseline[0]
+    ' "$canonical_file" >/dev/null
+}
+
+write_cross_finding_repair_prompt() {
+    local prompt_file=$1 failure_reason=$2 baseline_file=$3 draft_file=$4
+    cat >"$prompt_file" <<EOF
+This is one bounded schema-repair pass for an already completed cross-review. It is not a new review.
+
+Return only a complete ndjson-v1 stream, one JSON object per physical line, with no fence, preamble, commentary, or trailing text. Do not inspect the repository or use tools.
+
+The rejected draft failed with: ${failure_reason}
+
+Preserve every output finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, and existing_feedback. Any difference is rejected. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record.
+
+Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
+
+===== BEGIN PRESERVED BASELINE =====
+$(cat -- "$baseline_file")
+===== END PRESERVED BASELINE =====
+
+===== BEGIN REJECTED NDJSON DRAFT =====
+$(cat -- "$draft_file")
+===== END REJECTED NDJSON DRAFT =====
+EOF
+}
+
+attempt_cross_ndjson_repair() {
+    local agent=$1 attempt=$2 output_file=$3 log_file=$4 usage_file=$5 usage_json_file=$6 started_at=$7
+    local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
+    local baseline_file repair_prompt repair_output repair_log repair_usage repair_usage_json combined_usage_json
+    local scratch_raw scratch_findings repair_pid heartbeat_pid repair_status repair_stop_reason
+    local actual_raw=${CROSS_RAW_OUTPUTS[$agent]} actual_findings=${CROSS_FINDINGS_OUTPUTS[$agent]}
+    local diagnostic_base="${ERROR_LOGS[$agent]%.log}-schema-repair-attempt-${attempt}"
+    local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
+    local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
+    local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
+
+    new_temp_file "cross-${agent}-repair-baseline"; baseline_file=$NEW_TEMP_FILE
+    if ! build_cross_repair_baseline "$output_file" "$baseline_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
+        return 1
+    fi
+    new_temp_file "cross-${agent}-repair-prompt"; repair_prompt=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-output"; repair_output=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-log"; repair_log=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-usage"; repair_usage=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-usage-json"; repair_usage_json=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-combined"; combined_usage_json=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-repair-raw"; scratch_raw=$NEW_TEMP_FILE; rm -- "$scratch_raw"
+    new_temp_file "cross-${agent}-repair-findings"; scratch_findings=$NEW_TEMP_FILE; rm -- "$scratch_findings"
+    write_cross_finding_repair_prompt "$repair_prompt" "$original_failure_reason" "$baseline_file" "$output_file"
+
+    activity_log "Cross-review ndjson-v1 output from ${agent} is structurally repairable; starting one bounded schema-repair pass"
+    start_agent "$agent" "cross-review findings repair" "$repair_prompt" "$repair_output" "$repair_log" "$repair_usage" "$repair_usage_json" "$attempt"
+    repair_pid=$STARTED_PID
+    set_dashboard_status cross "$agent" RUNNING "$repair_pid" "$started_at" 0
+    heartbeat_agent "cross-review findings repair" "$agent" "$repair_pid" "$started_at" & heartbeat_pid=$!
+    RUNNING_PIDS+=("$heartbeat_pid")
+    if wait "$repair_pid"; then repair_status=0; else repair_status=$?; fi
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    repair_stop_reason=$(jq -r '.stop_reason // ""' "$repair_usage_json" 2>/dev/null || true)
+
+    if (( repair_status == 0 )) && [[ "$repair_stop_reason" != length && -s "$repair_output" ]]; then
+        CROSS_RAW_OUTPUTS[$agent]=$scratch_raw CROSS_FINDINGS_OUTPUTS[$agent]=$scratch_findings
+        if process_cross_ndjson_output "$repair_output" "$agent" \
+            && validate_cross_repair_stability "$baseline_file" "$scratch_findings"; then
+            CROSS_RAW_OUTPUTS[$agent]=$actual_raw CROSS_FINDINGS_OUTPUTS[$agent]=$actual_findings
+            assert_new_target "$actual_raw"; assert_new_target "$actual_findings"
+            mv -- "$scratch_raw" "$actual_raw"; mv -- "$scratch_findings" "$actual_findings"
+            assert_new_target "$source_diagnostic"; cp -- "$output_file" "$source_diagnostic"
+            mv -- "$repair_output" "$output_file"
+            merge_usage_summaries "$usage_json_file" "$repair_usage_json" "$combined_usage_json"
+            mv -- "$combined_usage_json" "$usage_json_file"
+            jq -r '.reported_total_tokens // empty' "$usage_json_file" >"$usage_file"
+            [[ ! -s "$repair_log" ]] || { printf '\n--- bounded cross-review schema-repair diagnostics ---\n' >>"$log_file"; cat -- "$repair_log" >>"$log_file"; }
+            preserve_error_log "$log_file" "$log_diagnostic"
+            FINDING_CONTRACT_FAILURE_REASON=""
+            activity_log "Cross-review ndjson-v1 schema repaired for ${agent} without changing classification or provenance"
+            return 0
+        fi
+        CROSS_RAW_OUTPUTS[$agent]=$actual_raw CROSS_FINDINGS_OUTPUTS[$agent]=$actual_findings
+        if [[ -s "$scratch_raw" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$scratch_raw" "$output_diagnostic"
+        elif [[ -s "$repair_output" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$repair_output" "$output_diagnostic"
+        fi
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_changed_classification_provenance_or_content"
+    elif (( repair_status != 0 )); then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_exit_${repair_status}"
+    elif [[ "$repair_stop_reason" == length ]]; then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_output_token_limit"
+    else FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_empty_output"
+    fi
+    preserve_error_log "$repair_log" "$log_diagnostic"
+    if [[ -s "$repair_usage_json" ]]; then assert_new_target "$usage_diagnostic"; mv -- "$repair_usage_json" "$usage_diagnostic"; fi
+    if [[ -s "$repair_output" && ! -e "$output_diagnostic" ]]; then assert_new_target "$output_diagnostic"; mv -- "$repair_output" "$output_diagnostic"; fi
+    return 1
+}
+
 build_primary_repair_baseline() {
     local input_file=$1
     local baseline_file=$2
@@ -4084,7 +4244,7 @@ run_configured_command_in_worktree() {
 
     if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
-    elif [[ "$phase" == "cross-review" ]]; then
+    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" ]]; then
         output_contract=$CROSS_FINDING_CONTRACT_MODE
     fi
 
@@ -4237,7 +4397,7 @@ start_agent() {
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete ndjson-v1 stream with no Markdown or prose'
         fi
-    elif [[ "$phase" == "cross-review" ]]; then
+    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" ]]; then
         output_contract=$CROSS_FINDING_CONTRACT_MODE
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete cross-review ndjson-v1 stream with explicit source_refs and no Markdown or prose'
@@ -4364,10 +4524,10 @@ start_agent() {
             new_temp_file "pi-${attempt}-control"
             pi_control_file=$NEW_TEMP_FILE
             write_pi_control_prompt "$prompt_file" "$pi_control_file"
-            if [[ "$phase" == "primary findings repair" ]]; then
+            if [[ "$phase" == "primary findings repair" || "$phase" == "cross-review findings repair" ]]; then
                 pi_system_prompt_arguments=(--system-prompt "$pi_control_file")
                 pi_tool_arguments=(--no-tools)
-                pi_tail_control="FINAL ORCHESTRATOR CONTROL: perform only the bounded ndjson-v1 schema repair defined by the system contract. Do not inspect source or change finding content. Return only the repaired NDJSON stream."
+                pi_tail_control="FINAL ORCHESTRATOR CONTROL: perform only the bounded ndjson-v1 schema repair defined by the system contract. Do not inspect source or change finding content, classification, or provenance. Return only the repaired NDJSON stream."
             elif [[ "$phase" == "comparison synthesis" ]]; then
                 new_temp_file "pi-${attempt}-comparison-payload"
                 pi_payload_file=$NEW_TEMP_FILE
@@ -5042,8 +5202,16 @@ run_review_phase() {
             fi
             if [[ -z "$failure_reason" && "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
                 if ! process_cross_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
-                    failure_reason="invalid cross-review ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-                    printf 'cross-review ndjson-v1 validation failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    printf 'cross-review ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    if attempt_cross_ndjson_repair "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
+                        "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
+                        "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
+                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                        token_display=$TOKEN_USAGE_DISPLAY
+                    else
+                        failure_reason="invalid cross-review ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
+                        printf 'cross-review ndjson-v1 schema repair failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    fi
                 fi
             fi
             if [[ -z "$failure_reason" ]]; then

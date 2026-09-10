@@ -84,6 +84,7 @@ run_full_success_case() {
     local case_dir="$suite_root/success"
     local reviews="$case_dir/reviews"
     local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
     local capture="$case_dir/captured-prompts"
     local gh_log="$case_dir/gh.log"
     local output="$case_dir/output.txt"
@@ -102,7 +103,7 @@ run_full_success_case() {
     local rerun_final_prompt
     local legacy_manifest_temp
 
-    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture"
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
     export REVIEW_PR_FAKE_REFERENCE_SHA
     REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
@@ -627,13 +628,14 @@ run_ndjson_cross_case() {
     local case_dir="$suite_root/ndjson-cross"
     local reviews="$case_dir/reviews"
     local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
     local capture="$case_dir/captured-prompts"
     local checkout
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
     local manifest work_dir stem alpha_raw alpha_findings alpha_report alpha_prompt
 
-    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture"
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
     export REVIEW_PR_FAKE_REFERENCE_SHA
     REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
@@ -649,9 +651,12 @@ run_ndjson_cross_case() {
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' cross-ndjson-preamble >"$scenarios/beta-cross-review"
+    printf '%s\n' valid-ndjson >"$scenarios/beta-cross-review-findings-repair"
 
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
         "$repo_root/bin/review-pr" --config "$config" 123 \
         >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
@@ -687,6 +692,10 @@ run_ndjson_cross_case() {
         grep -Fq -- '"source_id": "alpha:F-001"' "$alpha_prompt"
     assert_file_contains "$alpha_prompt" 'BEGIN RIGHT-SIDE CHANGED-LINE MAP' \
         'structured cross-review receives the authoritative changed-line map'
+    assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-cross-beta-usage.json")" \
+        'structured cross-review usage includes generation and bounded repair passes'
+    assert_file_exists "$work_dir/${stem}-cross-beta-error-schema-repair-attempt-1-source-raw.ndjson" \
+        'structured cross-review repair preserves original invalid response'
 }
 
 run_ndjson_cross_resume_case() {

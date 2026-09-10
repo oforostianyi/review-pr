@@ -243,7 +243,7 @@ case "$behavior" in
                 exit 65
             fi
             emit_valid_ndjson_primary
-        elif [[ "$phase" == 'cross-review' ]]; then
+        elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' ]]; then
             if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
                 emit_valid_ndjson_cross
             else
@@ -258,6 +258,15 @@ case "$behavior" in
         printf '%s\n' 'Here is the requested structured review:'
         emit_valid_ndjson_primary
         write_usage null 58
+        ;;
+    cross-ndjson-preamble)
+        printf '%s\n' 'Here is the requested structured cross-review:'
+        emit_valid_ndjson_cross
+        write_usage null 58
+        ;;
+    unsafe-cross-ndjson-repair)
+        emit_valid_ndjson_cross | sed '0,/"classification":"CONFIRMED"/s//"classification":"UNCERTAIN"/'
+        write_usage null 59
         ;;
     unsafe-ndjson-repair)
         emit_valid_ndjson_primary | sed '0,/The fixture changed branch can fail\./s//The repair rewrote the finding claim./'

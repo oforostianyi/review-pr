@@ -93,6 +93,9 @@ keys remain language-independent.
   `existing_feedback`. No finding may be added, removed, reordered, split, merged, translated, or
   rewritten. Preserve valid completion prose; when none is safely recoverable, require an empty
   summary and arrays. If stability cannot be established, fail closed instead of publishing repair.
+- Cross-review repair applies the same rule and additionally freezes `source_refs`, classification,
+  severity, and contributing agents. The repaired stream must still cover every canonical primary
+  `{agent, source_id}` input and may not introduce an unknown source ref.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

@@ -290,7 +290,7 @@ In `ndjson-v1` mode each agent returns one complete JSON object per physical lin
 
 Structured cross-review requires `primary: "ndjson-v1"` and `reporting.comparison_sections.cross_review: "none"`. It receives the other agents' canonical primary sidecars rather than localized Markdown. Every input finding must be covered by at least one cross-review record using a unique `{agent, source_id}` reference; unknown references and missing coverage fail validation. Genuine duplicates may be consolidated with multiple references, while a compound source claim may be split across independently classified records. `CONFIRMED` requires `P0`–`P3`; `REJECTED` and `UNCERTAIN` use `null` severity. The portable record schema is installed as `review-pr-findings-v1.schema.json`; the full design is documented in `review-pr-finding-contract.md`.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output consumes the normal configured agent attempts and fails closed if no attempt validates; attempt-scoped raw output and diagnostics are preserved. A structurally recoverable primary response first receives the dedicated field-stable repair pass. Resume uses both contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Historical manifests without these fields continue as Markdown. Final synthesis still uses its established Markdown contract.
+There is no automatic fallback to Markdown. Invalid or truncated structured output consumes the normal configured agent attempts and fails closed if no attempt validates; attempt-scoped raw output and diagnostics are preserved. A structurally recoverable primary or cross-review response first receives a dedicated field-stable repair pass. Cross-review repair cannot change classification, severity, `source_refs`, contributing agents, or any substantive finding content, and the repaired result must still cover every canonical primary input. Resume uses both contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Historical manifests without these fields continue as Markdown. Final synthesis still uses its established Markdown contract.
 
 ## Optional comparison reports
 
@@ -669,6 +669,10 @@ additional `REVIEW_PR_PHASE=primary findings repair` invocation with
 `REVIEW_PR_OUTPUT_CONTRACT=ndjson-v1`. This pass is formatting/schema repair only: it must not inspect
 source or change, add, remove, split, merge, translate, or reorder findings. The orchestrator compares
 all substantive fields against a parsed baseline and rejects the repair on any difference.
+
+Structured cross-review has an equivalent `REVIEW_PR_PHASE=cross-review findings repair` pass. It
+also freezes classification, severity, source provenance, and contributing agents, then reruns the
+complete schema, input-coverage, and changed-line validation before publishing any artifact.
 
 Every configured reviewer runs once successfully during primary review and once successfully during cross-review, subject to the configured attempt limit. A cross-reviewer receives every other primary report but never its own. The configured synthesizer then receives all primary and cross-review reports, producing the core `N -> N -> 1` pipeline. When final comparison mode is `standalone`, one additional, bounded synthesis pass produces the optional companion comparison report without changing the core final verdict.
 

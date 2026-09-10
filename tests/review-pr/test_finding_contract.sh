@@ -114,6 +114,21 @@ jq '.[0].contributing_agents = ["alpha"]' "$cross_records" >"$wrong_contributor"
 assert_false 'cross-review contributing agents must match source provenance' \
     validate_cross_ndjson_records "$wrong_contributor" "$test_root/cross-wrong-contributor-canonical.json" alpha "$cross_expected_refs"
 
+cross_repairable="$test_root/cross-repairable.ndjson"
+{
+    printf '%s\n' 'Structured cross-review follows:'
+    jq -c '.[]' "$cross_records"
+} >"$cross_repairable"
+cross_repair_baseline="$test_root/cross-repair-baseline.json"
+assert_true 'cross-review transport prose produces a safe repair baseline' \
+    build_cross_repair_baseline "$cross_repairable" "$cross_repair_baseline"
+assert_true 'unchanged cross-review classification and provenance satisfy repair stability' \
+    validate_cross_repair_stability "$cross_repair_baseline" "$cross_canonical"
+changed_cross_canonical="$test_root/cross-changed-classification.json"
+jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$cross_canonical" >"$changed_cross_canonical"
+assert_false 'cross-review repair stability rejects reclassification' \
+    validate_cross_repair_stability "$cross_repair_baseline" "$changed_cross_canonical"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"
