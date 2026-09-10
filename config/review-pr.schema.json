@@ -1,0 +1,509 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "review-pr configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reviewers",
+    "synthesizer",
+    "agents"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "review_repository": {
+      "type": "string",
+      "pattern": "^/",
+      "deprecated": true,
+      "description": "Legacy single-repository checkout. Prefer repositories.<alias>.checkout. REVIEW_PR_REPO overrides the selected checkout."
+    },
+    "default_repository": {
+      "$ref": "#/$defs/repositoryAlias",
+      "description": "Alias selected when the command receives only a PR number, for example review-pr 123."
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Reusable repository profiles. Repository-level skills override profile skills.",
+      "propertyNames": {
+        "$ref": "#/$defs/repositoryAlias"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "repositories": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Configured GitHub repositories and their dedicated local review checkouts.",
+      "propertyNames": {
+        "$ref": "#/$defs/repositoryAlias"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/repository"
+      }
+    },
+    "reviews_directory": {
+      "type": "string",
+      "pattern": "^/",
+      "description": "Absolute directory outside the selected review checkout where review artifacts are stored. Defaults to $HOME/review-pr when omitted. REVIEW_PR_OUTPUT_DIR overrides this value."
+    },
+    "reviewers": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/agentName"
+      }
+    },
+    "synthesizer": {
+      "$ref": "#/$defs/agentName"
+    },
+    "language": {
+      "$ref": "#/$defs/reviewLanguage",
+      "default": "EN",
+      "description": "Global output language for every review stage. Stage-specific entries under languages override this value."
+    },
+    "finalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model override used only by the configured synthesizer during final synthesis."
+        },
+        "effort": {
+          "type": "string",
+          "description": "Reasoning-effort override used only by the configured synthesizer during final synthesis. Omit to inherit agents.<synthesizer>.effort; set an empty string to disable inherited effort. Supported values depend on the synthesizer and model."
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "EN",
+            "UA"
+          ],
+          "deprecated": true,
+          "description": "Legacy final-synthesis language. Prefer the global language field or languages.final. Classification values and P0–P3 severity values remain fixed."
+        }
+      }
+    },
+    "languages": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-stage overrides of the global language. An empty string explicitly inherits the global value.",
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        },
+        "cross_review": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        },
+        "final": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        }
+      }
+    },
+    "reporting": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Controls machine-readable finding contracts and optional comparison sections.",
+      "properties": {
+        "finding_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Versioned machine-readable finding contract. Markdown remains the default; ndjson-v1 is currently opt-in for primary reviews only.",
+          "properties": {
+            "primary": {
+              "type": "string",
+              "enum": ["markdown", "ndjson-v1"],
+              "default": "markdown"
+            }
+          }
+        },
+        "include_comparison_sections": {
+          "type": "boolean",
+          "default": true,
+          "deprecated": true,
+          "description": "Legacy all-or-nothing switch. True maps both stages to inline; false maps both stages to none. Prefer comparison_sections."
+        },
+        "comparison_sections": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cross_review": {
+              "type": "string",
+              "enum": ["none", "inline"],
+              "default": "none",
+              "description": "Whether each cross-review omits or embeds the extended comparison block."
+            },
+            "final": {
+              "type": "string",
+              "enum": ["none", "inline", "standalone"],
+              "default": "standalone",
+              "description": "Whether final synthesis omits, embeds, or generates the extended comparison block as a separate report."
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/agentName"
+      },
+      "properties": {
+        "claude": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "$ref": "#/$defs/claudeEffort"
+                }
+              }
+            }
+          ]
+        },
+        "codex": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "$ref": "#/$defs/codexEffort"
+                }
+              }
+            }
+          ]
+        },
+        "pi": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "const": ""
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "status_interval_seconds": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 3600,
+      "default": 30,
+      "deprecated": true,
+      "description": "Legacy alias for status.log_interval_seconds."
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "table",
+            "log",
+            "off"
+          ],
+          "default": "auto"
+        },
+        "color": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "default": "auto"
+        },
+        "refresh_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 1
+        },
+        "log_interval_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "default": 30
+        },
+        "show_pid": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of reviewer processes running at once in primary and cross-review phases. Omit for unlimited concurrency."
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 1,
+              "description": "Maximum attempts per agent in each primary and cross-review phase, including the initial attempt."
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600,
+              "default": 0,
+              "description": "Delay before starting a failed-only retry round."
+            }
+          }
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cross_review": {
+          "$ref": "#/$defs/prompt"
+        },
+        "final": {
+          "$ref": "#/$defs/prompt"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "required": ["review_repository"],
+          "not": {
+            "required": ["repositories"]
+          }
+        },
+        {
+          "required": ["repositories", "default_repository"],
+          "not": {
+            "required": ["review_repository"]
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "claude"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "$ref": "#/$defs/claudeEffort"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "codex"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "$ref": "#/$defs/codexEffort"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "pi"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "const": ""
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "repositoryAlias": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "skillMap": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/agentName"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "description": "Optional skill name as known by the target agent. An empty string explicitly disables an inherited profile skill; no filesystem path is required or validated."
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skills": {
+          "$ref": "#/$defs/skillMap"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github", "checkout"],
+      "properties": {
+        "github": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "description": "GitHub owner/repository slug used for PR metadata and context requests."
+        },
+        "checkout": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute path to the dedicated Git checkout for this repository."
+        },
+        "profile": {
+          "$ref": "#/$defs/repositoryAlias"
+        },
+        "skills": {
+          "$ref": "#/$defs/skillMap",
+          "description": "Per-repository agent skill-name overrides. These take precedence over profile skills."
+        }
+      }
+    },
+    "agentName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to keep this agent's configuration but exclude it from primary and cross-review. The configured synthesizer must remain enabled."
+        },
+        "label": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string",
+          "description": "Reasoning effort. Built-in Claude and Codex agents support their documented values; custom runners receive the resolved value in REVIEW_PR_EFFORT."
+        },
+        "runner": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Generic non-shell command adapter. The first item is the executable; remaining items are literal arguments. It receives the orchestration prompt on stdin and must return only Markdown on stdout from a disposable worktree at the PR head. It is mutually exclusive with runner. Exact placeholder arguments {{prompt_file}}, {{repository}}, {{model}}, {{effort}}, {{phase}}, {{pr_number}}, {{base_ref}}, {{head_ref}}, {{base_sha}}, and {{head_sha}} are expanded safely."
+        },
+        "instructions": {
+          "type": "string"
+        }
+      }
+    },
+    "claudeEffort": {
+      "enum": [
+        "",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "reviewLanguage": {
+      "enum": [
+        "EN",
+        "UA"
+      ]
+    },
+    "reviewLanguageOverride": {
+      "enum": [
+        "",
+        "EN",
+        "UA"
+      ]
+    },
+    "codexEffort": {
+      "enum": [
+        "",
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "prompt": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  }
+}

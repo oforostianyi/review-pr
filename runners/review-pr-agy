@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source_repository=$(pwd -P)
+artifact_only=${REVIEW_PR_ARTIFACT_ONLY:-false}
+prompt_file=$(mktemp "${TMPDIR:-/tmp}/review-pr-agy-prompt.XXXXXX")
+events_file=$(mktemp "${TMPDIR:-/tmp}/review-pr-agy-events.XXXXXX")
+response_file=$(mktemp "${TMPDIR:-/tmp}/review-pr-agy-response.XXXXXX")
+worktree_directory=""
+worktree_created=false
+runtime_directory=$source_repository
+
+if [[ "$artifact_only" != true ]]; then
+    worktree_directory=$(mktemp -d "${TMPDIR:-/tmp}/review-pr-agy-worktree.XXXXXX")
+fi
+
+cleanup() {
+    local exit_status=$?
+
+    trap - EXIT INT TERM
+    if [[ "$worktree_created" == true ]]; then
+        git -C "$source_repository" worktree remove --force "$worktree_directory" >/dev/null 2>&1 || true
+    elif [[ -n "$worktree_directory" ]]; then
+        rmdir "$worktree_directory" >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$prompt_file" "$events_file" "$response_file"
+    exit "$exit_status"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+command -v agy >/dev/null 2>&1 || {
+    printf '%s\n' 'review-pr-agy: required command not found: agy' >&2
+    exit 127
+}
+if [[ "$artifact_only" != true ]]; then
+    command -v git >/dev/null 2>&1 || {
+        printf '%s\n' 'review-pr-agy: required command not found: git' >&2
+        exit 127
+    }
+fi
+command -v jq >/dev/null 2>&1 || {
+    printf '%s\n' 'review-pr-agy: required command not found: jq' >&2
+    exit 127
+}
+
+cat >"$prompt_file"
+
+if [[ "$artifact_only" != true ]]; then
+    git -C "$source_repository" rev-parse --is-inside-work-tree >/dev/null
+    # Run source-aware phases inside a throwaway worktree. Antigravity can
+    # inspect the exact PR checkout, while accidental changes are discarded.
+    rmdir "$worktree_directory"
+    git -C "$source_repository" worktree add --detach "$worktree_directory" HEAD >&2
+    worktree_created=true
+    runtime_directory=$worktree_directory
+fi
+
+declare -a model_arguments=()
+declare -a effort_arguments=()
+if [[ -n "${REVIEW_PR_MODEL:-}" ]]; then
+    model_arguments=(--model "$REVIEW_PR_MODEL")
+fi
+if [[ -n "${REVIEW_PR_EFFORT:-}" ]]; then
+    effort_arguments=(--effort "$REVIEW_PR_EFFORT")
+fi
+
+read_only_preamble='This is a read-only code review. Never create, edit, rename, or delete files or directories. Do not redirect command output with > or >> and do not create temporary files in /tmp, scratch, or anywhere else. Run exactly one read-only command per tool call: never use shell control operators or composition such as &&, ||, ;, |, command substitution, or redirection. Use commands that print results to stdout (for example git diff, git show, rg, sed, find, ls). Return the complete review as your final response.'
+runtime_workspace_instruction='The Repository path in the orchestrator metadata is logical context, not the filesystem location you may inspect. The only permitted runtime workspace is supplied below. Use relative paths from that workspace, or this exact path, for every file/search tool. Do not access the logical repository path or any other checkout.'
+if [[ "$artifact_only" == true ]]; then
+    read_only_preamble='This is an artifact-only final re-synthesis. Use only the reports embedded in the prompt. Do not inspect source files, run Git, read the current GitHub PR, or use filesystem/search/command tools. Return the complete synthesized review as your final response.'
+    runtime_workspace_instruction='No source checkout is supplied for this artifact-only run. The current directory is only the orchestrator artifact directory and must not be inspected.'
+fi
+
+if ! jq -cn \
+    --rawfile prompt "$prompt_file" \
+    --arg preamble "$read_only_preamble" \
+    --arg runtime_instruction "$runtime_workspace_instruction" \
+    --arg workspace "$runtime_directory" \
+    '{event: "user", message: {content: ($preamble + "\n\n" + $prompt + "\n\n===== AGY RUNTIME WORKSPACE =====\n" + $runtime_instruction + "\nWorkspace: " + $workspace + "\n===== END AGY RUNTIME WORKSPACE =====")}}' \
+    | (
+        cd "$runtime_directory"
+        agy \
+            --input-format stream-json \
+            --output-format stream-json \
+            --sandbox \
+            "${model_arguments[@]}" \
+            "${effort_arguments[@]}"
+    ) >"$events_file"; then
+    printf '%s\n' 'review-pr-agy: Antigravity CLI failed.' >&2
+    exit 1
+fi
+
+if ! jq -er '
+    select(.event == "result")
+    | select(.result.status == "SUCCESS")
+    | .result.response
+' "$events_file" >"$response_file"; then
+    jq -c 'select(.event != "init" and .event != "result")' "$events_file" >&2 || true
+    jq -r 'select(.event == "result") | .result.error // .result.status // empty' "$events_file" >&2 || true
+    printf '%s\n' 'review-pr-agy: Antigravity did not return a successful response.' >&2
+    exit 1
+fi
+
+if ! grep -q '[^[:space:]]' "$response_file"; then
+    jq -c 'select(.event != "init" and .event != "result")' "$events_file" >&2 || true
+    jq -c 'select(.event == "result") | .result | {status, response, usage, error}' "$events_file" >&2 || true
+    printf '%s\n' 'review-pr-agy: Antigravity returned an empty final response.' >&2
+    exit 1
+fi
+
+if [[ -n "${REVIEW_PR_USAGE_JSON:-}" ]]; then
+    usage_temporary_file="${REVIEW_PR_USAGE_JSON}.agy.$$"
+    if jq -e \
+        --arg agent "${REVIEW_PR_AGENT:-agy}" \
+        --arg phase "${REVIEW_PR_PHASE:-unknown}" \
+        --arg model "${REVIEW_PR_MODEL:-}" \
+        --arg effort "${REVIEW_PR_EFFORT:-}" \
+        '
+            [select(.event == "result" and .result.status == "SUCCESS") | .result.usage]
+            | last
+            | if type != "object" then error("missing Antigravity usage") else
+                {
+                    schema_version: 1,
+                    agent: $agent,
+                    phase: $phase,
+                    model: (if $model == "" then null else $model end),
+                    effort: (if $effort == "" then null else $effort end),
+                    reasoning_effort: (if $effort == "" then null else $effort end),
+                    available: true,
+                    source: "antigravity_cli_stream_json",
+                    reported_total_tokens: (.total_tokens // null),
+                    input_tokens: (.input_tokens // null),
+                    output_tokens: (.output_tokens // null),
+                    cache_read_tokens: (.cache_read_tokens // null),
+                    cache_write_tokens: null
+                }
+              end
+        ' "$events_file" >"$usage_temporary_file"; then
+        mv -- "$usage_temporary_file" "$REVIEW_PR_USAGE_JSON"
+        if [[ -n "${REVIEW_PR_USAGE_FILE:-}" ]]; then
+            jq -r '.reported_total_tokens // empty' "$REVIEW_PR_USAGE_JSON" >"$REVIEW_PR_USAGE_FILE"
+        fi
+    else
+        rm -f -- "$usage_temporary_file"
+        printf '%s\n' 'review-pr-agy: could not normalize Antigravity usage; preserving the generic usage summary.' >&2
+    fi
+fi
+
+cat -- "$response_file"

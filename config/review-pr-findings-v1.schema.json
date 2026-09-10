@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://review-pr.dev/schema/findings-record-v1.json",
+  "title": "review-pr ndjson-v1 record",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/finding"
+    },
+    {
+      "$ref": "#/$defs/complete"
+    }
+  ],
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "file", "start", "end"],
+      "properties": {
+        "kind": {
+          "enum": ["changed-line", "pr-level"]
+        },
+        "file": {
+          "type": ["string", "null"]
+        },
+        "start": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "end": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "changed-line"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "start": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "file": {
+                "const": null
+              },
+              "start": {
+                "const": null
+              },
+              "end": {
+                "const": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    "existingFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "thread_ids"],
+      "properties": {
+        "state": {
+          "enum": ["new", "confirmed-existing", "historical", "unknown"]
+        },
+        "thread_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {"const": "new"}
+            }
+          },
+          "then": {
+            "properties": {
+              "thread_ids": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {"enum": ["confirmed-existing", "historical"]}
+            }
+          },
+          "then": {
+            "properties": {
+              "thread_ids": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "schema_version",
+        "source_id",
+        "title",
+        "claim",
+        "anchor",
+        "evidence",
+        "failure_scenario",
+        "recommendation",
+        "classification",
+        "severity",
+        "category",
+        "contributing_agents",
+        "verification_limitations",
+        "existing_feedback"
+      ],
+      "properties": {
+        "record": {
+          "const": "finding"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim": {
+          "type": "string",
+          "minLength": 1
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "failure_scenario": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recommendation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "classification": {
+          "type": ["string", "null"],
+          "enum": ["CONFIRMED", "REJECTED", "UNCERTAIN", null]
+        },
+        "severity": {
+          "type": ["string", "null"],
+          "enum": ["P0", "P1", "P2", "P3", null]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contributing_agents": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "verification_limitations": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "existing_feedback": {
+          "$ref": "#/$defs/existingFeedback"
+        }
+      }
+    },
+    "complete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "schema_version",
+        "finding_count",
+        "summary",
+        "verification_limitations",
+        "positive_evidence"
+      ],
+      "properties": {
+        "record": {
+          "const": "complete"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "finding_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary": {
+          "type": "string"
+        },
+        "verification_limitations": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "positive_evidence": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "./review-pr.schema.json",
+  "agents": {
+    "claude": {
+      "label": "Claude",
+      "enabled": true,
+      "model": "",
+      "effort": ""
+    },
+    "codex": {
+      "label": "Codex",
+      "enabled": true,
+      "model": "",
+      "effort": ""
+    }
+  },
+  "reviewers": [
+    "claude",
+    "codex"
+  ],
+  "synthesizer": "codex",
+  "default_repository": "repository",
+  "repositories": {
+    "repository": {
+      "github": "owner/repository",
+      "checkout": "/absolute/path/to/dedicated/review-checkout",
+      "profile": "default"
+    }
+  },
+  "profiles": {
+    "default": {
+      "skills": {}
+    }
+  },
+  "reviews_directory": "/absolute/path/to/review-pr-output",
+  "language": "EN",
+  "finalization": {
+    "model": "",
+    "effort": ""
+  },
+  "reporting": {
+    "finding_contract": {
+      "primary": "markdown"
+    },
+    "comparison_sections": {
+      "cross_review": "none",
+      "final": "standalone"
+    }
+  },
+  "status": {
+    "mode": "auto",
+    "color": "auto",
+    "refresh_interval_seconds": 1,
+    "log_interval_seconds": 30,
+    "show_pid": true
+  },
+  "execution": {
+    "max_concurrency": 3,
+    "retry": {
+      "max_attempts": 2,
+      "delay_seconds": 5
+    }
+  },
+  "prompts": {
+    "cross_review": [
+      "This is a cross-review, not final synthesis: do not add a PR metadata header or an introductory/progress sentence. Use the stage language resolved by the orchestrator.",
+      "Format the result for fast scanning.",
+      "",
+      "Start with exactly this table:",
+      "",
+      "## Classification table",
+      "",
+      "| # | Source | Claim | Classification | Severity | Verification |",
+      "|---|---|---|---|---|---|",
+      "",
+      "Use one row per atomic claim. If a source finding contains both true and false claims, split it into separate rows so every classification remains exactly CONFIRMED, REJECTED, or UNCERTAIN. For a confirmed finding, Severity must be exactly P0, P1, P2, or P3; use — only when severity does not apply. Keep code evidence concise but concrete in the Verification column. Mark duplicates explicitly in that column and reference the canonical row.",
+      "",
+      "If validation discovers genuinely new findings, add a separate section named ## New findings with the same table shape. Follow the additional report structure supplied by the orchestrator; do not add sections that the resolved reporting configuration disables."
+    ],
+    "final": [
+      "The orchestrator writes the PR title and two-column metadata table. Do not output or repeat them.",
+      "Do not write an introduction such as ‘I have verified…’ or ‘Let me synthesize…’. The orchestrator supplies the required first heading and localized table format.",
+      "Write the main final review in the resolved global/stage language selected by the orchestrator. Follow its resolved reporting structure and localized headings/table schemas. Every CONFIRMED row must use exactly P0, P1, P2, or P3; use — only when severity does not apply. Include detailed sections only for actionable, source-verified CONFIRMED findings.",
+      "",
+      "At the very end, add two separate sections containing polished English comments ready to paste directly into the pull request:",
+      "",
+      "## Blocking PR comments (English)",
+      "",
+      "Include must-fix P0/P1 comments. Each comment must identify the location, explain the concrete failure or risk, and request a specific change. Do not mention internal reviewer names or the orchestration process.",
+      "",
+      "## Minor PR comments (English)",
+      "",
+      "Include non-blocking P2/P3 comments using the same author-facing style. If either section has no comments, write None."
+    ]
+  }
+}
