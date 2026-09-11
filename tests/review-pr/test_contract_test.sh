@@ -8,7 +8,8 @@ source "$test_dir/lib/assert.sh"
 
 test_root=$(portable_mktemp_dir review-pr-contract-test)
 trap 'rm -rf -- "$test_root"' EXIT
-mkdir -p -- "$test_root/reviews"
+mkdir -p -- "$test_root/reviews" "$test_root/bin"
+ln -s "$test_dir/fake-codex.sh" "$test_root/bin/codex"
 
 config_file="$test_root/config.json"
 jq -n \
@@ -18,7 +19,8 @@ jq -n \
         agents: {
             alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "low", runner: $runner},
             beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "medium", command: [$runner]},
-            paused: {label: "Paused", enabled: false, model: "mock-paused", effort: "", runner: $runner}
+            paused: {label: "Paused", enabled: false, model: "mock-paused", effort: "", runner: $runner},
+            codex: {label: "Codex", enabled: false, model: "mock-codex", effort: "low"}
         },
         reviewers: ["alpha", "beta"],
         synthesizer: "alpha",
@@ -88,6 +90,13 @@ REVIEW_PR_MOCK_BEHAVIOR=contract-valid \
         --agent paused --phase primary --output "$paused_output" >/dev/null 2>"$test_root/paused.stderr"
 assert_eq paused "$(jq -r '.results[0].agent' "$paused_output/summary.json")" \
     'an explicitly selected configured agent can be tested while disabled'
+
+codex_output="$test_root/codex"
+PATH="$test_root/bin:$PATH" \
+    "$repo_root/bin/review-pr" --config "$config_file" contract-test \
+        --agent codex --phase primary --output "$codex_output" >/dev/null 2>"$test_root/codex.stderr"
+assert_eq true "$(jq -r '.passed' "$codex_output/summary.json")" \
+    'built-in Codex contract testing bypasses only the Git repository preflight'
 
 failed_output="$test_root/failed"
 if REVIEW_PR_MOCK_BEHAVIOR=invalid \

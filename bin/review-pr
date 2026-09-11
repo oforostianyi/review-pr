@@ -4827,6 +4827,7 @@ start_agent() {
     local -a effort_arguments=()
     local -a pi_system_prompt_arguments=()
     local -a pi_tool_arguments=()
+    local -a codex_repository_arguments=()
     local -a EXPANDED_COMMAND=()
 
     if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && -n "$FINALIZATION_MODEL" ]]; then
@@ -4843,6 +4844,7 @@ start_agent() {
         agent_working_directory=$WORK_DIR
         agent_max_attempts=1
         artifact_only=true
+        codex_repository_arguments=(--skip-git-repo-check)
     fi
     if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
@@ -4936,6 +4938,7 @@ start_agent() {
                     --ephemeral \
                     --color never \
                     --json \
+                    "${codex_repository_arguments[@]}" \
                     --cd "$agent_working_directory" \
                     "${model_arguments[@]}" \
                     "${effort_arguments[@]}" \
