@@ -38,7 +38,7 @@ not included in the current end-user archive.
 
 ## Test real agent contract compatibility
 
-After enabling `ndjson-v1`, test a configured CLI/model without fetching or reviewing a pull
+Before enabling `ndjson-v1`, test a configured CLI/model without fetching or reviewing a pull
 request:
 
 ```bash
