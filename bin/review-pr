@@ -4163,7 +4163,7 @@ Every issue must be one atomic finding record with exactly these keys: record, s
 - contributing_agents must be exactly ["${reviewer}"] in this independent primary review.
 - evidence must be a non-empty string array. verification_limitations is a string array.
 - existing_feedback must be {"state":"new|confirmed-existing|historical|unknown","thread_ids":[]}. Use [] for new; confirmed-existing or historical requires at least one matching GraphQL thread ID; unknown may use known IDs or [].
-- anchor must be {"kind":"changed-line","file":"exact/repository/path","start":42,"end":42} or {"kind":"pr-level","file":null,"start":null,"end":null}. For changed-line, the range end must exist in the supplied RIGHT-side changed-line map. Use pr-level only for a genuine PR-wide omission.
+- anchor must be {"kind":"changed-line","file":"exact/repository/path","start":42,"end":42} or {"kind":"pr-level","file":null,"start":null,"end":null}. For changed-line, the range end must exist in the supplied RIGHT-side changed-line map. Use changed-line when the defect sits in a changed line. Use pr-level for a finding about code the change affects but does not touch: an existing consumer or caller of a changed symbol, a flow whose behaviour changes, or missing or stale test coverage; name the affected file and symbol in evidence. Do not drop a verified consumer, flow, or coverage finding because it has no changed line to anchor to.
 
 Finish with exactly one final record and no records after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count must equal the number of preceding finding records. All reader-facing string values must use ${PRIMARY_REVIEW_LANGUAGE_NAME}. Even when there are no findings, return the complete record with finding_count 0.
 EOF
@@ -4259,7 +4259,7 @@ Classify every supplied primary source finding. Each output finding has the stan
 - contributing_agents must equal the unique agent keys in source_refs.
 - Preserve the standard anchor, evidence, failure_scenario, recommendation, category, verification_limitations, and existing_feedback shapes defined for ndjson-v1.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
-- A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Use pr-level only for a genuine PR-wide issue.
+- A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Use pr-level for a confirmed finding about affected code outside the diff, such as an existing consumer, a changed flow, or test coverage, naming the file and symbol in evidence.
 
 Finish with exactly one complete record and nothing after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs.
 EOF
@@ -4381,7 +4381,7 @@ Classify every supplied canonical cross-review finding. Each output finding has 
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN. CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.
 - include_in_rejected_summary is a boolean. Set it true only for a REJECTED claim important enough to explain in the human report; otherwise false.
-- evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; use pr-level only for a genuine PR-wide omission.
+- evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; use pr-level for a finding about affected code outside the diff, such as an existing consumer, a changed flow, or test coverage, naming the file and symbol in evidence.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - All reader-facing string values must use ${FINAL_LANGUAGE_NAME} (${FINALIZATION_LANGUAGE}). Fixed enum values, IDs, agent keys, and paths remain unchanged.
 
@@ -5029,7 +5029,7 @@ write_pi_control_prompt() {
     ' "$prompt_file" >"$control_file"
     printf '%s\n' \
         '' \
-        'PI EXECUTION GUARD (orchestrator-enforced): keep repository inspection bounded to changed code and the minimum direct context needed to verify findings. Never repeat an identical tool call or restart the same inspection after context compaction. If tool use or reasoning begins to repeat, stop using tools immediately and return the best complete output supported by evidence already collected. Do not sacrifice the required output contract to pursue exhaustive coverage.' \
+        'PI EXECUTION GUARD (orchestrator-enforced): follow the review skill'"'"'s consumer and flow steps: inspect the callers and flows that the changed code affects, not only the changed lines, and read only what each finding needs for verification. Never repeat an identical tool call or restart the same inspection after context compaction. If tool use or reasoning begins to repeat, stop using tools immediately and return the best complete output supported by evidence already collected. Do not sacrifice the required output contract to pursue exhaustive coverage.' \
         >>"$control_file"
     [[ -s "$control_file" ]] || die "Could not extract Pi orchestration control prompt: ${prompt_file}"
 }

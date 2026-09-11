@@ -33,6 +33,19 @@ assert_eq 'Pi tool guard: no tool calls were attempted.' \
     "$(summarize_pi_guard_log "$test_root/missing-log.ndjson" 2)" \
     'a missing guard log yields an explicit no-call summary'
 
+control_prompt="$test_root/control-prompt.md"
+control_file="$test_root/control.txt"
+printf '%s\n' 'Phase: independent primary review' 'Reviewer: Pi (pi)' '===== BEGIN CONFIGURED REVIEW SKILL (REFERENCE) =====' 'skill body' >"$control_prompt"
+write_pi_control_prompt "$control_prompt" "$control_file"
+assert_file_contains "$control_file" 'Phase: independent primary review' \
+    'the Pi control prompt keeps the orchestration header'
+assert_file_contains "$control_file" 'inspect the callers and flows that the changed code affects' \
+    'the Pi guard instruction asks for consumer and flow inspection, matching the review skill'
+assert_false 'the Pi guard instruction no longer confines inspection to changed code' \
+    grep -Fq -- 'bounded to changed code' "$control_file"
+assert_file_contains "$control_file" 'Never repeat an identical tool call' \
+    'the Pi guard instruction still forbids repeated inspection'
+
 if ! command -v node >/dev/null 2>&1; then
     printf 'node is unavailable; skipping extension behaviour tests\n'
     printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

@@ -628,6 +628,10 @@ run_ndjson_primary_case() {
         'structured primary prompt receives the authoritative changed-line map'
     assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'Output contract: ndjson-v1' \
         'structured primary prompt requests the machine contract explicitly'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'Use pr-level for a finding about code the change affects but does not touch' \
+        'structured primary prompt allows anchoring consumer, flow, and coverage findings at PR level'
+    assert_false 'structured primary prompt no longer restricts pr-level anchors to PR-wide omissions' \
+        grep -Fq -- 'Use pr-level only for a genuine PR-wide omission' "$capture/primary-review-alpha-attempt-1.prompt"
     assert_file_contains "$alpha_cross_prompt" 'Fixture changed-line defect' \
         'cross-review receives rendered primary content'
     assert_false 'cross-review does not receive raw NDJSON transport records' \

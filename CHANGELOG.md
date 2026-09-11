@@ -4,6 +4,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- Primary, cross-review, and final `ndjson-v1` prompts now tell agents to anchor findings about
+  affected code outside the diff (existing consumers or callers of a changed symbol, flows whose
+  behaviour changes, missing or stale test coverage) at PR level with the file and symbol in
+  evidence, instead of reserving `pr-level` for PR-wide omissions. The old wording made agents drop
+  verified consumer and coverage findings that had no changed line to anchor to.
+- The Pi execution guard instruction no longer tells the model to keep inspection bounded to
+  changed code, which contradicted the review skill's consumer and flow steps; it now asks for
+  those steps explicitly while still forbidding repeated inspection.
+
 ## [1.11.5] - 2026-09-11
 
 ### Added
