@@ -323,6 +323,8 @@ review-pr repository#123 --run 20260901-154503-CEST
 
 The command verifies the manifest and PR head, runs only missing/failed reports in the first incomplete phase, and then continues the remaining phases. Use `--rerun-final` only when primary and cross-review are already complete.
 
+A run can only be resumed for the exact PR head it recorded. If new commits were pushed to the pull request since then, the preserved reports describe older code, so the command refuses to resume and names the head change; start a new run for the current head instead.
+
 To re-synthesize a completed historical run without touching Git or GitHub, select its timestamp explicitly:
 
 ```bash

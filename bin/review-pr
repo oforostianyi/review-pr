@@ -6087,6 +6087,33 @@ json_string_array() {
     jq -cn '$ARGS.positional' --args "$@"
 }
 
+describe_manifest_incompatibility() {
+    local manifest=$1
+    local manifest_head manifest_run_type manifest_pr manifest_repository
+
+    manifest_run_type=$(jq -r '.run_type // "missing"' "$manifest" 2>/dev/null || printf unreadable)
+    if [[ "$manifest_run_type" != full ]]; then
+        printf 'run_type is %s, not a full run' "$manifest_run_type"
+        return 0
+    fi
+    manifest_pr=$(jq -r '.pr_number // "missing"' "$manifest" 2>/dev/null || printf unreadable)
+    if [[ "$manifest_pr" != "$PR_NUMBER" ]]; then
+        printf 'the manifest belongs to PR #%s, not #%s' "$manifest_pr" "$PR_NUMBER"
+        return 0
+    fi
+    manifest_repository=$(jq -r '.github_repository // "missing"' "$manifest" 2>/dev/null || printf unreadable)
+    if [[ "$manifest_repository" != "$GITHUB_REPOSITORY" ]]; then
+        printf 'the manifest belongs to repository %s, not %s' "$manifest_repository" "$GITHUB_REPOSITORY"
+        return 0
+    fi
+    manifest_head=$(jq -r '.head_sha // "missing"' "$manifest" 2>/dev/null || printf unreadable)
+    if [[ "$manifest_head" != "$HEAD_SHA" ]]; then
+        printf 'the PR head moved from %s to %s; start a new run for the current head' "${manifest_head:0:12}" "${HEAD_SHA:0:12}"
+        return 0
+    fi
+    printf ''
+}
+
 atomic_manifest_update() {
     local filter=$1
     shift
@@ -6867,6 +6894,7 @@ load_resume_run() {
     local manifest_cross_contract
     local manifest_cross_comparison
     local manifest_final_contract
+    local incompatibility
 
     [[ -n "$RUN_SELECTOR" ]] || die "Resume requires --run <timestamp>"
     candidate="${WORK_DIR}/${REVIEW_ID}-${RUN_SELECTOR}-manifest.json"
@@ -6881,7 +6909,10 @@ load_resume_run() {
          .github_repository == $github_repository and
          (.reviewers | type == "array" and length >= 2) and
          (.status | type == "object") and (.artifacts | type == "object")' \
-        "$candidate" >/dev/null || die "Run ${RUN_SELECTOR} is not a compatible full-run manifest for the current PR head"
+        "$candidate" >/dev/null || {
+            incompatibility=$(describe_manifest_incompatibility "$candidate")
+            die "Run ${RUN_SELECTOR} is not a compatible full-run manifest for the current PR head${incompatibility:+: $incompatibility}"
+        }
 
     SOURCE_MANIFEST=$candidate
     SOURCE_TIMESTAMP=$(jq -r '.timestamp' "$SOURCE_MANIFEST")

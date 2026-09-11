@@ -177,6 +177,25 @@ assert_eq 'Connection error.' "$(jq -r '.error_message' "$pi_error_usage")" \
     'a failed Pi turn preserves the provider error message'
 assert_eq 'null' "$(jq -r '.error_message' "$usage_output")" \
     'a successful turn records no error message'
+
+stale_manifest="$test_root/stale-manifest.json"
+jq -n '{schema_version: 1, run_type: "full", review_id: "123-fixture", pr_number: 123,
+        head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", github_repository: "example/repository",
+        reviewers: ["alpha", "beta"], status: {}, artifacts: {}}' >"$stale_manifest"
+REVIEW_ID=123-fixture
+PR_NUMBER=123
+GITHUB_REPOSITORY=example/repository
+HEAD_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+assert_eq 'the PR head moved from aaaaaaaaaaaa to bbbbbbbbbbbb; start a new run for the current head' \
+    "$(describe_manifest_incompatibility "$stale_manifest")" \
+    'a manifest recorded for an older PR head explains the head change'
+HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+assert_eq '' "$(describe_manifest_incompatibility "$stale_manifest")" \
+    'a compatible manifest has no incompatibility reason'
+jq '.run_type = "final-rerun"' "$stale_manifest" >"$test_root/rerun-manifest.json"
+assert_eq 'run_type is final-rerun, not a full run' \
+    "$(describe_manifest_incompatibility "$test_root/rerun-manifest.json")" \
+    'a non-full manifest names its run type'
 assert_eq 'high' "$(jq -r '.reasoning_effort' "$usage_output")" \
     'usage summary records configured reasoning effort'
 
