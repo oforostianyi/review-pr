@@ -36,6 +36,24 @@ before agents start. It also covers RIGHT-side line maps, renames, deleted/binar
 PR-level findings, and bounded final-anchor repair. The suite is a source-development asset and is
 not included in the current end-user archive.
 
+## Test real agent contract compatibility
+
+After enabling `ndjson-v1`, test a configured CLI/model without fetching or reviewing a pull
+request:
+
+```bash
+review-pr contract-test --agent codex --phase all
+review-pr contract-test --agent pi --phase final --output "$HOME/review-pr-contract-pi"
+```
+
+The command sends a small fixed fixture through the selected `primary`, `cross`, and/or `final`
+contract, then runs the production validators and deterministic Markdown renderers. It runs agents
+sequentially and preserves the prompt, raw output, stderr, normalized usage, canonical findings,
+rendered Markdown, and `summary.json`. No configured review checkout, Git operation, GitHub request,
+or real PR is involved. The selected CLI/model is still invoked, so hosted API usage, subscription
+limits, and local inference time still apply. An explicitly named configured agent may be tested
+while disabled; with no `--agent`, enabled reviewers plus the enabled synthesizer are selected.
+
 ## macOS prerequisites
 
 Install Homebrew if it is not already present, then:

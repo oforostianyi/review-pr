@@ -157,6 +157,10 @@ SHOW_VERSION=false
 RERUN_FINAL=false
 RESUME_RUN=false
 FORCE_RERUN=false
+CONTRACT_TEST_MODE=false
+CONTRACT_TEST_PHASE=all
+CONTRACT_TEST_OUTPUT=""
+declare -a CONTRACT_TEST_AGENTS=()
 RUN_SELECTOR=""
 STATUS_INTERVAL_SECONDS=30
 STATUS_MODE=auto
@@ -274,6 +278,7 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] --run <timestamp> <pull-request-number>
        ${0##*/} [--config <file>] --rerun-final [--force] [--run <timestamp>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
+       ${0##*/} [--config <file>] contract-test [--agent <name>]... [--phase <primary|cross|final|all>] [--output <directory>]
        ${0##*/} --version
 EOF
 }
@@ -2443,8 +2448,10 @@ validate_configuration() {
     local pi_capability_checked=false
     declare -A seen_agents=()
 
-    (( ${#REVIEW_AGENTS[@]} >= 2 )) || die "At least two review agents are required for cross-review"
-    [[ "$FINAL_SYNTHESIZER" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid final synthesizer name: ${FINAL_SYNTHESIZER}"
+    if [[ "$validation_scope" != contract-test ]]; then
+        (( ${#REVIEW_AGENTS[@]} >= 2 )) || die "At least two review agents are required for cross-review"
+        [[ "$FINAL_SYNTHESIZER" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid final synthesizer name: ${FINAL_SYNTHESIZER}"
+    fi
 
     for agent in "${REVIEW_AGENTS[@]}"; do
         [[ "$agent" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid review agent name: ${agent}"
@@ -2455,6 +2462,8 @@ validate_configuration() {
     local -a executable_agents=("${REVIEW_AGENTS[@]}" "$FINAL_SYNTHESIZER")
     if [[ "$validation_scope" == "synthesizer-only" ]]; then
         executable_agents=("$FINAL_SYNTHESIZER")
+    elif [[ "$validation_scope" == contract-test ]]; then
+        executable_agents=("${REVIEW_AGENTS[@]}")
     fi
 
     for agent in "${executable_agents[@]}"; do
@@ -4674,6 +4683,17 @@ run_configured_command_in_worktree() {
         output_contract=$FINAL_FINDING_CONTRACT_MODE
     fi
 
+    if [[ "$CONTRACT_TEST_MODE" == true ]]; then
+        expand_configured_command "$command_template" "$prompt_file" "$model" "$effort" "$phase" "$WORK_DIR"
+        cd "$WORK_DIR"
+        env REVIEW_PR_ARTIFACT_ONLY=true REVIEW_PR_CONTRACT_TEST=true \
+            REVIEW_PR_AGENT="$agent" REVIEW_PR_PHASE="$phase" REVIEW_PR_OUTPUT_CONTRACT="$output_contract" \
+            REVIEW_PR_MODEL="$model" REVIEW_PR_EFFORT="$effort" REVIEW_PR_ATTEMPT="$attempt" \
+            REVIEW_PR_MAX_ATTEMPTS=1 REVIEW_PR_REPO="$WORK_DIR" REVIEW_PR_NUMBER=0 \
+            REVIEW_PR_USAGE_FILE="$usage_file" REVIEW_PR_USAGE_JSON="$usage_json_file" \
+            "${EXPANDED_COMMAND[@]}" <"$prompt_file"
+        return
+    fi
     if [[ "$RERUN_FINAL" == true && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) ]]; then
         expand_configured_command "$command_template" "$prompt_file" "$model" "$effort" "$phase" "$REPORT_DIR"
         cd "$REPORT_DIR"
@@ -4799,6 +4819,7 @@ start_agent() {
     local pi_payload_file=$prompt_file
     local pi_tail_control=''
     local agent_working_directory=$REVIEW_REPO
+    local agent_max_attempts=$RETRY_MAX_ATTEMPTS
     local artifact_only=false
     local output_contract=markdown
     local output_contract_description='complete Markdown body'
@@ -4808,14 +4829,19 @@ start_agent() {
     local -a pi_tool_arguments=()
     local -a EXPANDED_COMMAND=()
 
-    if [[ ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && -n "$FINALIZATION_MODEL" ]]; then
+    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && -n "$FINALIZATION_MODEL" ]]; then
         model=$FINALIZATION_MODEL
     fi
-    if [[ ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && "$FINALIZATION_EFFORT_CONFIGURED" == true ]]; then
+    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && "$FINALIZATION_EFFORT_CONFIGURED" == true ]]; then
         effort=$FINALIZATION_EFFORT
     fi
     if [[ "$RERUN_FINAL" == true && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) ]]; then
         agent_working_directory=$REPORT_DIR
+        artifact_only=true
+    fi
+    if [[ "$CONTRACT_TEST_MODE" == true ]]; then
+        agent_working_directory=$WORK_DIR
+        agent_max_attempts=1
         artifact_only=true
     fi
     if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
@@ -4858,13 +4884,14 @@ start_agent() {
             cd "$agent_working_directory"
             env \
                 REVIEW_PR_ARTIFACT_ONLY="$artifact_only" \
+                REVIEW_PR_CONTRACT_TEST="$CONTRACT_TEST_MODE" \
                 REVIEW_PR_AGENT="$agent" \
                 REVIEW_PR_PHASE="$phase" \
                 REVIEW_PR_OUTPUT_CONTRACT="$output_contract" \
                 REVIEW_PR_MODEL="$model" \
                 REVIEW_PR_EFFORT="$effort" \
                 REVIEW_PR_ATTEMPT="$attempt" \
-                REVIEW_PR_MAX_ATTEMPTS="$RETRY_MAX_ATTEMPTS" \
+                REVIEW_PR_MAX_ATTEMPTS="$agent_max_attempts" \
                 REVIEW_PR_REPO="$agent_working_directory" \
                 REVIEW_PR_NUMBER="$PR_NUMBER" \
                 REVIEW_PR_TITLE="$PR_TITLE" \
@@ -4959,6 +4986,10 @@ start_agent() {
                 pi_system_prompt_arguments=(--system-prompt "$pi_control_file")
                 pi_tool_arguments=(--no-tools)
                 pi_tail_control="FINAL ORCHESTRATOR CONTROL: perform only the bounded ndjson-v1 schema repair defined by the system contract. Do not inspect source or change finding content, classification, or provenance. Return only the repaired NDJSON stream."
+            elif [[ "$CONTRACT_TEST_MODE" == true ]]; then
+                pi_system_prompt_arguments=(--system-prompt "$pi_control_file")
+                pi_tool_arguments=(--no-tools)
+                pi_tail_control="FINAL ORCHESTRATOR CONTROL: this is an isolated output-contract conformance test. Do not use tools. Return only the exact ndjson-v1 stream requested by the system contract."
             elif [[ "$phase" == "comparison synthesis" ]]; then
                 new_temp_file "pi-${attempt}-comparison-payload"
                 pi_payload_file=$NEW_TEMP_FILE
@@ -7912,6 +7943,172 @@ run_final_synthesis() {
     activity_log "Completed final synthesis after $(format_duration "$((final_finished_at - final_started_at))") [tokens: ${final_token_display}]: ${FINAL_REPORT}"
 }
 
+write_contract_test_prompt() {
+    local agent=$1 phase=$2 prompt_file=$3
+    local record
+    case "$phase" in
+        primary)
+            record=$(jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,end:10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}')
+            ;;
+        cross)
+            record='{"record":"finding","schema_version":1,"source_id":"FIX-CROSS-001","source_refs":[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The fixture line confirms the supplied claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-primary"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]}}'
+            ;;
+        final)
+            record='{"record":"finding","schema_version":1,"source_id":"FIX-FINAL-001","source_refs":[{"agent":"fixture-cross","source_id":"FIX-CROSS-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The canonical fixture cross-review confirms the claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-cross"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]},"include_in_rejected_summary":false}'
+            ;;
+        *) die "Unknown contract-test phase: ${phase}" ;;
+    esac
+    cat >"$prompt_file" <<EOF
+This is an isolated review-pr ndjson-v1 output-contract conformance test. It is not a code review. Do not inspect files, call tools, access the network, or add analysis.
+
+Return exactly two physical lines and nothing else. Line 1 must be this exact JSON object:
+${record}
+Line 2 must be this exact JSON object:
+{"record":"complete","schema_version":1,"finding_count":1,"summary":"Fixture contract completed.","verification_limitations":[],"positive_evidence":[]}
+
+Do not use a Markdown fence, preamble, blank prose, explanation, or trailing text. Copy strings, nulls, arrays, keys, enum values, source IDs, refs, path, and line numbers exactly. Compact JSON or JSON with spaces on each individual line is acceptable.
+EOF
+}
+
+parse_contract_test_stream() {
+    local raw_file=$1 records_file=$2 normalized_file array_file line
+    new_temp_file 'contract-normalized'; normalized_file=$NEW_TEMP_FILE
+    new_temp_file 'contract-record-array'; array_file=$NEW_TEMP_FILE
+    normalize_primary_ndjson_stream "$raw_file" "$normalized_file" || return 1
+    : >"$records_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null || return 1
+    done <"$normalized_file"
+    jq -s '.' "$records_file" >"$array_file" || return 1
+    mv -- "$array_file" "$records_file"
+}
+
+run_contract_test() {
+    local root timestamp agent phase phase_name prompt output log_file usage_file usage_json records canonical rendered expected status result status_json
+    local summary_model summary_effort
+    local failures=0
+    local -a phases=()
+    local summary='[]'
+
+    [[ -f "$CONFIG_FILE" ]] || die "Contract-test requires a configuration file: ${CONFIG_FILE}"
+    case "$CONTRACT_TEST_PHASE" in
+        all) phases=(primary cross final) ;;
+        primary | cross | final) phases=("$CONTRACT_TEST_PHASE") ;;
+        *) die "--phase must be primary, cross, final, or all" ;;
+    esac
+    if (( ${#CONTRACT_TEST_AGENTS[@]} == 0 )); then
+        CONTRACT_TEST_AGENTS=("${REVIEW_AGENTS[@]}")
+        if [[ "${AGENT_ENABLED[$FINAL_SYNTHESIZER]:-false}" == true ]]; then
+            CONTRACT_TEST_AGENTS+=("$FINAL_SYNTHESIZER")
+        fi
+        mapfile -t CONTRACT_TEST_AGENTS < <(printf '%s\n' "${CONTRACT_TEST_AGENTS[@]}" | awk '!seen[$0]++')
+    fi
+    REVIEW_AGENTS=("${CONTRACT_TEST_AGENTS[@]}")
+    (( ${#REVIEW_AGENTS[@]} > 0 )) || die 'No agents were selected for contract testing'
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        [[ "$agent" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid contract-test agent: ${agent}"
+        jq -e --arg agent "$agent" '.agents | has($agent)' "$CONFIG_FILE" >/dev/null \
+            || die "Contract-test agent is not configured: ${agent}"
+    done
+    validate_configuration contract-test
+
+    timestamp=$(TZ=Europe/Warsaw date '+%Y%m%d-%H%M%S-%Z')
+    if [[ -n "$CONTRACT_TEST_OUTPUT" ]]; then
+        root=$CONTRACT_TEST_OUTPUT
+    else
+        root="${REVIEWS_ROOT:-${HOME}/review-pr}/contract-tests/${timestamp}"
+    fi
+    [[ "$root" == /* ]] || die "Contract-test output must be an absolute path: ${root}"
+    [[ ! -e "$root" ]] || die "Refusing to overwrite contract-test output: ${root}"
+    mkdir -p -- "$root"
+    WORK_DIR=$root
+    REPORT_STEM=contract-test
+    CHANGED_LINE_MAP_FILE="${root}/changed-lines.json"
+    REVIEW_REPO=$root
+    PR_NUMBER=0 PR_TITLE='Contract fixture' PR_TASK_DISPLAY='Contract fixture' PR_AUTHOR_DISPLAY='Fixture'
+    BASE_REF=base HEAD_REF=head BASE_SHA=fixture-base HEAD_SHA=fixture-head
+    cat >"$CHANGED_LINE_MAP_FILE" <<'EOF'
+{"schema_version":1,"status":"complete","files":[{"path":"fixture/Changed.php","inline_anchorable":true,"right_side_ranges":[{"start":10,"end":10}]}]}
+EOF
+    PRIMARY_FINDING_CONTRACT_MODE=ndjson-v1
+    CROSS_FINDING_CONTRACT_MODE=ndjson-v1
+    FINAL_FINDING_CONTRACT_MODE=ndjson-v1
+    PRIMARY_REVIEW_LANGUAGE=EN
+    CROSS_REVIEW_LANGUAGE=EN
+    FINALIZATION_LANGUAGE=EN
+    configure_finalization_language
+
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        for phase in "${phases[@]}"; do
+            case "$phase" in primary) phase_name='primary review' ;; cross) phase_name='cross-review' ;; final) phase_name='final synthesis' ;; esac
+            prompt="${root}/${agent}-${phase}-prompt.txt"
+            output="${root}/${agent}-${phase}-raw.ndjson"
+            log_file="${root}/${agent}-${phase}-stderr.log"
+            usage_file="${root}/${agent}-${phase}-tokens.txt"
+            usage_json="${root}/${agent}-${phase}-usage.json"
+            new_temp_file "contract-${agent}-${phase}-records"; records=$NEW_TEMP_FILE
+            canonical="${root}/${agent}-${phase}-findings.json"
+            rendered="${root}/${agent}-${phase}.md"
+            write_contract_test_prompt "$agent" "$phase" "$prompt"
+            log "Contract test: $(agent_label "$agent") / ${phase}"
+            start_agent "$agent" "$phase_name" "$prompt" "$output" "$log_file" "$usage_file" "$usage_json"
+            if wait "$STARTED_PID"; then status=0; else status=$?; fi
+            RUNNING_PIDS=()
+            result=failed
+            if (( status == 0 )) && [[ -s "$output" ]] && parse_contract_test_stream "$output" "$records"; then
+                case "$phase" in
+                    primary)
+                        if validate_primary_ndjson_records "$records" "$canonical" "$agent" && render_primary_findings_markdown "$canonical" "$rendered" EN; then result=passed; fi
+                        ;;
+                    cross)
+                        new_temp_file "contract-${agent}-cross-expected"; expected=$NEW_TEMP_FILE
+                        printf '%s\n' '[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}]' >"$expected"
+                        if validate_cross_ndjson_records "$records" "$canonical" "$agent" "$expected" && render_cross_findings_markdown "$canonical" "$rendered" EN; then result=passed; fi
+                        ;;
+                    final)
+                        new_temp_file "contract-${agent}-final-expected"; expected=$NEW_TEMP_FILE
+                        printf '%s\n' '[{"agent":"fixture-cross","source_id":"FIX-CROSS-001","primary_refs":[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}]}]' >"$expected"
+                        FINAL_HEADER_TITLE='# Code Review: fixture contract test'
+                        FINAL_HEADER_TABLE_HEADER='| Field | Value |'; FINAL_HEADER_TABLE_SEPARATOR='| --- | --- |'
+                        FINAL_HEADER_TASK='| **Task** | Contract fixture |'; FINAL_HEADER_BASE='| **Base** | `base` → `head` |'
+                        FINAL_HEADER_FILES='| **Files changed** | 1 · +1 / −0 |'; FINAL_HEADER_AUTHOR='| **Author** | Fixture |'
+                        if validate_final_ndjson_records "$records" "$canonical" "$expected" && render_final_findings_markdown "$canonical" "$rendered"; then result=passed; fi
+                        ;;
+                esac
+            fi
+            rm -f -- "$records"
+            if [[ -n "${expected:-}" ]]; then
+                rm -f -- "$expected"
+            fi
+            expected=''
+            if [[ "$result" != passed ]]; then
+                rm -f -- "$canonical" "$rendered"
+                failures=$((failures + 1))
+            fi
+            status_json=$(if [[ "$result" == passed ]]; then printf true; else printf false; fi)
+            summary_model=${AGENT_MODELS[$agent]:-}
+            summary_effort=${AGENT_EFFORTS[$agent]:-}
+            if [[ "$phase" == final && "$agent" == "$FINAL_SYNTHESIZER" ]]; then
+                if [[ -n "$FINALIZATION_MODEL" ]]; then
+                    summary_model=$FINALIZATION_MODEL
+                fi
+                if [[ "$FINALIZATION_EFFORT_CONFIGURED" == true ]]; then
+                    summary_effort=$FINALIZATION_EFFORT
+                fi
+            fi
+            summary=$(jq -c --arg agent "$agent" --arg label "$(agent_label "$agent")" --arg phase "$phase" \
+                --arg model "$summary_model" --arg effort "$summary_effort" \
+                --arg result "$result" --argjson passed "$status_json" \
+                '. + [{agent:$agent,label:$label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
+            printf '%-18s %-8s %s\n' "$(agent_label "$agent")" "$phase" "${result^^}"
+        done
+    done
+    jq -n --arg version "$REVIEW_PR_VERSION" --arg timestamp "$timestamp" --argjson results "$summary" \
+        '{schema_version:1,review_pr_version:$version,timestamp:$timestamp,results:$results,passed:(all($results[];.passed))}' >"${root}/summary.json"
+    printf 'Artifacts: %s\n' "$root"
+    (( failures == 0 ))
+}
+
 declare -a positional_arguments=()
 while (( $# > 0 )); do
     case "$1" in
@@ -7932,6 +8129,25 @@ while (( $# > 0 )); do
         --rerun-final)
             RERUN_FINAL=true
             shift
+            ;;
+        contract-test)
+            CONTRACT_TEST_MODE=true
+            shift
+            ;;
+        --agent)
+            (( $# >= 2 )) || die "--agent requires an agent name"
+            CONTRACT_TEST_AGENTS+=("$2")
+            shift 2
+            ;;
+        --phase)
+            (( $# >= 2 )) || die "--phase requires primary, cross, final, or all"
+            CONTRACT_TEST_PHASE=$2
+            shift 2
+            ;;
+        --output)
+            (( $# >= 2 )) || die "--output requires a directory"
+            CONTRACT_TEST_OUTPUT=$2
+            shift 2
             ;;
         --force)
             FORCE_RERUN=true
@@ -7962,6 +8178,10 @@ while (( $# > 0 )); do
 done
 set -- "${positional_arguments[@]}"
 
+if [[ "$CONTRACT_TEST_MODE" != true && ( ${#CONTRACT_TEST_AGENTS[@]} -gt 0 || "$CONTRACT_TEST_PHASE" != all || -n "$CONTRACT_TEST_OUTPUT" ) ]]; then
+    die '--agent, --phase, and --output are only valid with contract-test'
+fi
+
 # Tests source this file to exercise validators and artifact helpers without
 # entering the CLI workflow. Keep the guard immediately before main execution
 # so all function definitions and defaults are available while Git, GitHub, and
@@ -7981,6 +8201,12 @@ fi
 load_config
 configure_finalization_language
 configure_review_languages
+if [[ "$CONTRACT_TEST_MODE" == true ]]; then
+    (( $# == 0 )) || die 'contract-test does not accept a pull-request target'
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] \
+        || die 'contract-test cannot be combined with PR workflow options'
+    if run_contract_test; then exit 0; else exit 1; fi
+fi
 activate_default_repository
 
 if [[ "$SHOW_CONFIG" == false && $# == 1 ]]; then

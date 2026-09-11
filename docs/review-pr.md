@@ -295,6 +295,44 @@ Structured final synthesis requires structured primary and cross-review inputs p
 
 There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
+### Real-agent contract test
+
+Use the conformance command before opting a new CLI or model into `ndjson-v1`:
+
+```bash
+review-pr contract-test
+review-pr contract-test --agent claude --agent codex --phase primary
+review-pr contract-test --agent pi --phase final --output "$HOME/review-pr-contract-pi"
+```
+
+`--phase` accepts `primary`, `cross`, `final`, or `all` (the default). Repeated `--agent` selects
+configured agent keys. With no selection, the command tests all enabled reviewers and adds the
+enabled synthesizer if it is not already present. A named agent may remain `enabled: false`, which
+allows its command, model, permissions, and output behavior to be checked before it joins a real
+pipeline. An explicit `--output` path must be absolute and must not already exist; otherwise output
+is written below `<reviews_directory>/contract-tests/<timestamp>/`.
+
+Each selected agent/phase receives a two-record fixed NDJSON fixture: one phase-specific finding and
+one terminal completion record. Tests run sequentially even when ordinary review concurrency is
+larger. The normal execution path invokes the configured built-in CLI, `command`, or `runner`; the
+same production schema, provenance, coverage, changed-line, and rendering code then validates the
+response. For the configured synthesizer's `final` phase, `finalization.model` and its configured
+effort are used exactly as in a real final synthesis. Testing another agent against `final` uses
+that agent's own model and effort.
+
+The artifact directory retains `*-prompt.txt`, exact `*-raw.ndjson`, `*-stderr.log`,
+`*-usage.json`, validated `*-findings.json`, deterministic `*.md`, and an aggregate `summary.json`.
+Failed raw output and diagnostics remain available, but failed output never becomes a canonical
+findings file. A zero exit status means every selected contract passed; any CLI or validation
+failure returns non-zero. The command does not read a configured checkout, call Git, contact GitHub,
+or inspect a PR. It **does invoke the selected model**, so API charges, subscription quotas, local
+context limits, permissions, and inference time still apply. Contract-test artifacts may contain
+provider diagnostics and should be treated according to the same retention policy as review output.
+
+This command deliberately checks the first response and does not hide incompatibility behind the
+pipeline's bounded repair/retry behavior. Passing proves wire-format compatibility with the fixed
+fixture; it does not prove review quality, large-context reliability, or correctness on real code.
+
 ## Optional comparison reports
 
 Comparison material can be controlled independently for cross-review and final synthesis:

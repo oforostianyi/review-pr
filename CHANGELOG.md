@@ -28,6 +28,10 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - One bounded structured-final schema-repair pass that permits transport/schema correction while
   freezing decisions, severities, refs, anchors, rejection presentation, and substantive content.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
+- `review-pr contract-test` for sequential, real-agent conformance checks of the primary,
+  cross-review, and final `ndjson-v1` contracts without GitHub or a review checkout. It preserves
+  prompts, raw responses, diagnostics, usage, canonical findings, rendered Markdown, and a machine
+  summary, including on validation failure.
 
 ### Changed
 

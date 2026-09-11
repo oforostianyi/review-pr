@@ -231,6 +231,22 @@ emit_valid_ndjson_final() {
     }'
 }
 
+emit_contract_ndjson() {
+    case "$phase" in
+        'primary review')
+            jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,end:10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}'
+            ;;
+        cross-review)
+            printf '%s\n' '{"record":"finding","schema_version":1,"source_id":"FIX-CROSS-001","source_refs":[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The fixture line confirms the supplied claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-primary"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]}}'
+            ;;
+        'final synthesis')
+            printf '%s\n' '{"record":"finding","schema_version":1,"source_id":"FIX-FINAL-001","source_refs":[{"agent":"fixture-cross","source_id":"FIX-CROSS-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The canonical fixture cross-review confirms the claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-cross"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]},"include_in_rejected_summary":false}'
+            ;;
+        *) printf 'unexpected contract-test phase: %s\n' "$phase" >&2; exit 65 ;;
+    esac
+    printf '%s\n' '{"record":"complete","schema_version":1,"finding_count":1,"summary":"Fixture contract completed.","verification_limitations":[],"positive_evidence":[]}'
+}
+
 emit_anchor_output() {
     local anchor_line=$1
     local problem_text=${2:-The fixture finding remains byte-for-byte stable.}
@@ -263,6 +279,13 @@ EOF
 }
 
 case "$behavior" in
+    contract-valid)
+        [[ "${REVIEW_PR_CONTRACT_TEST:-false}" == true ]] || { printf '%s\n' 'contract-test marker missing' >&2; exit 65; }
+        [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]] || { printf '%s\n' 'contract-test output contract missing' >&2; exit 65; }
+        [[ "${REVIEW_PR_MAX_ATTEMPTS:-}" == 1 ]] || { printf '%s\n' 'contract-test must request one attempt' >&2; exit 65; }
+        emit_contract_ndjson
+        write_usage null 33
+        ;;
     valid)
         sleep "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}"
         emit_valid_output
