@@ -132,6 +132,14 @@ confirmed_empty_scenario="$test_root/cross-confirmed-empty-scenario.json"
 jq '.[0].failure_scenario = ""' "$cross_records" >"$confirmed_empty_scenario"
 assert_false 'a confirmed cross-review finding still requires a failure scenario' \
     validate_cross_ndjson_records "$confirmed_empty_scenario" "$test_root/cross-confirmed-empty-canonical.json" alpha "$cross_expected_refs"
+assert_eq 'finding[alpha:C-001].failure_scenario' \
+    "$(describe_ndjson_validation_failure cross "$confirmed_empty_scenario" alpha "$cross_expected_refs")" \
+    'validation diagnostics name the record and field that failed'
+assert_eq 'source_refs.missing[beta:beta:F-001], source_refs.unknown[beta:beta:F-002]' \
+    "$(describe_ndjson_validation_failure cross "$missing_cross_ref" alpha "$cross_expected_refs")" \
+    'validation diagnostics list missing and unknown source refs'
+assert_eq '' "$(describe_ndjson_validation_failure cross "$cross_records" alpha "$cross_expected_refs")" \
+    'validation diagnostics are empty for a valid stream'
 rejected_empty_rendered="$test_root/cross-rejected-empty.md"
 assert_true 'a rejected claim without a failure scenario renders' \
     render_cross_findings_markdown "$rejected_empty_canonical" "$rejected_empty_rendered" EN
@@ -196,6 +204,9 @@ final_bad_rejected_flag="$test_root/final-bad-rejected-flag.json"
 jq '.[0].include_in_rejected_summary = true' "$final_records" >"$final_bad_rejected_flag"
 assert_false 'only rejected findings may enter the important-rejections summary' \
     validate_final_ndjson_records "$final_bad_rejected_flag" "$test_root/final-bad-flag-canonical.json" "$final_expected_refs"
+assert_eq 'finding[FINAL-001].include_in_rejected_summary' \
+    "$(describe_ndjson_validation_failure final "$final_bad_rejected_flag" '' "$final_expected_refs")" \
+    'final validation diagnostics name the failing decision field'
 
 final_rejected_empty_scenario="$test_root/final-rejected-empty-scenario.json"
 jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = ""' "$final_records" >"$final_rejected_empty_scenario"
@@ -288,31 +299,31 @@ assert_invalid_contract() {
 duplicate_ids="$test_root/duplicate-source.ndjson"
 sed 's/"source_id":"F-002"/"source_id":"F-001"/' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$duplicate_ids"
-assert_invalid_contract duplicate-source-id schema_or_completeness_validation_failed "$duplicate_ids"
+assert_invalid_contract duplicate-source-id 'schema_or_completeness_validation_failed: stream.duplicate_source_id[F-001]' "$duplicate_ids"
 
 truncated="$test_root/truncated-source.ndjson"
 sed '$d' "$test_dir/fixtures/primary-findings-valid.ndjson" >"$truncated"
-assert_invalid_contract missing-complete schema_or_completeness_validation_failed "$truncated"
+assert_invalid_contract missing-complete 'schema_or_completeness_validation_failed: stream.no_complete' "$truncated"
 
 wrong_line="$test_root/wrong-line-source.ndjson"
 sed 's/"start":10,"end":10/"start":13,"end":13/' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$wrong_line"
-assert_invalid_contract context-line schema_or_completeness_validation_failed "$wrong_line"
+assert_invalid_contract context-line 'schema_or_completeness_validation_failed: finding[F-001].anchor' "$wrong_line"
 
 classified="$test_root/classified-source.ndjson"
 sed '0,/"classification":null/s//"classification":"CONFIRMED"/' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$classified"
-assert_invalid_contract primary-classification schema_or_completeness_validation_failed "$classified"
+assert_invalid_contract primary-classification 'schema_or_completeness_validation_failed: finding[F-001].classification' "$classified"
 
 foreign_provenance="$test_root/foreign-provenance.ndjson"
 sed '0,/"contributing_agents":\["codex"\]/s//"contributing_agents":["codex","claude"]/' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$foreign_provenance"
-assert_invalid_contract foreign-primary-provenance schema_or_completeness_validation_failed "$foreign_provenance"
+assert_invalid_contract foreign-primary-provenance 'schema_or_completeness_validation_failed: finding[F-001].contributing_agents' "$foreign_provenance"
 
 missing_thread_id="$test_root/missing-thread-id.ndjson"
 sed '0,/"state":"new","thread_ids":\[\]/s//"state":"confirmed-existing","thread_ids":[]/' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
-assert_invalid_contract missing-existing-thread-id schema_or_completeness_validation_failed "$missing_thread_id"
+assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
 
 preamble="$test_root/preamble-source.ndjson"
 {

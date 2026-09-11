@@ -161,6 +161,22 @@ extract_token_usage \
     high
 assert_eq '2300' "$(jq -r '.reported_total_tokens' "$usage_output")" \
     'usage totals use non-overlapping input/output/cache components'
+
+pi_error_usage="$test_root/usage-pi-error.json"
+extract_token_usage \
+    "$test_dir/fixtures/usage-pi-error.jsonl" \
+    "$test_root/usage-pi-error.total" \
+    "$pi_error_usage" \
+    pi \
+    'primary review' \
+    local-fixture \
+    ''
+assert_eq 'error' "$(jq -r '.stop_reason' "$pi_error_usage")" \
+    'a failed Pi turn records the error stop reason'
+assert_eq 'Connection error.' "$(jq -r '.error_message' "$pi_error_usage")" \
+    'a failed Pi turn preserves the provider error message'
+assert_eq 'null' "$(jq -r '.error_message' "$usage_output")" \
+    'a successful turn records no error message'
 assert_eq 'high' "$(jq -r '.reasoning_effort' "$usage_output")" \
     'usage summary records configured reasoning effort'
 

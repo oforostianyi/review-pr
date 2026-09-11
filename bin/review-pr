@@ -2845,7 +2845,7 @@ render_primary_findings_markdown() {
 process_primary_ndjson_output() {
     local output_file=$1
     local agent=$2
-    local normalized_file
+    local normalized_file detail
     local records_file
     local canonical_file
     local rendered_file
@@ -2883,7 +2883,8 @@ process_primary_ndjson_output() {
     fi
     mv -- "$records_array_file" "$records_file"
     if ! validate_primary_ndjson_records "$records_file" "$canonical_file" "$agent"; then
-        FINDING_CONTRACT_FAILURE_REASON=schema_or_completeness_validation_failed
+        detail=$(describe_ndjson_validation_failure primary "$records_file" "$agent")
+        FINDING_CONTRACT_FAILURE_REASON="schema_or_completeness_validation_failed${detail:+: $detail}"
         return 1
     fi
     if ! render_primary_findings_markdown "$canonical_file" "$rendered_file" "$PRIMARY_REVIEW_LANGUAGE" || [[ ! -s "$rendered_file" ]]; then
@@ -3107,7 +3108,7 @@ render_cross_findings_markdown() {
 process_cross_ndjson_output() {
     local output_file=$1
     local agent=$2
-    local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line
+    local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local line_number=0
     local raw_target=${CROSS_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson}
     local findings_target=${CROSS_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json}
@@ -3144,7 +3145,8 @@ process_cross_ndjson_output() {
     }
     mv -- "$records_array_file" "$records_file"
     if ! validate_cross_ndjson_records "$records_file" "$canonical_file" "$agent" "$expected_refs_file"; then
-        FINDING_CONTRACT_FAILURE_REASON=schema_provenance_or_completeness_validation_failed
+        detail=$(describe_ndjson_validation_failure cross "$records_file" "$agent" "$expected_refs_file")
+        FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
         return 1
     fi
     if ! render_cross_findings_markdown "$canonical_file" "$rendered_file" "$CROSS_REVIEW_LANGUAGE" || [[ ! -s "$rendered_file" ]]; then
@@ -3340,9 +3342,142 @@ render_final_findings_markdown() {
     } >"$output_file"
 }
 
+describe_ndjson_validation_failure() {
+    local phase=$1
+    local records_file=$2
+    local agent=$3
+    local expected_refs_file=${4:-}
+    local expected_refs_json='[]'
+
+    [[ -s "$CHANGED_LINE_MAP_FILE" ]] || { printf 'changed_line_map.unavailable'; return 0; }
+    if [[ -n "$expected_refs_file" && -s "$expected_refs_file" ]]; then
+        expected_refs_json=$(jq -c '[.[] | {agent, source_id}]' "$expected_refs_file" 2>/dev/null || printf '[]')
+    fi
+    jq -r --arg phase "$phase" --arg agent "$agent" \
+        --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
+        --argjson expected_refs "$expected_refs_json" '
+        def string_array:
+            type == "array" and all(.[]; type == "string");
+        def valid_anchor:
+            type == "object" and
+            ((keys - ["end", "file", "kind", "start"]) | length) == 0 and
+            has("kind") and has("file") and has("start") and has("end") and
+            if .kind == "changed-line" then
+                (.file | type == "string" and length > 0) and
+                (.start | type == "number" and floor == . and . >= 1) and
+                (.end | type == "number" and floor == . and . >= 1) and
+                (.start <= .end) and
+                (. as $anchor |
+                    any($changed_lines[0].files[];
+                        .path == $anchor.file and .inline_anchorable == true and
+                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+            elif .kind == "pr-level" then
+                .file == null and .start == null and .end == null
+            else false end;
+        def valid_existing_feedback:
+            type == "object" and ((keys - ["state", "thread_ids"]) | length) == 0 and
+            has("state") and has("thread_ids") and
+            (.state | IN("new", "confirmed-existing", "historical", "unknown")) and
+            (.thread_ids | type == "array" and all(.[]; type == "string" and length > 0) and (unique | length) == length) and
+            (if .state == "new" then (.thread_ids | length) == 0
+             elif (.state == "confirmed-existing" or .state == "historical") then (.thread_ids | length) > 0
+             else true end);
+        def valid_source_ref:
+            type == "object" and ((keys - ["agent", "source_id"]) | length) == 0 and
+            (.agent | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+            (.source_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"));
+        def finding_keys:
+            ["anchor", "category", "claim", "classification", "contributing_agents", "evidence", "existing_feedback",
+             "failure_scenario", "recommendation", "record", "schema_version", "severity", "source_id", "title",
+             "verification_limitations"]
+            + (if $phase == "primary" then [] else ["source_refs"] end)
+            + (if $phase == "final" then ["include_in_rejected_summary"] else [] end);
+        def complete_keys:
+            ["finding_count", "positive_evidence", "record", "schema_version", "summary", "verification_limitations"];
+        def problem($name; $ok): if $ok then empty else $name end;
+        def ref_label: (.agent | tostring) + ":" + (.source_id | tostring);
+        def finding_problems:
+            . as $r |
+            [
+                problem("keys"; ((keys - finding_keys) | length) == 0 and ((finding_keys - keys) | length) == 0),
+                problem("record"; $r.record == "finding"),
+                problem("schema_version"; $r.schema_version == 1),
+                problem("source_id"; $r.source_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]*$")),
+                problem("title"; $r.title | type == "string" and length > 0),
+                problem("claim"; $r.claim | type == "string" and length > 0),
+                problem("anchor"; $r.anchor | valid_anchor),
+                problem("evidence"; $r.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)),
+                problem("failure_scenario"; $r.failure_scenario |
+                    (type == "string" and length > 0) or
+                    ($phase != "primary" and $r.classification != "CONFIRMED" and (. == null or . == ""))),
+                problem("recommendation"; $r.recommendation | type == "string" and length > 0),
+                problem("classification";
+                    if $phase == "primary" then $r.classification == null
+                    else ($r.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) end),
+                problem("severity";
+                    if $phase == "primary" then ($r.severity == null or ($r.severity | IN("P0", "P1", "P2", "P3")))
+                    elif $r.classification == "CONFIRMED" then ($r.severity | IN("P0", "P1", "P2", "P3"))
+                    else $r.severity == null end),
+                problem("category"; $r.category | type == "string" and length > 0),
+                (if $phase == "primary" then
+                    problem("contributing_agents"; $r.contributing_agents | type == "array" and length == 1 and .[0] == $agent)
+                 else
+                    problem("source_refs"; $r.source_refs | type == "array" and length > 0 and all(.[]; valid_source_ref) and
+                        (unique_by(.agent, .source_id) | length) == length),
+                    problem("contributing_agents"; $r.contributing_agents | type == "array" and length > 0 and
+                        all(.[]; type == "string" and length > 0) and
+                        (sort == ([($r.source_refs // [])[] | objects | .agent] | unique | sort)))
+                 end),
+                (if $phase == "final" then
+                    problem("include_in_rejected_summary"; ($r.include_in_rejected_summary | type == "boolean") and
+                        (if $r.include_in_rejected_summary == true then $r.classification == "REJECTED" else true end))
+                 else empty end),
+                problem("verification_limitations"; $r.verification_limitations | string_array),
+                problem("existing_feedback"; $r.existing_feedback | valid_existing_feedback)
+            ];
+        def complete_problems:
+            . as $c |
+            [
+                problem("keys"; ((keys - complete_keys) | length) == 0 and ((complete_keys - keys) | length) == 0),
+                problem("schema_version"; $c.schema_version == 1),
+                problem("finding_count"; $c.finding_count | type == "number" and floor == . and . >= 0),
+                problem("summary"; $c.summary | type == "string"),
+                problem("verification_limitations"; $c.verification_limitations | string_array),
+                problem("positive_evidence"; $c.positive_evidence | string_array)
+            ];
+        ([.[] | objects]) as $records |
+        ([$records[] | select(.record == "complete")]) as $completions |
+        ([$records[] | select(.record != "complete")]) as $findings |
+        (
+            (if ($completions | length) == 0 then ["stream.no_complete"]
+             elif ($completions | length) > 1 then ["stream.multiple_complete"]
+             elif $records[-1].record != "complete" then ["stream.complete_not_last"]
+             else [] end)
+            + [$findings | to_entries[] | .key as $index | .value as $finding |
+               ($finding | finding_problems)[] |
+               (if ($finding.source_id | type) == "string" then "finding[" + $finding.source_id + "]."
+                else "record[" + ($index | tostring) + "]." end) + .]
+            + [$completions[0] | select(. != null) | complete_problems[] | "complete." + .]
+            + (if ($completions | length) == 1 and ($completions[0].finding_count | type) == "number" and
+                  $completions[0].finding_count != ($findings | length)
+               then ["complete.finding_count_mismatch[" + ($completions[0].finding_count | tostring) + "!=" + ($findings | length | tostring) + "]"]
+               else [] end)
+            + [[$findings[].source_id | strings] | group_by(.) | .[] | select(length > 1) | "stream.duplicate_source_id[" + .[0] + "]"]
+            + (if $phase == "primary" then [] else
+                ([$findings[] | (.source_refs // [])[] | objects | {agent, source_id}] | unique_by(.agent, .source_id)) as $seen |
+                ([$expected_refs[] | {agent, source_id}] | unique_by(.agent, .source_id)) as $expected |
+                (if (($expected - $seen) | length) > 0
+                 then ["source_refs.missing[" + ([($expected - $seen)[] | ref_label] | join(",")) + "]"] else [] end)
+                + (if (($seen - $expected) | length) > 0
+                   then ["source_refs.unknown[" + ([($seen - $expected)[] | ref_label] | join(",")) + "]"] else [] end)
+               end)
+        ) | join(", ")
+    ' "$records_file" 2>/dev/null || printf 'diagnostics_unavailable'
+}
+
 process_final_ndjson_output() {
     local output_file=$1
-    local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line
+    local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local line_number=0
 
     FINDING_CONTRACT_FAILURE_REASON=""
@@ -3364,7 +3499,11 @@ process_final_ndjson_output() {
     done <"$normalized_file"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     mv -- "$records_array_file" "$records_file"
-    if ! validate_final_ndjson_records "$records_file" "$canonical_file" "$expected_refs_file"; then FINDING_CONTRACT_FAILURE_REASON=schema_provenance_or_completeness_validation_failed; return 1; fi
+    if ! validate_final_ndjson_records "$records_file" "$canonical_file" "$expected_refs_file"; then
+        detail=$(describe_ndjson_validation_failure final "$records_file" '' "$expected_refs_file")
+        FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
+        return 1
+    fi
     if ! render_final_findings_markdown "$canonical_file" "$rendered_file" || [[ ! -s "$rendered_file" ]]; then FINDING_CONTRACT_FAILURE_REASON=markdown_render_failed; return 1; fi
 
     FINAL_PROCESSED_RAW_FILE=$raw_file
@@ -4489,6 +4628,7 @@ write_unavailable_usage_summary() {
             cache_write_tokens: null,
             stop_reason: null,
             raw_stop_reason: null,
+            error_message: null,
             output_limit_reached: false
         }' >"$usage_json_file"
 }
@@ -4534,6 +4674,7 @@ extract_token_usage() {
                 cache_write_tokens: null,
                 stop_reason: ($assistant_message.stopReason // null),
                 raw_stop_reason: ($assistant_message.rawStopReason // null),
+                error_message: ($assistant_message.errorMessage // null),
                 output_limit_reached: (($assistant_message.stopReason // "") == "length")
             }
         else
@@ -4561,6 +4702,7 @@ extract_token_usage() {
                 cache_write_tokens: $cache_write,
                 stop_reason: ($assistant_message.stopReason // null),
                 raw_stop_reason: ($assistant_message.rawStopReason // null),
+                error_message: ($assistant_message.errorMessage // null),
                 output_limit_reached: (($assistant_message.stopReason // "") == "length")
             }
         end
@@ -4889,6 +5031,7 @@ start_agent() {
     local exit_status
     local pi_stop_reason
     local pi_output_tokens
+    local pi_error_message
     local pi_control_file=''
     local pi_payload_file=$prompt_file
     local pi_tail_control=''
@@ -5101,6 +5244,11 @@ start_agent() {
                         extract_pi_markdown "$response_file" "$output_file" 2>/dev/null || true
                         pi_output_tokens=$(jq -r '.output_tokens // "unknown"' "$usage_json_file" 2>/dev/null || printf unknown)
                         printf 'Pi reached its output-token limit after %s output tokens.\n' "$pi_output_tokens" >>"$log_file"
+                        exit 1
+                    fi
+                    if [[ "$pi_stop_reason" == error ]]; then
+                        pi_error_message=$(jq -r '.error_message // "unknown provider error"' "$usage_json_file" 2>/dev/null || printf 'unknown provider error')
+                        printf 'Pi reported a provider error before completing the response: %s\n' "$pi_error_message" >>"$log_file"
                         exit 1
                     fi
                     if ! extract_pi_markdown "$response_file" "$output_file"; then

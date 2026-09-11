@@ -119,6 +119,12 @@ keys remain language-independent.
   `finding_count` matches the number of finding records.
 - Validate enums, unique IDs, phase-specific classification rules, and changed-line anchors before
   publishing canonical JSON or Markdown.
+- A schema, provenance, or completeness failure records a stable reason token followed by
+  machine-readable details, for example
+  `schema_provenance_or_completeness_validation_failed: finding[xr-3].failure_scenario` or
+  `source_refs.missing[pi:pi-2]`. Details name the record by `source_id`, the failing field or
+  stream-level check, and missing or unknown source refs, so a failed attempt can be diagnosed from
+  its log without re-running the validator.
 - A truncated stream without `complete` is a failed report even if earlier records parse. Preserve
   those records as diagnostics; never publish them as a successful review.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is

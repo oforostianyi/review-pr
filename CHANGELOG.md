@@ -11,6 +11,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
   claim. `CONFIRMED` and unclassified primary records still require a non-empty scenario. Previously
   any such record failed validation deterministically, the bounded repair pass could not fix it, and
   the whole cross-review attempt was retried and failed again.
+- `ndjson-v1` validation failures now append machine-readable details to the stable reason token:
+  the failing record by `source_id`, the failing field or stream-level check, and any missing or
+  unknown source refs. Attempt logs and manifest failure entries carry the same detail.
+- A Pi attempt that ends with a provider or CLI error (for example a connection error to a local
+  model server) now logs that error message. Previously the log reported a misleading
+  "Could not extract the final Markdown" and the usage summary hid the cause. Usage summaries
+  gained an `error_message` field.
 
 ## [1.11.4] - 2026-09-11
 
