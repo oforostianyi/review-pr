@@ -57,7 +57,7 @@ write_config() {
         --argjson concurrency "$max_concurrency" \
         '{
             agents: {
-                alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "low", runner: $runner},
+                alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "low", timeout_seconds: 2700, runner: $runner},
                 beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "medium", runner: $runner}
             },
             reviewers: ["alpha", "beta"],
@@ -126,6 +126,10 @@ run_full_success_case() {
     assert_file_exists "$manifest" 'full mock pipeline writes a manifest'
     assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" 'full mock pipeline reaches complete status'
     assert_eq 'complete' "$(jq -r '.status.comparison' "$manifest")" 'standalone comparison reaches complete status'
+    assert_eq '2700' "$(jq -r '.execution.agent_timeout_seconds.alpha' "$manifest")" \
+        'manifest records the configured per-agent timeout'
+    assert_eq '0' "$(jq -r '.execution.agent_timeout_seconds.beta' "$manifest")" \
+        'manifest records a disabled timeout explicitly'
 
     work_dir=${manifest%/*}
     report_dir=${work_dir%/*}

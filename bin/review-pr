@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly REVIEW_PR_VERSION="1.11.3"
+readonly REVIEW_PR_VERSION="1.11.4"
 
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     printf 'review-pr requires Bash 5.1 or newer; found %s.\n' "$BASH_VERSION" >&2
@@ -45,6 +45,11 @@ declare -A AGENT_EFFORTS=(
     [claude]=""
     [codex]=""
     [pi]=""
+)
+declare -A AGENT_TIMEOUT_SECONDS=(
+    [claude]=0
+    [codex]=0
+    [pi]=0
 )
 declare -A AGENT_RUNNERS=()
 declare -A AGENT_COMMANDS=()
@@ -606,12 +611,19 @@ load_config() {
         (all(.agents | keys[]; test("^[A-Za-z0-9._-]+$"))) and
         (all(.agents[];
             type == "object" and
-            ((keys - ["command", "effort", "enabled", "instructions", "label", "model", "runner"]) | length == 0) and
+            ((keys - ["command", "effort", "enabled", "instructions", "label", "model", "runner", "timeout_seconds"]) | length == 0) and
             (if has("enabled") then (.enabled | type == "boolean") else true end) and
             (if has("label") then (.label | type == "string") else true end) and
             (if has("model") then (.model | type == "string") else true end) and
             (if has("effort") then (.effort | type == "string") else true end) and
             (if has("runner") then (.runner | type == "string") else true end) and
+            (if has("timeout_seconds") then
+                (.timeout_seconds as $timeout |
+                    ($timeout | type == "number") and
+                    ($timeout | floor == $timeout) and
+                    $timeout >= 0 and
+                    $timeout <= 604800)
+             else true end) and
             (if has("command") then
                 (.command | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
              else true end) and
@@ -731,6 +743,7 @@ load_config() {
         fi
         AGENT_MODELS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].model // ""' "$CONFIG_FILE")
         AGENT_EFFORTS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].effort // ""' "$CONFIG_FILE")
+        AGENT_TIMEOUT_SECONDS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].timeout_seconds // 0' "$CONFIG_FILE")
         AGENT_RUNNERS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].runner // ""' "$CONFIG_FILE")
         AGENT_COMMANDS[$agent]=$(jq -c --arg agent "$agent" '.agents[$agent].command // []' "$CONFIG_FILE")
         AGENT_ENABLED[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent] | if has("enabled") then .enabled else true end' "$CONFIG_FILE")
@@ -2593,11 +2606,12 @@ show_configuration() {
         else
             agent_execution='built-in'
         fi
-        printf '%s: label=%q model=%q effort=%q execution=%q\n' \
+        printf '%s: label=%q model=%q effort=%q timeout=%q execution=%q\n' \
             "$agent" \
             "$(agent_label "$agent")" \
             "${AGENT_MODELS[$agent]:-}" \
             "${AGENT_EFFORTS[$agent]:-}" \
+            "$(if (( ${AGENT_TIMEOUT_SECONDS[$agent]:-0} == 0 )); then printf disabled; else format_duration "${AGENT_TIMEOUT_SECONDS[$agent]}"; fi)" \
             "$agent_execution"
         printf '%s: enabled=%s\n' "$agent" "${AGENT_ENABLED[$agent]:-true}"
         if [[ -v "AGENT_SKILLS[$agent]" ]]; then
@@ -4788,6 +4802,10 @@ write_pi_control_prompt() {
         /^=====/ { exit }
         { print }
     ' "$prompt_file" >"$control_file"
+    printf '%s\n' \
+        '' \
+        'PI EXECUTION GUARD (orchestrator-enforced): keep repository inspection bounded to changed code and the minimum direct context needed to verify findings. Never repeat an identical tool call or restart the same inspection after context compaction. If tool use or reasoning begins to repeat, stop using tools immediately and return the best complete output supported by evidence already collected. Do not sacrifice the required output contract to pursue exhaustive coverage.' \
+        >>"$control_file"
     [[ -s "$control_file" ]] || die "Could not extract Pi orchestration control prompt: ${prompt_file}"
 }
 
@@ -4797,6 +4815,59 @@ write_pi_comparison_payload() {
 
     sed -n '/^===== BEGIN REPORT:/,$p' "$prompt_file" >"$payload_file"
     [[ -s "$payload_file" ]] || die "Could not extract Pi comparison report payload: ${prompt_file}"
+}
+
+run_with_agent_timeout() {
+    local timeout_seconds=$1
+    local timeout_label=$2
+    shift 2
+    local command_pid
+    local exit_status
+    local started_at
+    local now
+    local grace_second
+    local timed_out=false
+
+    if (( timeout_seconds == 0 )); then
+        "$@"
+        return
+    fi
+
+    # Bash otherwise redirects an asynchronous command's stdin from /dev/null
+    # when job control is disabled. Preserve the caller's prompt descriptor.
+    "$@" <&0 &
+    command_pid=$!
+    started_at=$(date +%s)
+    trap 'kill -TERM "$command_pid" 2>/dev/null || true; wait "$command_pid" 2>/dev/null || true; exit 143' HUP INT TERM
+
+    while kill -0 "$command_pid" 2>/dev/null; do
+        now=$(date +%s)
+        if (( now - started_at >= timeout_seconds )); then
+            timed_out=true
+            printf 'review-pr: %s exceeded its configured timeout of %s; terminating it.\n' \
+                "$timeout_label" "$(format_duration "$timeout_seconds")" >&2
+            kill -TERM "$command_pid" 2>/dev/null || true
+            for grace_second in 1 2 3 4 5; do
+                kill -0 "$command_pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -KILL "$command_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+
+    if wait "$command_pid"; then
+        exit_status=0
+    else
+        exit_status=$?
+    fi
+    trap - HUP INT TERM
+
+    if [[ "$timed_out" == true ]]; then
+        return 124
+    fi
+    return "$exit_status"
 }
 
 start_agent() {
@@ -4810,6 +4881,7 @@ start_agent() {
     local attempt=${8:-1}
     local model=${AGENT_MODELS[$agent]:-}
     local effort=${AGENT_EFFORTS[$agent]:-}
+    local timeout_seconds=${AGENT_TIMEOUT_SECONDS[$agent]:-0}
     local runner=${AGENT_RUNNERS[$agent]:-}
     local command_template=${AGENT_COMMANDS[$agent]:-[]}
     local exit_status
@@ -4884,7 +4956,7 @@ start_agent() {
         write_unavailable_usage_summary "$usage_json_file" "$agent" "$phase" "$model" "$effort"
         (
             cd "$agent_working_directory"
-            env \
+            run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" env \
                 REVIEW_PR_ARTIFACT_ONLY="$artifact_only" \
                 REVIEW_PR_CONTRACT_TEST="$CONTRACT_TEST_MODE" \
                 REVIEW_PR_AGENT="$agent" \
@@ -4918,7 +4990,7 @@ start_agent() {
 
     if [[ "$command_template" != '[]' ]]; then
         write_unavailable_usage_summary "$usage_json_file" "$agent" "$phase" "$model" "$effort"
-        run_configured_command_in_worktree \
+        run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" run_configured_command_in_worktree \
             "$agent" "$phase" "$prompt_file" "$command_template" "$model" "$effort" "$attempt" "$usage_file" "$usage_json_file" \
             >"$output_file" 2>"$log_file" &
 
@@ -4933,7 +5005,7 @@ start_agent() {
             TEMP_FILES+=("$response_file")
             (
                 cd "$agent_working_directory"
-                if codex exec \
+                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec \
                     --sandbox read-only \
                     --ephemeral \
                     --color never \
@@ -4957,7 +5029,7 @@ start_agent() {
             TEMP_FILES+=("$response_file")
             (
                 cd "$agent_working_directory"
-                if claude \
+                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" claude \
                     --print \
                     --no-session-persistence \
                     --output-format json \
@@ -5007,7 +5079,7 @@ start_agent() {
             fi
             (
                 cd "$agent_working_directory"
-                if pi \
+                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" pi \
                     --no-session \
                     --mode json \
                     "${pi_system_prompt_arguments[@]}" \
@@ -5632,7 +5704,9 @@ run_review_phase() {
             wait "${heartbeat_pids[$agent]}" 2>/dev/null || true
 
             failure_reason=""
-            if (( exit_status != 0 )); then
+            if (( exit_status == 124 )); then
+                failure_reason="timeout after $(format_duration "${AGENT_TIMEOUT_SECONDS[$agent]:-0}")"
+            elif (( exit_status != 0 )); then
                 failure_reason="exit ${exit_status}"
             elif [[ ! -s "${TEMP_OUTPUTS[$agent]}" ]]; then
                 failure_reason="empty output"
@@ -5804,6 +5878,7 @@ create_full_manifest() {
     local primary_findings_json='{}'
     local cross_raw_json='{}'
     local cross_findings_json='{}'
+    local timeout_seconds_json='{}'
     local configured_concurrency_json=null
     local agent
     local temp_manifest
@@ -5817,6 +5892,10 @@ create_full_manifest() {
             --arg agent "$agent" \
             --arg label "$(agent_label "$agent")" \
             '. + {($agent): $label}' <<<"$labels_json")
+        timeout_seconds_json=$(jq -c \
+            --arg agent "$agent" \
+            --argjson timeout_seconds "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
+            '. + {($agent): $timeout_seconds}' <<<"$timeout_seconds_json")
         primary_json=$(jq -c \
             --arg agent "$agent" \
             --arg file "${PRIMARY_OUTPUTS[$agent]##*/}" \
@@ -5889,6 +5968,7 @@ create_full_manifest() {
         --argjson max_concurrency "$configured_concurrency_json" \
         --argjson retry_max_attempts "$RETRY_MAX_ATTEMPTS" \
         --argjson retry_delay_seconds "$RETRY_DELAY_SECONDS" \
+        --argjson agent_timeout_seconds "$timeout_seconds_json" \
         --argjson include_comparison_sections "$([[ "$INCLUDE_COMPARISON_SECTIONS_CONFIGURED" == true ]] && printf '%s' "$INCLUDE_COMPARISON_SECTIONS" || printf null)" \
         --arg cross_comparison_mode "$CROSS_COMPARISON_MODE" \
         --arg final_comparison_mode "$FINAL_COMPARISON_MODE" \
@@ -5960,6 +6040,7 @@ create_full_manifest() {
             work_directory: $work_directory,
             execution: {
                 max_concurrency: $max_concurrency,
+                agent_timeout_seconds: $agent_timeout_seconds,
                 retry: {
                     max_attempts: $retry_max_attempts,
                     delay_seconds: $retry_delay_seconds
@@ -7562,6 +7643,8 @@ run_comparison_synthesis() {
     if [[ "$stop_reason" == length ]]; then
         output_tokens=$(jq -r '.output_tokens // "unknown"' "$comparison_usage_json" 2>/dev/null || printf unknown)
         COMPARISON_FAILURE_REASON="output token limit reached (${output_tokens} output tokens)"
+    elif (( comparison_status == 124 )); then
+        COMPARISON_FAILURE_REASON="timeout after $(format_duration "${AGENT_TIMEOUT_SECONDS[$FINAL_SYNTHESIZER]:-0}")"
     elif (( comparison_status != 0 )); then
         COMPARISON_FAILURE_REASON="exit ${comparison_status}"
     elif [[ ! -s "$comparison_output" ]]; then
@@ -7775,6 +7858,8 @@ run_final_synthesis() {
         preserve_agent_failure_artifacts "$FINAL_SYNTHESIZER" "$final_output" "$final_usage" "$final_usage_json" "$error_log" "final synthesis"
         if [[ "$final_stop_reason" == length ]]; then
             FINAL_FAILURE_REASON="output token limit reached (${final_output_tokens} output tokens)"
+        elif (( final_status == 124 )); then
+            FINAL_FAILURE_REASON="timeout after $(format_duration "${AGENT_TIMEOUT_SECONDS[$FINAL_SYNTHESIZER]:-0}")"
         else
             FINAL_FAILURE_REASON="exit ${final_status}"
         fi

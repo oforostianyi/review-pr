@@ -141,9 +141,36 @@ Primary reviews and cross-reviews run concurrently by default. Limit the number 
 
 Every attempt starts with a truncated temporary output and log. A report becomes the canonical Markdown artifact only after a successful non-empty result. Failed-attempt diagnostics use distinct `*-attempt-N.log` filenames. The full-run manifest records per-agent attempt counts, final agent statuses, and all failed attempts. If an agent exhausts its attempts, the current phase fails only after all other active or queued agents have settled; subsequent phases are not started.
 
+Each agent may also have an independent wall-clock limit:
+
+```json
+{
+  "agents": {
+    "pi": {
+      "timeout_seconds": 2700
+    }
+  }
+}
+```
+
+The default value is `0`, meaning no timeout. A positive value applies to each individual primary,
+cross-review, final, comparison, or bounded-repair attempt run by that agent. When the limit is
+reached, the orchestrator sends `TERM`, allows a short shutdown grace period, then uses `KILL` if
+needed. The attempt fails with status `124`; its partial output, usage data, and diagnostics follow
+the normal failure-preservation and failed-only retry flow. Completed peer reports are retained.
+This is particularly useful for tool-using local models: Pi has no native maximum-turn option, so a
+model that repeats repository inspection after context compaction otherwise has no hard wall-clock
+bound. Choose a value above the agent's observed healthy runtime rather than treating the timeout as
+a progress estimate.
+
 ## Built-in agents, models, and reasoning effort
 
 `claude`, `codex`, and `pi` have built-in runners. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
+
+For Pi review phases, the orchestration control prompt also prohibits repeating identical tool
+calls or restarting the same inspection after context compaction. It tells the model to stop tool
+use and emit the best contract-compliant result once work begins to repeat. The configured timeout
+is the enforcement boundary if the model ignores that instruction.
 
 `agents.<agent>.effort` applies to that agent's primary and cross-review runs:
 

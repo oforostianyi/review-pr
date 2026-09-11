@@ -5,13 +5,15 @@
       "label": "Claude",
       "enabled": true,
       "model": "",
-      "effort": ""
+      "effort": "",
+      "timeout_seconds": 0
     },
     "codex": {
       "label": "Codex",
       "enabled": true,
       "model": "",
-      "effort": ""
+      "effort": "",
+      "timeout_seconds": 0
     }
   },
   "reviewers": [

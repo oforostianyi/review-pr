@@ -453,6 +453,13 @@
           "type": "string",
           "description": "Reasoning effort. Built-in Claude and Codex agents support their documented values; custom runners receive the resolved value in REVIEW_PR_EFFORT."
         },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800,
+          "default": 0,
+          "description": "Maximum wall-clock time for one agent attempt in any phase. Zero or omission disables the timeout. Timed-out attempts fail with exit status 124 and follow the normal failed-only retry policy."
+        },
         "runner": {
           "type": "string"
         },

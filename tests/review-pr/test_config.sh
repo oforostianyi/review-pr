@@ -17,7 +17,7 @@ jq -n \
     --arg runner "$test_dir/mock-agent-runner.sh" \
     '{
         agents: {
-            alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "", runner: $runner},
+            alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "", timeout_seconds: 2700, runner: $runner},
             beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "", runner: $runner},
             paused: {label: "Paused", enabled: false, model: "", effort: "", runner: $runner}
         },
@@ -59,6 +59,14 @@ assert_file_contains "$show_output" 'alpha: skill=' 'empty optional skill config
 assert_file_contains "$show_output" 'Primary finding contract: markdown' 'Markdown remains the backward-compatible primary contract default'
 assert_file_contains "$show_output" 'Cross-review finding contract: markdown' 'Markdown remains the backward-compatible cross-review contract default'
 assert_file_contains "$show_output" 'Final finding contract: markdown' 'Markdown remains the backward-compatible final contract default'
+assert_file_contains "$show_output" 'timeout=45m\ 00s' 'configured agent timeout is visible in diagnostics'
+
+invalid_timeout_config="$test_root/invalid-timeout.json"
+jq '.agents.alpha.timeout_seconds = -1' "$config_file" >"$invalid_timeout_config"
+if "$repo_root/bin/review-pr" --config "$invalid_timeout_config" --show-config >/dev/null 2>&1; then
+    fail 'negative agent timeout must fail validation'
+fi
+pass 'negative agent timeout is rejected'
 
 ndjson_config="$test_root/ndjson.json"
 ndjson_output="$test_root/ndjson-show-config.txt"

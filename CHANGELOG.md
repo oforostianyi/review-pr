@@ -4,6 +4,20 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.11.4] - 2026-09-11
+
+### Added
+
+- Optional per-agent `timeout_seconds` wall-clock limits for every phase and repair attempt, with
+  status `124`, preserved partial diagnostics, and the existing failed-only retry behavior.
+- A system-priority Pi execution guard that stops repeated tool inspection after context compaction
+  and requests the best complete contract-compliant result from evidence already collected.
+
+### Fixed
+
+- Tool-using local models can no longer keep an orchestrated attempt alive indefinitely when they
+  enter a repeated inspection/compaction loop.
+
 ## [1.11.3] - 2026-09-11
 
 ### Fixed

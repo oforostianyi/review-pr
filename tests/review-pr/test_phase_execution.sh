@@ -63,12 +63,14 @@ prepare_phase_case() {
     AGENT_RUNNERS=()
     AGENT_MODELS=()
     AGENT_EFFORTS=()
+    AGENT_TIMEOUT_SECONDS=()
     AGENT_LABELS=()
 
     for agent in "${agents[@]}"; do
         AGENT_RUNNERS[$agent]="$test_dir/mock-agent-runner.sh"
         AGENT_MODELS[$agent]="mock-${agent}"
         AGENT_EFFORTS[$agent]=low
+        AGENT_TIMEOUT_SECONDS[$agent]=0
         AGENT_LABELS[$agent]="${agent^}"
         PROMPT_FILES[$agent]="$CASE_DIR/${agent}.prompt"
         TEMP_OUTPUTS[$agent]="$CASE_DIR/${agent}.tmp.md"
@@ -151,5 +153,19 @@ assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'failed runner cannot publish a
 assert_file_exists "$CASE_DIR/alpha-error-partial.md" 'non-zero runner partial output is preserved'
 assert_file_exists "$CASE_DIR/alpha-error.log" 'non-zero runner stderr is preserved'
 
-printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
+prepare_phase_case timeout alpha beta
+printf 'hang\n' >"$SCENARIO_DIR/alpha-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=1
+AGENT_TIMEOUT_SECONDS[alpha]=1
+if run_review_phase 'primary review' alpha beta; then
+    fail 'timed-out runner must fail the phase'
+fi
+pass 'timed-out runner fails without blocking its peer'
+assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'timed-out output is never published'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'successful peer remains published when another agent times out'
+assert_file_contains "$CASE_DIR/alpha-error.log" 'exceeded its configured timeout of 1s' 'timeout reason is preserved in agent diagnostics'
+assert_eq 'failed' "${PHASE_AGENT_STATUSES[alpha]}" 'timed-out agent is recorded as failed'
+assert_eq 'complete' "${PHASE_AGENT_STATUSES[beta]}" 'successful peer remains complete'
 
+printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
