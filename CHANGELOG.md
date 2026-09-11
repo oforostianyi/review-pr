@@ -14,6 +14,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
   that cannot enforce it. Motivation: one observed local-model attempt issued 953 tool calls of
   which only 112 were distinct, repeating a ~20-command inspection cycle 42 times across 9
   compactions until the wall-clock timeout.
+- `packaging/private-data-audit.sh` with an explicit allowlist. It scans Git-tracked text files for
+  personal paths, company or ticket identifiers, private network addresses, and credential-like
+  values; the test suite runs it and `packaging/build-package.sh` refuses to package when it fails.
+  The remaining company-specific profile name in the documentation example was replaced with a
+  neutral `php-project`.
 
 ### Fixed
 

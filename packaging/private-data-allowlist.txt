@@ -1,0 +1,15 @@
+# Allowlist for packaging/private-data-audit.sh.
+#
+# pattern:<ERE>  removes an allowed generic example from a line before the audit
+#                patterns run, so documentation may show placeholder paths.
+# path:<file>    skips one tracked file entirely. Use only for files whose job is
+#                to contain the audited patterns themselves.
+
+# Placeholder home directories used in README and docs examples.
+pattern:/home/example(/[A-Za-z0-9._/-]*)?
+pattern:/Users/example(/[A-Za-z0-9._/-]*)?
+
+# The audit tooling and its test necessarily contain the patterns they detect.
+path:packaging/private-data-audit.sh
+path:packaging/private-data-allowlist.txt
+path:tests/review-pr/test_private_data_audit.sh

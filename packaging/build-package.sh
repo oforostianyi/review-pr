@@ -15,6 +15,8 @@ implementation_version=$(sed -n 's/^readonly REVIEW_PR_VERSION="\([^"]*\)"$/\1/p
     exit 1
 }
 
+"${script_dir}/private-data-audit.sh" --root "$repository_root"
+
 package_name=review-pr-${version}
 staging_root=$(mktemp -d "${TMPDIR:-/tmp}/review-pr-package.XXXXXX")
 package_root=${staging_root}/${package_name}

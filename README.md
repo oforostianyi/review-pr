@@ -36,6 +36,12 @@ before agents start. It also covers RIGHT-side line maps, renames, deleted/binar
 PR-level findings, and bounded final-anchor repair. The suite is a source-development asset and is
 not included in the current end-user archive.
 
+`packaging/private-data-audit.sh` scans every Git-tracked text file for personal home paths,
+company or ticket identifiers, private network addresses, and credential-like values. It runs as
+part of the test suite and again before `packaging/build-package.sh` stages a release, so a private
+path or internal identifier cannot reach the public repository or package unnoticed. Generic
+placeholder paths used in documentation are declared in `packaging/private-data-allowlist.txt`.
+
 ## Test real agent contract compatibility
 
 Before enabling `ndjson-v1`, test a configured CLI/model without fetching or reviewing a pull

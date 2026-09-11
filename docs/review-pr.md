@@ -240,7 +240,7 @@ The portable package includes `<prefix>/libexec/review-pr/review-pr-agy`. Config
     }
   },
   "profiles": {
-    "brightlocal-php": {
+    "php-project": {
       "skills": {"agy": "php-code-review"}
     }
   },
