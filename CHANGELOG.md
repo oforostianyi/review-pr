@@ -6,11 +6,25 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
-- Primary, cross-review, and final `ndjson-v1` prompts now tell agents to anchor findings about
-  affected code outside the diff (existing consumers or callers of a changed symbol, flows whose
-  behaviour changes, missing or stale test coverage) at PR level with the file and symbol in
-  evidence, instead of reserving `pr-level` for PR-wide omissions. The old wording made agents drop
+- Primary, cross-review, and final `ndjson-v1` prompts now state the anchor policy explicitly: a
+  finding is anchored to the changed line that causes it, an affected consumer, caller, or flow to
+  the changed line that creates the exposure, and `pr-level` is the fallback only when no changed
+  line causes the finding (test coverage, migration, documentation), with the file and symbol named
+  in evidence. The old wording reserved `pr-level` for PR-wide omissions and made agents drop
   verified consumer and coverage findings that had no changed line to anchor to.
+- The primary contract now maps the review skill's report sections onto record fields: findings,
+  undisclosed behaviour changes, and affected consumers or flows become records; plausible but not
+  fully verified findings stay records with the gap in `verification_limitations` instead of being
+  dropped; verified-safe consumers and flows become `positive_evidence`; refuted candidates are not
+  emitted. The cross-review contract records "new or pre-existing" and the reachable caller in
+  evidence.
+- The test suite's terminated-run fixture no longer races the temporary-directory cleanup: the hang
+  mock exits on `TERM` immediately, the interrupt case waits for its agents to leave, and the
+  cleanup retries. Previously a fully passing suite could end with `Directory not empty`.
+- Configured Markdown-oriented `prompts.cross_review` instructions (tables, headings, "new findings"
+  sections) are no longer forwarded when the cross-review contract is `ndjson-v1`, where they
+  contradicted the machine contract; `--show-config` says so. `prompts.final` was already limited to
+  Markdown mode.
 - The Pi execution guard instruction no longer tells the model to keep inspection bounded to
   changed code, which contradicted the review skill's consumer and flow steps; it now asks for
   those steps explicitly while still forbidding repeated inspection.

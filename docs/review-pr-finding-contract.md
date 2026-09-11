@@ -52,6 +52,16 @@ Required finding fields:
 - `verification_limitations`;
 - `existing_feedback.state`: `new`, `confirmed-existing`, `historical`, or `unknown`, with thread IDs when known.
 
+Anchor policy: a finding is anchored to the changed line that causes it. An existing consumer,
+caller, or flow that the change breaks or exposes is anchored to the changed line that creates the
+exposure (the new constant, enum case, signature, query, or call). `pr-level` is the fallback only
+when no changed line causes the finding, such as missing or stale test coverage, a missing
+migration, or a documentation gap; such a record names the affected file and symbol in `evidence`.
+The primary prompt also maps the review skill's Markdown report sections onto record fields so
+that consumer tracing, flow replay, and plausible-but-unverified findings survive the structured
+contract instead of being dropped for lack of a place to report them. Configured Markdown-oriented
+`prompts.cross_review` and `prompts.final` instructions are not forwarded under `ndjson-v1`.
+
 Cross-review and final prompts end with a `REQUIRED SOURCE REFS` block: the orchestrator lists every
 `{agent, source_id}` pair the response must cover, copied from the canonical inputs, and the final
 prompt presents the upstream primary refs of each cross-review record under `primary_provenance` so

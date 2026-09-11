@@ -398,10 +398,15 @@ EOF
         exit 23
         ;;
     hang)
-        trap 'exit 143' TERM INT
+        # Sleep in the background so TERM reaches the trap immediately instead
+        # of after the foreground sleep ends; otherwise the mock outlives the
+        # orchestrator by up to 30s and races the suite's temp-dir cleanup.
+        sleep 30 &
+        hang_sleep_pid=$!
+        trap 'kill "$hang_sleep_pid" 2>/dev/null; exit 143' TERM INT
         printf 'partial response while waiting for termination\n'
         write_usage null 5
-        sleep 30
+        wait "$hang_sleep_pid"
         ;;
     *)
         printf 'Unknown mock behavior: %s\n' "$behavior" >&2

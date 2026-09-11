@@ -95,8 +95,10 @@ assert_file_contains "$ndjson_output" 'Primary finding contract: ndjson-v1' 'ndj
 
 cross_ndjson_config="$test_root/cross-ndjson.json"
 cross_ndjson_output="$test_root/cross-ndjson-show-config.txt"
-jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"}' "$config_file" >"$cross_ndjson_config"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"} | .prompts.cross_review = "Start with exactly this table"' "$config_file" >"$cross_ndjson_config"
 "$repo_root/bin/review-pr" --config "$cross_ndjson_config" --show-config >"$cross_ndjson_output"
+assert_file_contains "$cross_ndjson_output" 'Cross-review prompt: config (Markdown instructions are not sent under ndjson-v1)' \
+    'show-config states that Markdown-oriented cross-review prompt instructions are ignored under the structured contract'
 assert_file_contains "$cross_ndjson_output" 'Cross-review finding contract: ndjson-v1' 'ndjson-v1 can be enabled explicitly for cross-review'
 
 final_ndjson_config="$test_root/final-ndjson.json"

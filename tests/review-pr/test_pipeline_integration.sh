@@ -8,11 +8,19 @@ source "$test_dir/lib/assert.sh"
 
 suite_root=$(portable_mktemp_dir review-pr-pipeline)
 cleanup_suite() {
+    local attempt
+
     if [[ "${REVIEW_PR_TEST_PRESERVE_TMP:-false}" == true ]]; then
         printf 'Preserved integration fixture: %s\n' "$suite_root" >&2
-    else
-        rm -rf -- "$suite_root"
+        return
     fi
+    # A terminated fixture agent may still be flushing files for a moment;
+    # a cleanup hiccup must not turn a fully passing suite into a failure.
+    for attempt in 1 2 3 4 5; do
+        rm -rf -- "$suite_root" 2>/dev/null && return
+        sleep 1
+    done
+    rm -rf -- "$suite_root" || printf 'Warning: could not remove integration fixture %s\n' "$suite_root" >&2
 }
 trap cleanup_suite EXIT
 
@@ -386,6 +394,14 @@ run_interrupt_case() {
         fail 'terminated pipeline unexpectedly exited successfully'
     fi
     pass 'SIGTERM interrupts the pipeline with a non-zero status'
+    # Give terminated fixture agents a moment to exit before later cases and
+    # the suite cleanup touch the same temporary tree.
+    attempts=0
+    while pgrep -f "REVIEW_PR_MOCK_SCENARIO_DIR=${scenarios}" >/dev/null 2>&1 || pgrep -f "$case_dir/" >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        (( attempts <= 100 )) || break
+        sleep 0.05
+    done
 
     canonical_primary=$(find "$reviews" -type f -name '*-alpha.md' -print | sed -n '1p')
     [[ -z "$canonical_primary" ]] || fail 'interrupted runner published a partial canonical report'
@@ -628,8 +644,14 @@ run_ndjson_primary_case() {
         'structured primary prompt receives the authoritative changed-line map'
     assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'Output contract: ndjson-v1' \
         'structured primary prompt requests the machine contract explicitly'
-    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'Use pr-level for a finding about code the change affects but does not touch' \
-        'structured primary prompt allows anchoring consumer, flow, and coverage findings at PR level'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'to the changed line that creates the exposure' \
+        'structured primary prompt anchors affected consumers and flows to the exposing changed line'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'Use pr-level only when no changed line causes the finding' \
+        'structured primary prompt keeps pr-level as the fallback for coverage, migration, and documentation gaps'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'never silently dropped' \
+        'structured primary prompt maps plausible skill findings onto records instead of dropping them'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'refuted candidates are not emitted' \
+        'structured primary prompt maps the skill report sections onto the record contract'
     assert_false 'structured primary prompt no longer restricts pr-level anchors to PR-wide omissions' \
         grep -Fq -- 'Use pr-level only for a genuine PR-wide omission' "$capture/primary-review-alpha-attempt-1.prompt"
     assert_file_contains "$alpha_cross_prompt" 'Fixture changed-line defect' \
@@ -661,7 +683,8 @@ run_ndjson_cross_case() {
     export REVIEW_PR_FAKE_PR_BODY='Fixture structured cross-review.'
     write_config "$config" "$checkout" "$reviews" 2
     jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
-        .reporting.comparison_sections = {cross_review: "none", final: "none"}' \
+        .reporting.comparison_sections = {cross_review: "none", final: "none"} |
+        .prompts.cross_review = ["Start with exactly this table:", "## Classification ledger", "| # | Source | Claim |"]' \
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
@@ -750,6 +773,10 @@ run_ndjson_cross_case() {
         'structured cross-review receives the explicit list of required source refs'
     assert_file_contains "$alpha_prompt" '{"agent":"beta","source_id":"beta:F-001"}' \
         'the cross-review required refs name every peer primary finding exactly'
+    assert_false 'structured cross-review does not forward Markdown-oriented config prompt instructions' \
+        grep -Fq -- 'Start with exactly this table' "$alpha_prompt"
+    assert_file_contains "$alpha_prompt" 'the caller through which it is reachable belong in evidence' \
+        'structured cross-review maps the skill cross-review columns onto record fields'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
         'structured final usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \

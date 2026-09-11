@@ -2602,8 +2602,10 @@ show_configuration() {
     printf 'Primary finding contract: %s\n' "$PRIMARY_FINDING_CONTRACT_MODE"
     printf 'Cross-review finding contract: %s\n' "$CROSS_FINDING_CONTRACT_MODE"
     printf 'Final finding contract: %s\n' "$FINAL_FINDING_CONTRACT_MODE"
-    printf 'Cross-review prompt: %s\n' "$CROSS_PROMPT_SOURCE"
-    printf 'Final prompt: %s\n' "$FINAL_PROMPT_SOURCE"
+    printf 'Cross-review prompt: %s%s\n' "$CROSS_PROMPT_SOURCE" \
+        "$(if [[ "$CROSS_PROMPT_SOURCE" == config && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then printf ' (Markdown instructions are not sent under ndjson-v1)'; fi)"
+    printf 'Final prompt: %s%s\n' "$FINAL_PROMPT_SOURCE" \
+        "$(if [[ "$FINAL_PROMPT_SOURCE" == config && "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then printf ' (Markdown instructions are not sent under ndjson-v1)'; fi)"
     for agent in "${CONFIGURED_REVIEWERS[@]}" "$FINAL_SYNTHESIZER"; do
         if [[ -v "shown_agents[$agent]" ]]; then
             continue
@@ -4163,7 +4165,9 @@ Every issue must be one atomic finding record with exactly these keys: record, s
 - contributing_agents must be exactly ["${reviewer}"] in this independent primary review.
 - evidence must be a non-empty string array. verification_limitations is a string array.
 - existing_feedback must be {"state":"new|confirmed-existing|historical|unknown","thread_ids":[]}. Use [] for new; confirmed-existing or historical requires at least one matching GraphQL thread ID; unknown may use known IDs or [].
-- anchor must be {"kind":"changed-line","file":"exact/repository/path","start":42,"end":42} or {"kind":"pr-level","file":null,"start":null,"end":null}. For changed-line, the range end must exist in the supplied RIGHT-side changed-line map. Use changed-line when the defect sits in a changed line. Use pr-level for a finding about code the change affects but does not touch: an existing consumer or caller of a changed symbol, a flow whose behaviour changes, or missing or stale test coverage; name the affected file and symbol in evidence. Do not drop a verified consumer, flow, or coverage finding because it has no changed line to anchor to.
+- anchor must be {"kind":"changed-line","file":"exact/repository/path","start":42,"end":42} or {"kind":"pr-level","file":null,"start":null,"end":null}. For changed-line, the range end must exist in the supplied RIGHT-side changed-line map. Anchor every finding to the changed line that causes it: a defect in changed code to that line, and an existing consumer, caller, or flow that the change breaks or exposes to the changed line that creates the exposure (the new constant, enum case, signature, query, or call). Use pr-level only when no changed line causes the finding, such as missing or stale test coverage, a missing migration, or a documentation gap, and then name the affected file and symbol in evidence. Do not drop a verified consumer, flow, or coverage finding for lack of an anchor.
+
+Map the review skill's report onto this contract instead of emitting its Markdown sections: every finding, undisclosed behaviour change, or affected consumer or flow becomes one finding record; a plausible finding that could not be fully verified is still a record whose unverified part is stated in its verification_limitations, never silently dropped; a consumer, caller, or flow that was traced and verified safe becomes one positive_evidence entry naming the file and symbol; refuted candidates are not emitted; the verdict and the flows replayed belong in summary; a suggested fix belongs in recommendation; I/O or query measurements belong in evidence.
 
 Finish with exactly one final record and no records after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count must equal the number of preceding finding records. All reader-facing string values must use ${PRIMARY_REVIEW_LANGUAGE_NAME}. Even when there are no findings, return the complete record with finding_count 0.
 EOF
@@ -4223,6 +4227,7 @@ write_cross_prompt() {
     local comparison_prompt_block
     local output_contract_block
     local header_instruction
+    local cross_instructions_block=$CROSS_REVIEW_INSTRUCTIONS
     local input_agent
     shift 2
 
@@ -4248,6 +4253,10 @@ EOF
     if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         comparison_prompt_block='Extended comparison sections are disabled for structured cross-review. Do not add comparison prose, tables, or new findings; return only the required source classifications.'
         header_instruction='The orchestrator renders and adds the canonical PR/author/agent/model metadata header. Do not emit a Markdown header or any prose.'
+        # Configured Markdown-oriented cross-review instructions (tables, headings,
+        # "new findings" sections) contradict the machine contract; the contract
+        # block below is the only formatting instruction under ndjson-v1.
+        cross_instructions_block=''
         output_contract_block=$(cat <<'EOF'
 Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text.
 
@@ -4259,7 +4268,8 @@ Classify every supplied primary source finding. Each output finding has the stan
 - contributing_agents must equal the unique agent keys in source_refs.
 - Preserve the standard anchor, evidence, failure_scenario, recommendation, category, verification_limitations, and existing_feedback shapes defined for ndjson-v1.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
-- A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Use pr-level for a confirmed finding about affected code outside the diff, such as an existing consumer, a changed flow, or test coverage, naming the file and symbol in evidence.
+- A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Anchor an affected consumer, caller, or flow to the changed line that exposes it; use pr-level only when no changed line causes the finding (test coverage, migration, documentation), naming the file and symbol in evidence.
+- Record the skill's cross-review details inside the record: whether the issue is new or pre-existing and the caller through which it is reachable belong in evidence, and a changed severity must be explained in evidence.
 
 Finish with exactly one complete record and nothing after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs.
 EOF
@@ -4294,7 +4304,7 @@ Do not check out or switch branches. Do not modify production code. Do not creat
 
 ${header_instruction}
 
-${CROSS_REVIEW_INSTRUCTIONS}
+${cross_instructions_block}
 
 ${comparison_prompt_block}
 
@@ -4381,7 +4391,7 @@ Classify every supplied canonical cross-review finding. Each output finding has 
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN. CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.
 - include_in_rejected_summary is a boolean. Set it true only for a REJECTED claim important enough to explain in the human report; otherwise false.
-- evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; use pr-level for a finding about affected code outside the diff, such as an existing consumer, a changed flow, or test coverage, naming the file and symbol in evidence.
+- evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; anchor an affected consumer, caller, or flow to the changed line that exposes it, and use pr-level only when no changed line causes the finding (test coverage, migration, documentation), naming the file and symbol in evidence.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - All reader-facing string values must use ${FINAL_LANGUAGE_NAME} (${FINALIZATION_LANGUAGE}). Fixed enum values, IDs, agent keys, and paths remain unchanged.
 
