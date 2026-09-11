@@ -1,9 +1,10 @@
 # Portable atomic-finding contract
 
 Status: accepted on 2026-09-10; implementation is proceeding as an opt-in staged rollout.
-The primary and cross-review parsers, canonical sidecars, and deterministic renderers are
-implemented; structured final output remains a later rollout step. Primary output also has a
-bounded, field-stable schema-repair pass before any ordinary whole-review retry.
+The primary, cross-review, and final parsers, canonical sidecars, and deterministic renderers are
+implemented behind independent opt-in settings. Primary and cross-review output also have bounded,
+field-stable schema-repair passes before any ordinary whole-review retry; final repair remains a
+separate later rollout step and currently fails closed.
 
 ## Problem
 
@@ -57,6 +58,11 @@ objects. The agent key makes source-local IDs unambiguous across reports. Every 
 must be covered and unknown refs are rejected. A compound source claim may become multiple records
 so each classification remains atomic. Consolidation may merge duplicate records, but it retains
 every source ref and contributing agent.
+
+Final records use the same `source_refs` shape for canonical cross-review records and add
+`include_in_rejected_summary`. That boolean is valid only as `true` on a `REJECTED` record and
+controls presentation, not classification. Canonical final sidecars additionally contain derived
+`primary_refs`; this field is produced by the orchestrator and is never accepted from model output.
 
 ## Accepted structured final-synthesis design
 

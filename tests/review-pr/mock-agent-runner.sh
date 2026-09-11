@@ -198,6 +198,39 @@ emit_valid_ndjson_cross() {
     }'
 }
 
+emit_valid_ndjson_final() {
+    jq -nc '{
+        record: "finding",
+        schema_version: 1,
+        source_id: "FINAL-001",
+        source_refs: [
+            {agent: "alpha", source_id: "alpha:C-001"},
+            {agent: "beta", source_id: "beta:C-001"}
+        ],
+        title: "Fixture changed-line defect",
+        claim: "The fixture changed branch can fail.",
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+        evidence: ["Both canonical cross-reviews confirm the exact changed branch."],
+        failure_scenario: "The fixture request reaches the changed branch and fails.",
+        recommendation: "Correct the changed branch.",
+        classification: "CONFIRMED",
+        severity: "P1",
+        category: "correctness",
+        contributing_agents: ["alpha", "beta"],
+        verification_limitations: [],
+        existing_feedback: {state: "new", thread_ids: []},
+        include_in_rejected_summary: false
+    }'
+    jq -nc '{
+        record: "complete",
+        schema_version: 1,
+        finding_count: 1,
+        summary: "The canonical cross-review finding is confirmed.",
+        verification_limitations: [],
+        positive_evidence: []
+    }'
+}
+
 emit_anchor_output() {
     local anchor_line=$1
     local problem_text=${2:-The fixture finding remains byte-for-byte stable.}
@@ -246,6 +279,12 @@ case "$behavior" in
         elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' ]]; then
             if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
                 emit_valid_ndjson_cross
+            else
+                emit_valid_output
+            fi
+        elif [[ "$phase" == 'final synthesis' || "$phase" == 'final findings repair' ]]; then
+            if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
+                emit_valid_ndjson_final
             else
                 emit_valid_output
             fi

@@ -41,7 +41,8 @@
   "reporting": {
     "finding_contract": {
       "primary": "markdown",
-      "cross_review": "markdown"
+      "cross_review": "markdown",
+      "final": "markdown"
     },
     "comparison_sections": {
       "cross_review": "none",

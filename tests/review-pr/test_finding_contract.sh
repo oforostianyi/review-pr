@@ -129,6 +129,64 @@ jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$
 assert_false 'cross-review repair stability rejects reclassification' \
     validate_cross_repair_stability "$cross_repair_baseline" "$changed_cross_canonical"
 
+REVIEW_AGENTS=(alpha)
+CROSS_FINDINGS_OUTPUTS[alpha]="$cross_canonical"
+final_expected_refs="$test_root/final-expected-refs.json"
+assert_true 'final synthesis derives cross-review inputs and transitive primary provenance' \
+    build_final_expected_refs "$final_expected_refs"
+assert_eq 'beta:beta:F-001' "$(jq -r '.[0].primary_refs[0] | .agent + ":" + .source_id' "$final_expected_refs")" \
+    'final expected refs retain canonical primary provenance'
+
+final_records="$test_root/final-records.json"
+final_canonical="$test_root/final-canonical.json"
+jq -n '{
+    record: "finding", schema_version: 1, source_id: "FINAL-001",
+    source_refs: [{agent: "alpha", source_id: "alpha:C-001"}],
+    title: "Fixture final finding", claim: "The changed branch can fail.",
+    anchor: {kind: "changed-line", file: "src/Changed.php", start: 10, end: 10},
+    evidence: ["The canonical cross-review confirms the changed failure path."],
+    failure_scenario: "The request reaches the changed branch.", recommendation: "Correct the branch.",
+    classification: "CONFIRMED", severity: "P1", category: "correctness",
+    contributing_agents: ["alpha"], verification_limitations: [],
+    existing_feedback: {state: "new", thread_ids: []}, include_in_rejected_summary: false
+}, {
+    record: "complete", schema_version: 1, finding_count: 1,
+    summary: "One finding confirmed.", verification_limitations: [], positive_evidence: []
+}' | jq -s '.' >"$final_records"
+assert_true 'valid final synthesis covers every canonical cross-review source' \
+    validate_final_ndjson_records "$final_records" "$final_canonical" "$final_expected_refs"
+assert_eq 'beta:beta:F-001' "$(jq -r '.findings[0].primary_refs[0] | .agent + ":" + .source_id' "$final_canonical")" \
+    'canonical final sidecar derives primary provenance instead of trusting the model'
+
+final_missing_ref="$test_root/final-missing-ref.json"
+jq '.[0].source_refs[0].source_id = "alpha:C-999"' "$final_records" >"$final_missing_ref"
+assert_false 'final synthesis rejects missing and unknown cross-review provenance' \
+    validate_final_ndjson_records "$final_missing_ref" "$test_root/final-missing-canonical.json" "$final_expected_refs"
+
+final_bad_rejected_flag="$test_root/final-bad-rejected-flag.json"
+jq '.[0].include_in_rejected_summary = true' "$final_records" >"$final_bad_rejected_flag"
+assert_false 'only rejected findings may enter the important-rejections summary' \
+    validate_final_ndjson_records "$final_bad_rejected_flag" "$test_root/final-bad-flag-canonical.json" "$final_expected_refs"
+
+FINALIZATION_LANGUAGE=EN
+FINAL_HEADER_TITLE='# Code Review: [PR #1](https://example.test/1) — Fixture'
+FINAL_HEADER_TABLE_HEADER='| Field | Value |'
+FINAL_HEADER_TABLE_SEPARATOR='| --- | --- |'
+FINAL_HEADER_TASK='| **Task** | Fixture |'
+FINAL_HEADER_BASE='| **Base** | `main` → `fixture` |'
+FINAL_HEADER_FILES='| **Files changed** | 1 · +1 / −0 |'
+FINAL_HEADER_AUTHOR='| **Author** | Fixture |'
+configure_finalization_language
+final_rendered="$test_root/final-rendered.md"
+assert_true 'canonical final findings render deterministic Markdown' \
+    render_final_findings_markdown "$final_canonical" "$final_rendered"
+assert_file_contains "$final_rendered" "$FINAL_CLASSIFICATION_TABLE_HEADER" \
+    'final renderer owns the localized classification header'
+assert_file_contains "$final_rendered" '<!-- review-pr:anchor:changed-line -->' \
+    'final renderer emits the stable changed-line anchor marker'
+assert_true 'deterministic final Markdown passes the legacy structural validator' \
+    validate_final_markdown "$final_rendered"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

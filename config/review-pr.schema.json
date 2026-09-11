@@ -123,6 +123,12 @@
               "enum": ["markdown", "ndjson-v1"],
               "default": "markdown",
               "description": "Structured cross-review requires primary=ndjson-v1 and comparison_sections.cross_review=none."
+            },
+            "final": {
+              "type": "string",
+              "enum": ["markdown", "ndjson-v1"],
+              "default": "markdown",
+              "description": "Structured final synthesis requires primary and cross_review ndjson-v1, and comparison_sections.final set to none or standalone."
             }
           }
         },

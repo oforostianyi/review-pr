@@ -22,12 +22,16 @@ All notable changes to `review-pr` are documented in this file. The project foll
   phase-specific severity validation, deterministic EN/UA Markdown, and manifest-backed resume.
 - One bounded structured cross-review schema-repair pass that freezes classification, severity,
   source provenance, contributing agents, anchors, and substantive content.
+- Opt-in structured final synthesis over canonical cross-review sidecars, with complete source-ref
+  coverage, orchestrator-derived primary provenance, strict final-only rejection metadata,
+  deterministic localized Markdown, manifest-backed resume, and artifact-only final reruns.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
 
 ### Changed
 
-- Documented the accepted structured final-synthesis provenance, coverage, rendering, and bounded
-  repair design before enabling the runtime contract.
+- Final report headings, metadata/classification tables, confirmed finding blocks, important
+  rejected clarifications, and anchor markers are now rendered by the orchestrator in structured
+  mode instead of being parsed from localized model Markdown.
 - Extracted the utility into a standalone, repository-neutral source layout with root installation,
   release, and documentation files.
 - The distributed example now uses neutral repository/profile placeholders and no preconfigured

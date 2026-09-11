@@ -280,7 +280,8 @@ Markdown remains the default primary-agent output contract. To evaluate the vers
   "reporting": {
     "finding_contract": {
       "primary": "ndjson-v1",
-      "cross_review": "ndjson-v1"
+      "cross_review": "ndjson-v1",
+      "final": "ndjson-v1"
     }
   }
 }
@@ -290,7 +291,9 @@ In `ndjson-v1` mode each agent returns one complete JSON object per physical lin
 
 Structured cross-review requires `primary: "ndjson-v1"` and `reporting.comparison_sections.cross_review: "none"`. It receives the other agents' canonical primary sidecars rather than localized Markdown. Every input finding must be covered by at least one cross-review record using a unique `{agent, source_id}` reference; unknown references and missing coverage fail validation. Genuine duplicates may be consolidated with multiple references, while a compound source claim may be split across independently classified records. `CONFIRMED` requires `P0`–`P3`; `REJECTED` and `UNCERTAIN` use `null` severity. The portable record schema is installed as `review-pr-findings-v1.schema.json`; the full design is documented in `review-pr-finding-contract.md`.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output consumes the normal configured agent attempts and fails closed if no attempt validates; attempt-scoped raw output and diagnostics are preserved. A structurally recoverable primary or cross-review response first receives a dedicated field-stable repair pass. Cross-review repair cannot change classification, severity, `source_refs`, contributing agents, or any substantive finding content, and the repaired result must still cover every canonical primary input. Resume uses both contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Historical manifests without these fields continue as Markdown. Final synthesis still uses its established Markdown contract.
+Structured final synthesis requires structured primary and cross-review inputs plus `comparison_sections.final: "none"` or `"standalone"`. The finalizer receives canonical cross-review JSON rather than localized Markdown. Every cross-review `{agent, source_id}` must be covered, unknown refs fail validation, and only confirmed records may carry `P0`–`P3`. The model never restates primary provenance: the orchestrator derives it through the validated cross-review graph and stores it in the canonical final sidecar. The final Markdown header, metadata table, classification table, actionable findings, rejected-findings section, localization, and anchor markers are rendered deterministically. `include_in_rejected_summary` only controls whether an important rejected decision is explained in that human section.
+
+There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable primary or cross-review response first receives a dedicated field-stable repair pass. Cross-review repair cannot change classification, severity, `source_refs`, contributing agents, or any substantive finding content. Final schema repair is intentionally not enabled yet; an invalid final stream is preserved and rejected rather than guessed. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
 ## Optional comparison reports
 
@@ -301,7 +304,8 @@ Comparison material can be controlled independently for cross-review and final s
   "reporting": {
     "finding_contract": {
       "primary": "markdown",
-      "cross_review": "markdown"
+      "cross_review": "markdown",
+      "final": "markdown"
     },
     "comparison_sections": {
       "cross_review": "none",
@@ -500,6 +504,8 @@ $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
     ├── <review-id>-<timestamp>-claude-usage.json
     ├── <review-id>-<timestamp>-cross-codex-usage.json
     ├── <review-id>-<timestamp>-final-usage.json
+    ├── <review-id>-<timestamp>-final-raw.ndjson       # only with final ndjson-v1
+    ├── <review-id>-<timestamp>-final-findings.json    # only with final ndjson-v1
     ├── <review-id>-<timestamp>-final-anchor-validation.json
     ├── <review-id>-<timestamp>-comparison-usage.json
     ├── <review-id>-<timestamp>-manifest.json
@@ -631,7 +637,7 @@ Use an executable `runner` only when the CLI cannot use the standard input/Markd
 
 - runs with the review repository as its working directory;
 - reads the complete orchestration prompt from stdin;
-- writes only the phase payload to stdout: Markdown by default, or NDJSON when the current primary or cross-review phase selects `ndjson-v1`;
+- writes only the phase payload to stdout: Markdown by default, or NDJSON when the current primary, cross-review, or final phase selects `ndjson-v1`;
 - writes diagnostics to stderr;
 - exits non-zero on failure;
 - must not switch branches or modify repository files.
@@ -662,7 +668,7 @@ REVIEW_PR_BASE_REF
 REVIEW_PR_HEAD_REF
 ```
 
-`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` for an opted-in primary or cross-review phase and `markdown` for legacy phases, final synthesis, and comparison synthesis. A runner should still treat the prompt as authoritative for the complete phase-specific schema and rules.
+`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` for an opted-in primary, cross-review, or final-synthesis phase and `markdown` for legacy phases and comparison synthesis. A runner should still treat the prompt as authoritative for the complete phase-specific schema and rules.
 
 When an opted-in primary response is structurally repairable, the same agent may receive one
 additional `REVIEW_PR_PHASE=primary findings repair` invocation with

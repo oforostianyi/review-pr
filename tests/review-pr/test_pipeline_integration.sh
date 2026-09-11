@@ -633,7 +633,7 @@ run_ndjson_cross_case() {
     local checkout
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
-    local manifest work_dir stem alpha_raw alpha_findings alpha_report alpha_prompt
+    local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -646,7 +646,7 @@ run_ndjson_cross_case() {
     unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
     export REVIEW_PR_FAKE_PR_BODY='Fixture structured cross-review.'
     write_config "$config" "$checkout" "$reviews" 2
-    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"} |
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
         .reporting.comparison_sections = {cross_review: "none", final: "none"}' \
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
@@ -664,10 +664,15 @@ run_ndjson_cross_case() {
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    timestamp=$(jq -r '.timestamp' "$manifest")
     alpha_raw="$work_dir/${stem}-cross-alpha-raw.ndjson"
     alpha_findings="$work_dir/${stem}-cross-alpha-findings.json"
     alpha_report="$work_dir/${stem}-cross-alpha.md"
     alpha_prompt="$capture/cross-review-alpha-attempt-1.prompt"
+    final_raw="$work_dir/${stem}-final-raw.ndjson"
+    final_findings="$work_dir/${stem}-final-findings.json"
+    final_report="${work_dir%/work}/${stem}-final.md"
+    final_prompt="$capture/final-synthesis-alpha-attempt-1.prompt"
 
     assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
         'structured cross-review pipeline completes'
@@ -696,6 +701,43 @@ run_ndjson_cross_case() {
         'structured cross-review usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-cross-beta-error-schema-repair-attempt-1-source-raw.ndjson" \
         'structured cross-review repair preserves original invalid response'
+    assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.final' "$manifest")" \
+        'manifest records the final-synthesis finding contract'
+    assert_file_exists "$final_raw" 'structured final synthesis preserves exact raw NDJSON'
+    assert_file_exists "$final_findings" 'structured final synthesis publishes canonical findings JSON'
+    assert_file_exists "$final_report" 'structured final synthesis publishes deterministic Markdown in the report root'
+    assert_eq final-synthesis "$(jq -r '.phase' "$final_findings")" \
+        'final sidecar records its phase'
+    assert_eq 'alpha:alpha:F-001,beta:beta:F-001' "$(jq -r '[.findings[0].primary_refs[] | .agent + ":" + .source_id] | join(",")' "$final_findings")" \
+        'final sidecar derives transitive primary provenance from cross-review refs'
+    assert_eq "${stem}-final-raw.ndjson" "$(jq -r '.artifacts.final_raw' "$manifest")" \
+        'manifest points to final raw output'
+    assert_eq "${stem}-final-findings.json" "$(jq -r '.artifacts.final_findings' "$manifest")" \
+        'manifest points to canonical final findings'
+    assert_file_contains "$final_report" '# Code Review: [PR #123]' \
+        'deterministic final renderer owns the linked PR header'
+    assert_file_contains "$final_report" '<!-- review-pr:anchor:changed-line -->' \
+        'deterministic final renderer emits validated anchor markers'
+    assert_file_contains "$final_prompt" 'BEGIN CANONICAL CROSS-REVIEW FINDINGS: alpha' \
+        'structured final synthesis receives canonical cross-review inputs'
+    assert_false 'structured final synthesis does not receive localized cross-review Markdown' \
+        grep -Fq -- '### [CONFIRMED/P1]' "$final_prompt"
+
+    sleep 1
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" --rerun-final --run "$timestamp" 123 \
+        >"$case_dir/rerun-output.txt" 2>"$case_dir/rerun-stderr.log"
+    rerun_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sort | tail -n 1)
+    [[ -n "$rerun_manifest" ]] || fail 'structured final rerun did not create a manifest'
+    pass 'structured final rerun creates a separate manifest'
+    assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.final' "$rerun_manifest")" \
+        'structured final rerun records its contract'
+    assert_file_exists "$work_dir/$(jq -r '.final_raw' "$rerun_manifest")" \
+        'structured final rerun preserves its own raw NDJSON'
+    assert_file_exists "$work_dir/$(jq -r '.final_findings' "$rerun_manifest")" \
+        'structured final rerun publishes its own canonical sidecar'
 }
 
 run_ndjson_cross_resume_case() {

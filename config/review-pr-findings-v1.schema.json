@@ -229,6 +229,10 @@
           "items": {
             "$ref": "#/$defs/sourceRef"
           }
+        },
+        "include_in_rejected_summary": {
+          "type": "boolean",
+          "description": "Final-synthesis-only decision to surface an important rejected claim in the human report."
         }
       }
     },

@@ -58,6 +58,7 @@ assert_file_contains "$show_output" 'Cross-review language: UA (Ukrainian)' 'pha
 assert_file_contains "$show_output" 'alpha: skill=' 'empty optional skill configuration is accepted'
 assert_file_contains "$show_output" 'Primary finding contract: markdown' 'Markdown remains the backward-compatible primary contract default'
 assert_file_contains "$show_output" 'Cross-review finding contract: markdown' 'Markdown remains the backward-compatible cross-review contract default'
+assert_file_contains "$show_output" 'Final finding contract: markdown' 'Markdown remains the backward-compatible final contract default'
 
 ndjson_config="$test_root/ndjson.json"
 ndjson_output="$test_root/ndjson-show-config.txt"
@@ -70,6 +71,28 @@ cross_ndjson_output="$test_root/cross-ndjson-show-config.txt"
 jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1"}' "$config_file" >"$cross_ndjson_config"
 "$repo_root/bin/review-pr" --config "$cross_ndjson_config" --show-config >"$cross_ndjson_output"
 assert_file_contains "$cross_ndjson_output" 'Cross-review finding contract: ndjson-v1' 'ndjson-v1 can be enabled explicitly for cross-review'
+
+final_ndjson_config="$test_root/final-ndjson.json"
+final_ndjson_output="$test_root/final-ndjson-show-config.txt"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+    .reporting.comparison_sections = {cross_review: "none", final: "standalone"}' "$config_file" >"$final_ndjson_config"
+"$repo_root/bin/review-pr" --config "$final_ndjson_config" --show-config >"$final_ndjson_output"
+assert_file_contains "$final_ndjson_output" 'Final finding contract: ndjson-v1' 'ndjson-v1 can be enabled explicitly for final synthesis'
+
+invalid_final_dependency="$test_root/invalid-final-dependency.json"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "markdown", final: "ndjson-v1"}' "$config_file" >"$invalid_final_dependency"
+if "$repo_root/bin/review-pr" --config "$invalid_final_dependency" --show-config >/dev/null 2>&1; then
+    fail 'structured final synthesis without structured cross-review must fail'
+fi
+pass 'structured final synthesis requires structured primary and cross-review findings'
+
+invalid_final_comparison="$test_root/invalid-final-comparison.json"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+    .reporting.comparison_sections = {cross_review: "none", final: "inline"}' "$config_file" >"$invalid_final_comparison"
+if "$repo_root/bin/review-pr" --config "$invalid_final_comparison" --show-config >/dev/null 2>&1; then
+    fail 'structured final synthesis with inline comparison must fail'
+fi
+pass 'structured final synthesis rejects incompatible inline comparison output'
 
 invalid_cross_dependency="$test_root/invalid-cross-dependency.json"
 jq '.reporting.finding_contract = {primary: "markdown", cross_review: "ndjson-v1"}' "$config_file" >"$invalid_cross_dependency"
