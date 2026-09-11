@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly REVIEW_PR_VERSION="1.11.2"
+readonly REVIEW_PR_VERSION="1.11.3"
 
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     printf 'review-pr requires Bash 5.1 or newer; found %s.\n' "$BASH_VERSION" >&2
@@ -4230,7 +4230,7 @@ Additional final-review formatting instructions:
 
 ${FINAL_REVIEW_INSTRUCTIONS}
 
-Every CONFIRMED classification row must have exactly one corresponding detailed finding block. Each block must use exactly one language-independent anchor marker:
+The classification table is an audit ledger for all reviewed claims. It may therefore contain CONFIRMED rows that are positive evidence, supporting subclaims, or duplicates merged into another recommendation; those rows do not require their own detailed finding block. After deduplication, emit one detailed block for each surviving actionable finding, titled with exactly one severity P0, P1, P2, or P3. Each detailed block must use exactly one language-independent anchor marker:
 
 - \`<!-- review-pr:anchor:changed-line -->\` for an inline-capable finding. Its File value must be one exact repository-relative path from the supplied changed-line map. Its Line value must be one positive integer or \`start-end\`; the selected line, or the end of a range, must be covered by that file's \`right_side_ranges\`.
 - \`<!-- review-pr:anchor:pr-level -->\` only when the finding genuinely has no natural changed-line anchor, such as an omitted test, missing migration, or PR-wide omission. Its File and Line values must both be exactly \`—\`.
@@ -7076,22 +7076,12 @@ normalize_final_markdown() {
     activity_log "Normalized final synthesis body and generated canonical PR metadata/table headers"
 }
 
-count_confirmed_final_findings() {
+count_detailed_final_findings() {
     local output_file=$1
 
-    awk -v header="$FINAL_CLASSIFICATION_TABLE_HEADER" '
-        $0 == header { in_table = 1; next }
-        in_table && /^\|[[:space:]-]+\|/ { next }
-        in_table && /^\|/ {
-            split($0, cells, "|")
-            classification = cells[5]
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", classification)
-            if (classification == "CONFIRMED") confirmed++
-            next
-        }
-        in_table && $0 ~ /^[[:space:]]*$/ { next }
-        in_table { exit }
-        END { print confirmed + 0 }
+    awk '
+        /^###[[:space:]]+\[P[0-3]\][[:space:]]+[^[:space:]]/ { findings++ }
+        END { print findings + 0 }
     ' "$output_file"
 }
 
@@ -7184,7 +7174,7 @@ validate_final_anchors() {
     records_file=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-anchor-records.tmp.XXXXXX")
     TEMP_FILES+=("$records_file")
     extract_final_anchor_records "$output_file" >"$records_file"
-    confirmed_count=$(count_confirmed_final_findings "$output_file")
+    confirmed_count=$(count_detailed_final_findings "$output_file")
     marker_count=$(grep -Ec '^<!-- review-pr:anchor:(changed-line|pr-level) -->$' "$output_file" || true)
     if [[ -z "$CHANGED_LINE_MAP_FILE" ]]; then
         map_status=unavailable
@@ -7283,7 +7273,7 @@ validate_final_anchors() {
         overall_reason=malformed_anchor_record
     elif (( marker_count != confirmed_count )); then
         overall_status=invalid
-        overall_reason=confirmed_finding_anchor_count_mismatch
+        overall_reason=detailed_finding_anchor_count_mismatch
     fi
 
     ANCHOR_VALIDATION_STATUS=$overall_status

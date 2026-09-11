@@ -73,9 +73,38 @@ ${FINAL_CLASSIFICATION_HEADING}
 ${FINAL_CLASSIFICATION_TABLE_HEADER}
 |---|---|---|---|---|---|
 | 1 | Alpha | The report literally mentions CONFIRMED here | REJECTED | — | Not actionable. |
+| 2 | Beta | A verified positive fact | CONFIRMED | — | No engineering action is required. |
 EOF
-assert_eq '0' "$(count_confirmed_final_findings "$classification_word_output")" \
-    'confirmed-finding count reads only the classification column'
+assert_eq '0' "$(count_detailed_final_findings "$classification_word_output")" \
+    'detailed-finding count ignores claims that only appear in the classification ledger'
+
+positive_fact_anchor_output="$test_root/final-anchors-positive-fact.md"
+positive_fact_validation="$test_root/final-anchors-positive-fact.json"
+awk '
+    { print }
+    /Missing integration test.*CONFIRMED.*P2/ {
+        print "| 3 | Alpha | Verified compatibility remains intact | CONFIRMED | — | Positive evidence. |"
+    }
+' "$test_dir/fixtures/final-anchors-valid.md" >"$positive_fact_anchor_output"
+normalize_final_markdown "$positive_fact_anchor_output"
+assert_true 'confirmed positive evidence does not require an actionable anchor block' \
+    validate_final_anchors "$positive_fact_anchor_output" "$positive_fact_validation"
+assert_eq '2' "$(jq -r '.confirmed_findings' "$positive_fact_validation")" \
+    'anchor validation reports only detailed actionable findings'
+
+duplicate_row_anchor_output="$test_root/final-anchors-duplicate-row.md"
+duplicate_row_validation="$test_root/final-anchors-duplicate-row.json"
+awk '
+    { print }
+    /Missing integration test.*CONFIRMED.*P2/ {
+        print "| 3 | Alpha | Duplicate merged into row 2 recommendation | CONFIRMED | P2 | No separate detailed block. |"
+    }
+' "$test_dir/fixtures/final-anchors-valid.md" >"$duplicate_row_anchor_output"
+normalize_final_markdown "$duplicate_row_anchor_output"
+assert_true 'confirmed duplicate ledger row may be merged into another actionable finding' \
+    validate_final_anchors "$duplicate_row_anchor_output" "$duplicate_row_validation"
+assert_eq '2' "$(jq -r '.confirmed_findings' "$duplicate_row_validation")" \
+    'duplicate classification rows do not inflate detailed finding parity'
 
 context_output="$test_root/final-anchor-context-invalid.md"
 context_validation="$test_root/final-anchor-context-invalid.json"

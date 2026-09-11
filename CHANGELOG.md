@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.11.3] - 2026-09-11
+
+### Fixed
+
+- Final anchor parity now compares language-independent anchor markers with actual detailed
+  `[P0]`–`[P3]` finding blocks instead of classification-table rows. The classification table is an
+  audit ledger and may legitimately retain positive evidence, supporting subclaims, or confirmed
+  duplicates merged into another recommendation without causing a false validation failure.
+
 ## [1.11.2] - 2026-09-11
 
 ### Added
