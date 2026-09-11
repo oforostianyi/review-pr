@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.11.5] - 2026-09-11
+
 ### Added
 
 - Optional `agents.pi.max_tool_calls` enables a bundled Pi extension (`review-pr-pi-guard.js`) for
