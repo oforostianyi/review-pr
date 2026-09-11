@@ -3548,11 +3548,12 @@ build_final_repair_baseline() {
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
-             verification_limitations, existing_feedback, include_in_rejected_summary};
+             verification_limitations, include_in_rejected_summary,
+             existing_feedback: (.existing_feedback // {state: "unknown", thread_ids: []})};
         def has_content:
             . as $r | all(["source_id", "source_refs", "title", "claim", "anchor", "evidence",
                 "failure_scenario", "recommendation", "classification", "severity", "category",
-                "contributing_agents", "verification_limitations", "existing_feedback",
+                "contributing_agents", "verification_limitations",
                 "include_in_rejected_summary"][]; . as $key | $r | has($key));
         def valid_completion_content:
             has("summary") and (.summary | type == "string") and
@@ -3596,7 +3597,7 @@ Return only a complete ndjson-v1 stream, one JSON object per physical line, with
 
 The rejected draft failed with: ${failure_reason}
 
-Preserve every finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, and include_in_rejected_summary. Any difference is rejected. Primary provenance is derived later and must not be added. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record.
+Preserve every finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, and include_in_rejected_summary. Any difference is rejected. Primary provenance is derived later and must not be added. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline.
 
 Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
 
@@ -3704,11 +3705,12 @@ build_cross_repair_baseline() {
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
-             verification_limitations, existing_feedback};
+             verification_limitations,
+             existing_feedback: (.existing_feedback // {state: "unknown", thread_ids: []})};
         def has_content:
             . as $r | all(["source_id", "source_refs", "title", "claim", "anchor", "evidence",
                 "failure_scenario", "recommendation", "classification", "severity", "category",
-                "contributing_agents", "verification_limitations", "existing_feedback"][];
+                "contributing_agents", "verification_limitations"][];
                 . as $key | $r | has($key));
         def valid_completion_content:
             has("summary") and (.summary | type == "string") and
@@ -3752,7 +3754,7 @@ Return only a complete ndjson-v1 stream, one JSON object per physical line, with
 
 The rejected draft failed with: ${failure_reason}
 
-Preserve every output finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, and existing_feedback. Any difference is rejected. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record.
+Preserve every output finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, and existing_feedback. Any difference is rejected. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline.
 
 Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
 
@@ -3877,15 +3879,15 @@ build_primary_repair_baseline() {
             {
                 source_id, title, claim, anchor, evidence, failure_scenario,
                 recommendation, classification, severity, category,
-                contributing_agents, verification_limitations, existing_feedback
+                contributing_agents, verification_limitations,
+                existing_feedback: (.existing_feedback // {state: "unknown", thread_ids: []})
             };
         def has_finding_content:
             . as $record |
             all([
                 "source_id", "title", "claim", "anchor", "evidence",
                 "failure_scenario", "recommendation", "classification", "severity",
-                "category", "contributing_agents", "verification_limitations",
-                "existing_feedback"
+                "category", "contributing_agents", "verification_limitations"
             ][]; . as $key | $record | has($key));
         def valid_completion_content:
             has("summary") and (.summary | type == "string") and
@@ -3954,7 +3956,7 @@ The rejected draft failed with: ${failure_reason}
 
 You MUST preserve every finding exactly, in the same order, with the same source_id. Do not add, remove, split, merge, reorder, rephrase, translate, or otherwise change any finding. The orchestrator compares these substantive fields structurally and rejects any difference: title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback.
 
-You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. Each finding needs record "finding" and schema_version 1. Finish with exactly one complete record using finding_count equal to the preserved finding count. Preserve the complete record's summary, verification_limitations, and positive_evidence when present in the supplied baseline; when the baseline contains empty values, use them exactly. Do not output records after complete.
+You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline. Each finding needs record "finding" and schema_version 1. Finish with exactly one complete record using finding_count equal to the preserved finding count. Preserve the complete record's summary, verification_limitations, and positive_evidence when present in the supplied baseline; when the baseline contains empty values, use them exactly. Do not output records after complete.
 
 The complete preserved-content baseline is authoritative:
 
@@ -4314,6 +4316,7 @@ EOF
                 printf '\n===== END CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
             } >>"$prompt_file"
         done
+        append_required_source_refs_to_prompt "$prompt_file" cross "$reviewer"
         append_changed_line_map_to_prompt "$prompt_file"
     else
         while (( $# >= 2 )); do
@@ -4331,6 +4334,27 @@ EOF
     fi
 
     append_github_context_to_prompt "$prompt_file"
+}
+
+append_required_source_refs_to_prompt() {
+    local prompt_file=$1
+    local phase=$2
+    local reviewer=${3:-}
+    local refs_file
+
+    new_temp_file "required-refs-${phase}${reviewer:+-$reviewer}"
+    refs_file=$NEW_TEMP_FILE
+    case "$phase" in
+        cross) build_cross_expected_refs "$reviewer" "$refs_file" || die "Cannot list required source refs for ${reviewer} cross-review" ;;
+        final) build_final_expected_refs "$refs_file" || die "Cannot list required source refs for final synthesis" ;;
+        *) die "Unknown required-refs phase: ${phase}" ;;
+    esac
+    {
+        printf '\n===== BEGIN REQUIRED SOURCE REFS =====\n'
+        printf '%s\n' 'Every pair below must appear in source_refs of at least one output record, copied exactly, and no other pair may appear. Any primary_provenance entries shown inside the supplied records are upstream provenance for information only and must never be used as source_refs.'
+        jq -c '.[] | {agent, source_id}' "$refs_file"
+        printf '===== END REQUIRED SOURCE REFS =====\n'
+    } >>"$prompt_file"
 }
 
 write_final_prompt() {
@@ -4464,10 +4488,14 @@ EOF
             [[ -s "$report" ]] || die "Canonical cross-review findings are missing for structured final synthesis: ${label}"
             {
                 printf '\n===== BEGIN CANONICAL CROSS-REVIEW FINDINGS: %s =====\n' "$label"
-                cat -- "$report"
+                # The finalizer references cross-review records by their own source_id.
+                # Their upstream primary refs are shown as provenance so a model cannot
+                # mistake them for the refs it must cover.
+                jq '.findings |= map(. + {primary_provenance: .source_refs} | del(.source_refs))' "$report"
                 printf '\n===== END CANONICAL CROSS-REVIEW FINDINGS: %s =====\n' "$label"
             } >>"$prompt_file"
         done
+        append_required_source_refs_to_prompt "$prompt_file" final
     fi
     while [[ "$FINAL_FINDING_CONTRACT_MODE" != ndjson-v1 && $# -ge 2 ]]; do
         label=$1

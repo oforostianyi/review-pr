@@ -37,6 +37,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
   the table; the resume messages now go through the dashboard-aware activity log.
 - A resumed run no longer overwrites the manifest `agent_status` and `attempts` of agents whose
   artifacts were preserved with `unknown` and `0`; their recorded values are kept.
+- Cross-review and final prompts now end with an explicit `REQUIRED SOURCE REFS` list, and the final
+  prompt presents each cross-review record's upstream primary refs as `primary_provenance`. A local
+  model had referenced primary finding IDs instead of the cross-review record IDs it had to cover,
+  which the frozen-provenance repair pass cannot fix.
+- A finding that lacks only `existing_feedback` is now eligible for the bounded schema repair with
+  `{"state":"unknown","thread_ids":[]}`, instead of failing the whole attempt and triggering a full
+  retry of an otherwise valid review.
 - Refusing to resume an incompatible run now explains why, for example that the PR head moved from
   the recorded commit to the current one, instead of a bare "not a compatible full-run manifest".
 - A Pi attempt that ends with a provider or CLI error (for example a connection error to a local

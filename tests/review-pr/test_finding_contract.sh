@@ -76,6 +76,20 @@ sed -n '$p' "$test_dir/fixtures/primary-findings-valid.ndjson" >>"$missing_claim
 assert_false 'a finding missing substantive content is ineligible for repair' \
     build_primary_repair_baseline "$missing_claim" "$test_root/missing-claim-baseline.json"
 
+missing_feedback="$test_root/missing-feedback.ndjson"
+jq -c 'del(.existing_feedback)' < <(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson") >"$missing_feedback"
+jq -c '.existing_feedback = {state: "new", thread_ids: []}' < <(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson") >>"$missing_feedback"
+sed -n '3,$p' "$test_dir/fixtures/primary-findings-valid.ndjson" >>"$missing_feedback"
+missing_feedback_baseline="$test_root/missing-feedback-baseline.json"
+assert_true 'a finding missing only existing_feedback is eligible for repair' \
+    build_primary_repair_baseline "$missing_feedback" "$missing_feedback_baseline"
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "$missing_feedback_baseline")" \
+    'the repair baseline records missing existing feedback as unknown'
+assert_eq '[]' "$(jq -c '.findings[0].existing_feedback.thread_ids' "$missing_feedback_baseline")" \
+    'the repair baseline gives missing existing feedback no thread ids'
+assert_eq 'new' "$(jq -r '.findings[1].existing_feedback.state' "$missing_feedback_baseline")" \
+    'findings that carry existing feedback keep it in the baseline'
+
 cross_records="$test_root/cross-records.json"
 cross_expected_refs="$test_root/cross-expected-refs.json"
 cross_canonical="$test_root/cross-canonical.json"
@@ -151,6 +165,14 @@ jq '.[0].contributing_agents = ["alpha"]' "$cross_records" >"$wrong_contributor"
 assert_false 'cross-review contributing agents must match source provenance' \
     validate_cross_ndjson_records "$wrong_contributor" "$test_root/cross-wrong-contributor-canonical.json" alpha "$cross_expected_refs"
 
+cross_missing_feedback="$test_root/cross-missing-feedback.ndjson"
+jq -c '.[0] | del(.existing_feedback)' "$cross_records" >"$cross_missing_feedback"
+jq -c '.[1]' "$cross_records" >>"$cross_missing_feedback"
+assert_true 'a cross-review finding missing only existing_feedback is eligible for repair' \
+    build_cross_repair_baseline "$cross_missing_feedback" "$test_root/cross-missing-feedback-baseline.json"
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "$test_root/cross-missing-feedback-baseline.json")" \
+    'the cross-review repair baseline records missing existing feedback as unknown'
+
 cross_repairable="$test_root/cross-repairable.ndjson"
 {
     printf '%s\n' 'Structured cross-review follows:'
@@ -224,6 +246,14 @@ final_confirmed_empty_scenario="$test_root/final-confirmed-empty-scenario.json"
 jq '.[0].failure_scenario = ""' "$final_records" >"$final_confirmed_empty_scenario"
 assert_false 'a confirmed final finding still requires a failure scenario' \
     validate_final_ndjson_records "$final_confirmed_empty_scenario" "$test_root/final-confirmed-empty-canonical.json" "$final_expected_refs"
+
+final_missing_feedback="$test_root/final-missing-feedback.ndjson"
+jq -c '.[0] | del(.existing_feedback)' "$final_records" >"$final_missing_feedback"
+jq -c '.[1]' "$final_records" >>"$final_missing_feedback"
+assert_true 'a final finding missing only existing_feedback is eligible for repair' \
+    build_final_repair_baseline "$final_missing_feedback" "$test_root/final-missing-feedback-baseline.json"
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "$test_root/final-missing-feedback-baseline.json")" \
+    'the final repair baseline records missing existing feedback as unknown'
 
 final_repairable="$test_root/final-repairable.ndjson"
 {

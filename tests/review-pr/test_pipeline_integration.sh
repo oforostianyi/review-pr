@@ -734,6 +734,18 @@ run_ndjson_cross_case() {
         'structured final synthesis receives canonical cross-review inputs'
     assert_false 'structured final synthesis does not receive localized cross-review Markdown' \
         grep -Fq -- '### [CONFIRMED/P1]' "$final_prompt"
+    assert_file_contains "$final_prompt" '===== BEGIN REQUIRED SOURCE REFS =====' \
+        'structured final synthesis receives the explicit list of required source refs'
+    assert_file_contains "$final_prompt" '{"agent":"alpha","source_id":"alpha:C-001"}' \
+        'the required refs name every canonical cross-review record exactly'
+    assert_file_contains "$final_prompt" '"primary_provenance"' \
+        'cross-review records are presented with their primary refs renamed to provenance'
+    assert_false 'cross-review records no longer expose primary refs under the source_refs key' \
+        grep -Fq -- '"source_refs":' "$final_prompt"
+    assert_file_contains "$alpha_prompt" '===== BEGIN REQUIRED SOURCE REFS =====' \
+        'structured cross-review receives the explicit list of required source refs'
+    assert_file_contains "$alpha_prompt" '{"agent":"beta","source_id":"beta:F-001"}' \
+        'the cross-review required refs name every peer primary finding exactly'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
         'structured final usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \

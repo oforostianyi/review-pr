@@ -52,6 +52,11 @@ Required finding fields:
 - `verification_limitations`;
 - `existing_feedback.state`: `new`, `confirmed-existing`, `historical`, or `unknown`, with thread IDs when known.
 
+Cross-review and final prompts end with a `REQUIRED SOURCE REFS` block: the orchestrator lists every
+`{agent, source_id}` pair the response must cover, copied from the canonical inputs, and the final
+prompt presents the upstream primary refs of each cross-review record under `primary_provenance` so
+they cannot be mistaken for the refs to cover.
+
 Cross-review records additionally contain `source_refs`, a non-empty array of `{agent, source_id}`
 objects. The agent key makes source-local IDs unambiguous across reports. Every supplied source ref
 must be covered and unknown refs are rejected. A compound source claim may become multiple records
@@ -130,9 +135,11 @@ keys remain language-independent.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Leading
   or trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
-  completion record are repairable. Broken JSON-looking records, unknown record types, duplicate
-  completion records, and missing substantive finding fields are ineligible because recovery would
-  require guessing.
+  completion record are repairable. A finding that lacks only `existing_feedback` is repairable
+  too: the baseline records `{"state":"unknown","thread_ids":[]}`, which states honestly that the
+  model did not report thread coverage. Broken JSON-looking records, unknown record types,
+  duplicate completion records, and other missing substantive finding fields are ineligible because
+  recovery would require guessing.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,
