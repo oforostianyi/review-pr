@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-09-11
+
 ### Added
 
 - Authoritative per-run repository facts covering exact base/head/default-branch topology, changed
@@ -32,6 +34,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
   cross-review, and final `ndjson-v1` contracts without GitHub or a review checkout. It preserves
   prompts, raw responses, diagnostics, usage, canonical findings, rendered Markdown, and a machine
   summary, including on validation failure.
+
+### Fixed
+
+- Built-in Codex contract tests now pass `--skip-git-repo-check`, because the isolated fixture
+  directory intentionally is not a Git checkout. Ordinary PR review execution remains unchanged.
 
 ### Changed
 
