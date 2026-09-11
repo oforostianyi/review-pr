@@ -114,6 +114,94 @@ record metadata only after all decision records are safely parseable, and keeps 
 severity, cross-review refs, derived primary provenance, anchors, and substantive fields stable.
 Failure preserves the original and repair responses and publishes no canonical final report.
 
+## Accepted dispute-resolution design (opt-in `resolution` records)
+
+Cross-reviewers regularly disagree about the same primary finding: one classifies it `CONFIRMED`,
+another `REJECTED` or `UNCERTAIN`, or both confirm it with different severities. Today the
+finalizer resolves such disputes in prose inside `evidence`; nothing records what kind of dispute it
+was, how it was settled, or which measurement settled it. The accepted design makes that decision
+machine-readable without breaking `ndjson-v1`: no new required field is added to existing records,
+and a run without the feature validates exactly as before.
+
+### Configuration and scope
+
+- `reporting.dispute_resolution: true` (default `false`) enables the feature. It requires
+  `reporting.finding_contract.final = "ndjson-v1"`; configuration validation rejects it otherwise.
+- The orchestrator, not the model, detects disputes deterministically from the canonical
+  cross-review sidecars. A **dispute** exists for a primary `{agent, source_id}` when the
+  cross-review records that reference it disagree in classification, or agree on `CONFIRMED` with
+  different severities. Each dispute gets a stable `dispute_id` derived from the primary ref, for
+  example `dispute:codex:codex.p1.hidden-address-notes`.
+- The final prompt lists every dispute in a `REQUIRED RESOLUTIONS` block: `dispute_id`, the primary
+  ref, and each contributing cross-review `{agent, source_id, classification, severity}`. The
+  finalizer must emit exactly one `resolution` record per listed dispute and no other resolution
+  records. Historical manifests without the block stay valid.
+
+### The `resolution` record
+
+One additional record type in the same final NDJSON stream, before the terminal `complete`:
+
+```jsonl
+{"record":"resolution","schema_version":1,"dispute_id":"dispute:codex:codex.p1.hidden-address-notes","primary_ref":{"agent":"codex","source_id":"codex.p1.hidden-address-notes"},"conflicting_refs":[{"agent":"claude","source_id":"claude.x1.hidden-address-divergence-note"},{"agent":"pi","source_id":"xrev-hidden-address-notes-leak"}],"final_source_id":"syn-1-hidden-address-notes-leak","dispute_kind":"factual","resolution_status":"resolved","verification_method":"command","command":["rg","-n","address","src/Modules/Sysadmin/CB/Application/Service/Export/Transformers/FoursquareIngestion/LocationTransformer.php"],"observed":"Lines 143-151 append street and postcode to the notes cell for hidden-address rows.","basis":"general_engineering","basis_source":null,"limitations":[]}
+```
+
+Fields and their rules:
+
+- `dispute_id`, `primary_ref`, `conflicting_refs`: copied from the `REQUIRED RESOLUTIONS` block;
+  `conflicting_refs` must equal the listed cross-review refs, nothing more or less.
+- `final_source_id`: the `source_id` of the final finding record that covers this dispute. That
+  record must exist and its `source_refs` must include every `conflicting_refs` entry.
+- `dispute_kind`: `factual` (the reviewers disagree about what the code does or whether something
+  exists), `severity` (they agree on the fact and disagree on impact), or `mixed`.
+- `resolution_status`: `resolved`, `uncertain`, or `not_applicable` (allowed only for `severity`
+  disputes, where synthesis reconciles impact without a measurement).
+- `verification_method`: `source`, `command`, `test`, `repository_rule`, `runtime`, or `manual`.
+  A `factual` or `mixed` dispute may be `resolved` only with a method other than `manual`, and the
+  covering final record may be `CONFIRMED` only when the dispute is `resolved`. When the fact could
+  not be measured the status is `uncertain` and the covering final record must be `UNCERTAIN`:
+  agent count never settles a factual dispute.
+- `command`: `null`, or the measurement as an argv array of non-empty strings (no shell string, no
+  evaluation). In this iteration the orchestrator records but does not execute it; a later
+  iteration may execute an allow-listed subset in the detached checkout and replace `observed` with
+  the captured result. `command` is required when `verification_method` is `command` or `test`.
+- `observed`: what the measurement or source read showed, in the final language, bounded in length.
+  Required when `resolution_status` is `resolved`.
+- `basis`: `explicit_repository_rule`, `skill_rule`, `inferred_convention`, or `general_engineering`.
+  `basis_source` is required for `explicit_repository_rule` (a repository path, optionally
+  `path:line`) and for `skill_rule` (the configured skill name, never an absolute private path);
+  it must be `null` otherwise. A covering final record whose only basis is `inferred_convention`
+  cannot carry `P0` or `P1`.
+- `limitations`: a string array of what remains unverified; may be empty.
+
+### Validation, repair, rendering, artifacts
+
+- Validation runs after the existing final checks: complete coverage of the required disputes, no
+  unknown `dispute_id`, exact `conflicting_refs`, `final_source_id` linkage, the method/status/
+  classification rules above, and the severity rule for inferred conventions. Failures use the
+  existing granular reason format, for example
+  `dispute_resolution_validation_failed: resolution[dispute:codex:codex.p1.hidden-address-notes].verification_method`.
+- Schema repair may fix transport and record metadata of resolution records but freezes
+  `dispute_kind`, `resolution_status`, `verification_method`, `command`, `observed`, `basis`,
+  `basis_source`, and the refs, exactly as it freezes finding decisions.
+- The orchestrator publishes `*-final-resolutions.json` (the validated resolution array plus the
+  detected dispute list) beside `*-final-findings.json`, records it in the manifest, and the
+  deterministic final renderer adds a compact localized `Dispute resolutions` table (dispute kind,
+  status, method, observed excerpt, basis) with a language-independent marker. Merged duplicates
+  reference the same resolution once.
+- The standalone comparison, the cross-review phase, and historical Markdown or `ndjson-v1` runs
+  without the flag are unchanged.
+
+### Rollout for this feature
+
+1. Design (this section) and the versioned schema additions with positive and negative fixtures:
+   factual, severity, mixed, uncertain, explicit rule, inferred convention; and the invalid cases
+   "factual resolved by count", "command without observed", "CONFIRMED over an unresolved factual
+   premise", "inferred convention presented as explicit rule".
+2. Dispute detection, `REQUIRED RESOLUTIONS` prompt block, parser and semantic validation with
+   stable failure reasons, repair stability, canonical sidecar and manifest entry.
+3. Deterministic renderer and end-to-end tests with mock scenarios; the feature stays opt-in.
+4. Optional later iteration: orchestrator-executed allow-listed measurements.
+
 ## Artifact flow
 
 For each phase, the orchestrator should preserve three distinct artifacts:
