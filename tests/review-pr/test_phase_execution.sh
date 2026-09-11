@@ -168,4 +168,34 @@ assert_file_contains "$CASE_DIR/alpha-error.log" 'exceeded its configured timeou
 assert_eq 'failed' "${PHASE_AGENT_STATUSES[alpha]}" 'timed-out agent is recorded as failed'
 assert_eq 'complete' "${PHASE_AGENT_STATUSES[beta]}" 'successful peer remains complete'
 
+prepare_phase_case preserved alpha beta
+PRIMARY_OUTPUTS[alpha]="$WORK_DIR/preserved-alpha.md"
+PRIMARY_OUTPUTS[beta]="$WORK_DIR/preserved-beta.md"
+CROSS_OUTPUTS[alpha]="$WORK_DIR/preserved-cross-alpha.md"
+CROSS_OUTPUTS[beta]="$WORK_DIR/preserved-cross-beta.md"
+printf 'preserved primary report\n' >"${PRIMARY_OUTPUTS[alpha]}"
+printf '{"reported_total_tokens": 512}\n' >"$WORK_DIR/${REPORT_STEM}-alpha-usage.json"
+printf 'preserved cross report\n' >"${CROSS_OUTPUTS[beta]}"
+: >"${CROSS_OUTPUTS[alpha]}"
+load_preserved_dashboard_statuses
+assert_eq 'LOADED' "${DASHBOARD_STATUSES[$(dashboard_key primary alpha)]}" \
+    'a preserved primary report is shown as loaded instead of waiting'
+assert_eq '512' "${DASHBOARD_TOKENS[$(dashboard_key primary alpha)]}" \
+    'a preserved report shows its recorded token total'
+assert_eq 'WAITING' "${DASHBOARD_STATUSES[$(dashboard_key primary beta)]}" \
+    'a missing primary report still waits'
+assert_eq 'LOADED' "${DASHBOARD_STATUSES[$(dashboard_key cross beta)]}" \
+    'a preserved cross-review is shown as loaded'
+assert_eq 'WAITING' "${DASHBOARD_STATUSES[$(dashboard_key cross alpha)]}" \
+    'an empty cross-review artifact is not treated as preserved'
+
+DASHBOARD_SHOW_PID=true
+DASHBOARD_COLOR_ENABLED=false
+calculate_dashboard_line_count
+render_dashboard_snapshot false 2>"$CASE_DIR/frame.txt"
+assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt")" \
+    'the rendered frame height matches the cursor movement used for redraws'
+assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/frame.txt")" \
+    'one frame draws the primary section title exactly once'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

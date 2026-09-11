@@ -30,6 +30,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - `ndjson-v1` validation failures now append machine-readable details to the stable reason token:
   the failing record by `source_id`, the failing field or stream-level check, and any missing or
   unknown source refs. Attempt logs and manifest failure entries carry the same detail.
+- Resuming a run no longer shows preserved primary and cross-review reports as `WAITING`: their
+  rows are `LOADED` with the recorded token totals, and only rerun agents progress live.
+- Resuming a run no longer draws the `PRIMARY REVIEW` title twice. A plain log line printed after
+  the live table started shifted the frame by one row, so every redraw left the stale title above
+  the table; the resume messages now go through the dashboard-aware activity log.
+- A resumed run no longer overwrites the manifest `agent_status` and `attempts` of agents whose
+  artifacts were preserved with `unknown` and `0`; their recorded values are kept.
 - A Pi attempt that ends with a provider or CLI error (for example a connection error to a local
   model server) now logs that error message. Previously the log reported a misleading
   "Could not extract the final Markdown" and the usage summary hid the cause. Usage summaries

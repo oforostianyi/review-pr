@@ -273,6 +273,12 @@ run_resume_case() {
         'resume keeps an already successful cross-review byte-for-byte'
     assert_file_exists "$work_dir/${stem}-cross-beta.md" 'resume reruns only the missing cross-review'
     assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" 'resumed pipeline completes synthesis'
+    assert_eq 'complete' "$(jq -r '.agent_status.cross_review.alpha' "$manifest")" \
+        'resume preserves the manifest status of an agent that was not rerun'
+    assert_eq '1' "$(jq -r '.attempts.cross_review.alpha' "$manifest")" \
+        'resume preserves the attempt count of an agent that was not rerun'
+    assert_eq 'complete' "$(jq -r '.agent_status.cross_review.beta' "$manifest")" \
+        'resume records the rerun agent as complete'
 }
 
 run_comparison_failure_case() {

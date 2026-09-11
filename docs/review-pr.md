@@ -414,6 +414,11 @@ Comparison material can be controlled independently for cross-review and final s
 
 ## Terminal status interface
 
+When a run is resumed with `--run <timestamp>`, agents whose reports were preserved from the earlier
+invocation appear as `LOADED` with their recorded token totals; only the agents that actually run
+again move through `QUEUED`, `RUNNING`, and `COMPLETE`. The resumed manifest keeps the attempt
+counts and statuses recorded for preserved agents.
+
 The live table reserves 79 columns when process IDs are shown (67 without them). Its 29-character `Agent` column displays the configured model ID and, when configured, reasoning effort — for example `Codex (gpt-5.6-terra high)`. A provider prefix such as `lmstudio/` is omitted only to preserve space; the actual model ID is retained. If a finalization-specific effort is configured, it is shown for the final synthesizer; otherwise its agent effort is shown.
 
 In an interactive terminal the default `auto` mode renders one live dashboard divided into `PRIMARY REVIEW`, `CROSS-REVIEW`, and `FINAL SYNTHESIS`, plus `COMPARISON REPORT` when standalone comparison is enabled. Each row shows the configured agent label and model, lifecycle status, PID, elapsed time, and total `Tokens`. Long model identifiers are shortened only in the dashboard. Token usage appears only after a process has completed: it is extracted from the CLI's native structured output, rather than estimated from report text. `-` means the CLI/provider did not return a usage value (which is normal for a custom adapter, and possible for a local-model provider). The count includes the categories reported by that CLI, such as input, output, and cache tokens; it is not a cost estimate.
