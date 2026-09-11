@@ -2981,7 +2981,7 @@ validate_cross_ndjson_records() {
             (.claim | type == "string" and length > 0) and
             (.anchor | valid_anchor) and
             (.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
-            (.failure_scenario | type == "string" and length > 0) and
+            (.failure_scenario | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
             (.recommendation | type == "string" and length > 0) and
             (.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) and
             (if .classification == "CONFIRMED" then (.severity | IN("P0", "P1", "P2", "P3")) else .severity == null end) and
@@ -3090,7 +3090,7 @@ render_cross_findings_markdown() {
             $source_label + ": " + ([.source_refs[] | "`" + .agent + ":" + .source_id + "`"] | join(", ")) + "\n\n" +
             (.anchor | anchor_text) + "\n\n" +
             $claim_label + ":\n\n" + .claim + "\n\n" +
-            $failure_label + ":\n\n" + .failure_scenario + "\n\n" +
+            $failure_label + ":\n\n" + (if (.failure_scenario // "") == "" then $none else .failure_scenario end) + "\n\n" +
             $evidence_label + ":\n\n" + bullets(.evidence) + "\n\n" +
             $recommendation_label + ":\n\n" + .recommendation + "\n\n" +
             $category_label + ": `" + .category + "`\n\n" +
@@ -3240,7 +3240,7 @@ validate_final_ndjson_records() {
             (.claim | type == "string" and length > 0) and
             (.anchor | valid_anchor) and
             (.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
-            (.failure_scenario | type == "string" and length > 0) and
+            (.failure_scenario | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
             (.recommendation | type == "string" and length > 0) and
             (.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) and
             (if .classification == "CONFIRMED" then (.severity | IN("P0", "P1", "P2", "P3")) else .severity == null end) and
@@ -4106,6 +4106,7 @@ Classify every supplied primary source finding. Each output finding has the stan
 - CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique agent keys in source_refs.
 - Preserve the standard anchor, evidence, failure_scenario, recommendation, category, verification_limitations, and existing_feedback shapes defined for ndjson-v1.
+- failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Use pr-level only for a genuine PR-wide issue.
 
 Finish with exactly one complete record and nothing after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs.
@@ -4207,6 +4208,7 @@ Classify every supplied canonical cross-review finding. Each output finding has 
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.
 - include_in_rejected_summary is a boolean. Set it true only for a REJECTED claim important enough to explain in the human report; otherwise false.
 - evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; use pr-level only for a genuine PR-wide omission.
+- failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - All reader-facing string values must use ${FINAL_LANGUAGE_NAME} (${FINALIZATION_LANGUAGE}). Fixed enum values, IDs, agent keys, and paths remain unchanged.
 
 Finish with exactly one final record and no records after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs. Even with no confirmed findings, every input ref must still be classified before the complete record.

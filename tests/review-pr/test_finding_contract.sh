@@ -109,6 +109,35 @@ jq '.[0].classification = "REJECTED"' "$cross_records" >"$rejected_with_severity
 assert_false 'rejected cross-review findings cannot retain actionable severity' \
     validate_cross_ndjson_records "$rejected_with_severity" "$test_root/cross-rejected-severity-canonical.json" alpha "$cross_expected_refs"
 
+rejected_empty_scenario="$test_root/cross-rejected-empty-scenario.json"
+rejected_empty_canonical="$test_root/cross-rejected-empty-canonical.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = ""' "$cross_records" >"$rejected_empty_scenario"
+assert_true 'a rejected cross-review claim may leave failure_scenario empty' \
+    validate_cross_ndjson_records "$rejected_empty_scenario" "$rejected_empty_canonical" alpha "$cross_expected_refs"
+uncertain_empty_scenario="$test_root/cross-uncertain-empty-scenario.json"
+jq '.[0].classification = "UNCERTAIN" | .[0].severity = null | .[0].failure_scenario = ""' "$cross_records" >"$uncertain_empty_scenario"
+assert_true 'an uncertain cross-review claim may leave failure_scenario empty' \
+    validate_cross_ndjson_records "$uncertain_empty_scenario" "$test_root/cross-uncertain-empty-canonical.json" alpha "$cross_expected_refs"
+rejected_null_scenario="$test_root/cross-rejected-null-scenario.json"
+rejected_null_canonical="$test_root/cross-rejected-null-canonical.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null' "$cross_records" >"$rejected_null_scenario"
+assert_true 'a rejected cross-review claim may use a null failure_scenario' \
+    validate_cross_ndjson_records "$rejected_null_scenario" "$rejected_null_canonical" alpha "$cross_expected_refs"
+rejected_null_rendered="$test_root/cross-rejected-null.md"
+assert_true 'a rejected claim with a null failure scenario renders' \
+    render_cross_findings_markdown "$rejected_null_canonical" "$rejected_null_rendered" EN
+assert_eq '_None._' "$(grep -A2 '^Failure scenario:$' "$rejected_null_rendered" | tail -1)" \
+    'renderer substitutes a placeholder for a null failure scenario'
+confirmed_empty_scenario="$test_root/cross-confirmed-empty-scenario.json"
+jq '.[0].failure_scenario = ""' "$cross_records" >"$confirmed_empty_scenario"
+assert_false 'a confirmed cross-review finding still requires a failure scenario' \
+    validate_cross_ndjson_records "$confirmed_empty_scenario" "$test_root/cross-confirmed-empty-canonical.json" alpha "$cross_expected_refs"
+rejected_empty_rendered="$test_root/cross-rejected-empty.md"
+assert_true 'a rejected claim without a failure scenario renders' \
+    render_cross_findings_markdown "$rejected_empty_canonical" "$rejected_empty_rendered" EN
+assert_eq '_None._' "$(grep -A2 '^Failure scenario:$' "$rejected_empty_rendered" | tail -1)" \
+    'renderer substitutes a placeholder for an empty failure scenario'
+
 wrong_contributor="$test_root/cross-wrong-contributor.json"
 jq '.[0].contributing_agents = ["alpha"]' "$cross_records" >"$wrong_contributor"
 assert_false 'cross-review contributing agents must match source provenance' \
@@ -167,6 +196,23 @@ final_bad_rejected_flag="$test_root/final-bad-rejected-flag.json"
 jq '.[0].include_in_rejected_summary = true' "$final_records" >"$final_bad_rejected_flag"
 assert_false 'only rejected findings may enter the important-rejections summary' \
     validate_final_ndjson_records "$final_bad_rejected_flag" "$test_root/final-bad-flag-canonical.json" "$final_expected_refs"
+
+final_rejected_empty_scenario="$test_root/final-rejected-empty-scenario.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = ""' "$final_records" >"$final_rejected_empty_scenario"
+assert_true 'a rejected final claim may leave failure_scenario empty' \
+    validate_final_ndjson_records "$final_rejected_empty_scenario" "$test_root/final-rejected-empty-canonical.json" "$final_expected_refs"
+final_rejected_null_scenario="$test_root/final-rejected-null-scenario.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null' "$final_records" >"$final_rejected_null_scenario"
+assert_true 'a rejected final claim may use a null failure_scenario' \
+    validate_final_ndjson_records "$final_rejected_null_scenario" "$test_root/final-rejected-null-canonical.json" "$final_expected_refs"
+final_confirmed_null_scenario="$test_root/final-confirmed-null-scenario.json"
+jq '.[0].failure_scenario = null' "$final_records" >"$final_confirmed_null_scenario"
+assert_false 'a confirmed final finding rejects a null failure scenario' \
+    validate_final_ndjson_records "$final_confirmed_null_scenario" "$test_root/final-confirmed-null-canonical.json" "$final_expected_refs"
+final_confirmed_empty_scenario="$test_root/final-confirmed-empty-scenario.json"
+jq '.[0].failure_scenario = ""' "$final_records" >"$final_confirmed_empty_scenario"
+assert_false 'a confirmed final finding still requires a failure scenario' \
+    validate_final_ndjson_records "$final_confirmed_empty_scenario" "$test_root/final-confirmed-empty-canonical.json" "$final_expected_refs"
 
 final_repairable="$test_root/final-repairable.ndjson"
 {

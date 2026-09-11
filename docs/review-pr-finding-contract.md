@@ -42,7 +42,8 @@ Required finding fields:
 - `title` and one atomic `claim`;
 - `anchor.kind`: `changed-line` or `pr-level`;
 - `anchor.file`, `anchor.start`, and `anchor.end`, nullable only for `pr-level`;
-- `evidence` and `failure_scenario`;
+- `evidence` and `failure_scenario`; a classified `REJECTED` or `UNCERTAIN` record may set
+  `failure_scenario` to `null` or `""` because no failure scenario applies to a refuted or unproven claim;
 - `recommendation`;
 - `classification`: `CONFIRMED`, `REJECTED`, `UNCERTAIN`, or `null` when the phase does not classify;
 - `severity`: `P0`, `P1`, `P2`, `P3`, or `null` when it does not apply;

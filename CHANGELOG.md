@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- Cross-review and final `ndjson-v1` records classified `REJECTED` or `UNCERTAIN` may now carry a
+  `null` or empty `failure_scenario`, because no failure scenario applies to a refuted or unproven
+  claim. `CONFIRMED` and unclassified primary records still require a non-empty scenario. Previously
+  any such record failed validation deterministically, the bounded repair pass could not fix it, and
+  the whole cross-review attempt was retried and failed again.
+
 ## [1.11.4] - 2026-09-11
 
 ### Added

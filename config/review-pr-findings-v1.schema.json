@@ -188,8 +188,8 @@
           }
         },
         "failure_scenario": {
-          "type": "string",
-          "minLength": 1
+          "type": ["string", "null"],
+          "description": "Non-empty for unclassified primary and CONFIRMED records; may be null or empty for REJECTED and UNCERTAIN records."
         },
         "recommendation": {
           "type": "string",
@@ -234,7 +234,24 @@
           "type": "boolean",
           "description": "Final-synthesis-only decision to surface an important rejected claim in the human report."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": {"enum": ["CONFIRMED", null]}
+            }
+          },
+          "then": {
+            "properties": {
+              "failure_scenario": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "complete": {
       "type": "object",
