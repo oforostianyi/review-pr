@@ -174,6 +174,9 @@
                 "effort": {
                   "$ref": "#/$defs/claudeEffort"
                 }
+              },
+              "not": {
+                "required": ["max_tool_calls"]
               }
             }
           ]
@@ -188,6 +191,9 @@
                 "effort": {
                   "$ref": "#/$defs/codexEffort"
                 }
+              },
+              "not": {
+                "required": ["max_tool_calls"]
               }
             }
           ]
@@ -459,6 +465,12 @@
           "maximum": 604800,
           "default": 0,
           "description": "Maximum wall-clock time for one agent attempt in any phase. Zero or omission disables the timeout. Timed-out attempts fail with exit status 124 and follow the normal failed-only retry policy."
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Pi only. Enables the orchestrator's Pi tool guard extension for tool-enabled phases: identical tool calls never execute twice, and after this many executed calls every further call is blocked and the model must return its output. Zero keeps the duplicate guard with no budget. Omit to run Pi without the guard."
         },
         "runner": {
           "type": "string"

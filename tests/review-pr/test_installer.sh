@@ -36,6 +36,7 @@ cp -- "$repo_root/VERSION" "$package_root/VERSION"
 cp -- "$repo_root/install.sh" "$package_root/install.sh"
 cp -- "$repo_root/review-pr-launcher" "$package_root/review-pr-launcher"
 cp -- "$repo_root/runners/review-pr-agy" "$package_root/runners/review-pr-agy"
+cp -- "$repo_root/runners/review-pr-pi-guard.js" "$package_root/runners/review-pr-pi-guard.js"
 chmod +x "$package_root/install.sh" "$package_root/bin/review-pr" "$package_root/runners/review-pr-agy"
 
 git -C "$review_repo" init --quiet
@@ -103,6 +104,7 @@ assert_eq "$reviews_dir" "$(jq -r '.reviews_directory' "$config_dir/config.json"
 assert_file_contains "$config_dir/skills/claude/custom-review/SKILL.md" 'personal skill contents' \
     'installer preserves an existing personalized skill'
 assert_file_exists "$prefix/bin/review-pr" 'installer writes the launcher under the selected prefix'
+assert_file_exists "$prefix/libexec/review-pr/review-pr-pi-guard.js" 'installer writes the Pi tool guard extension beside the implementation'
 assert_file_exists "$config_dir/review-pr-findings-v1.schema.json" 'installer writes the finding-contract schema beside user configuration'
 assert_file_exists "$prefix/share/review-pr/review-pr-findings-v1.schema.json" 'installer writes the finding-contract schema into shared package data'
 assert_file_exists "$prefix/share/doc/review-pr/review-pr-finding-contract.md" 'installer writes the finding-contract design reference'

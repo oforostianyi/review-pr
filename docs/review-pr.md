@@ -163,14 +163,42 @@ model that repeats repository inspection after context compaction otherwise has 
 bound. Choose a value above the agent's observed healthy runtime rather than treating the timeout as
 a progress estimate.
 
+Pi can additionally run under an enforceable tool-call guard:
+
+```json
+{
+  "agents": {
+    "pi": {
+      "timeout_seconds": 2700,
+      "max_tool_calls": 400
+    }
+  }
+}
+```
+
+When `max_tool_calls` is present, tool-enabled Pi phases load the bundled extension
+`review-pr-pi-guard.js` (installed beside the implementation under `libexec/review-pr`, or under
+`runners/` in a source checkout). The extension blocks any tool call whose tool and arguments are
+identical to one already executed in that attempt and tells the model that the result is already in
+its context. After the configured number of executed calls it blocks every further call and asks
+for the final output; if the model keeps calling tools regardless, the guard terminates the agent
+after a short allowance so the attempt fails within minutes rather than at the wall-clock timeout.
+`0` keeps the duplicate guard without a budget. Omitting the key runs Pi without the extension. The
+attempt log receives one summary line, for example
+`Pi tool guard: 118 tool calls executed, 41 duplicate calls blocked, budget of 400 not reached, not terminated.`
+Only `pi` accepts this key; other agents cannot enforce it and configuration validation rejects it
+for them. The guard does not apply to bounded repair, comparison, or contract-test runs because those
+already run with tools disabled.
+
 ## Built-in agents, models, and reasoning effort
 
 `claude`, `codex`, and `pi` have built-in runners. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
 
 For Pi review phases, the orchestration control prompt also prohibits repeating identical tool
 calls or restarting the same inspection after context compaction. It tells the model to stop tool
-use and emit the best contract-compliant result once work begins to repeat. The configured timeout
-is the enforcement boundary if the model ignores that instruction.
+use and emit the best contract-compliant result once work begins to repeat. That instruction alone
+is not reliable for a local model that loops after compaction; `max_tool_calls` enforces the same
+rule mechanically, and the configured timeout remains the final wall-clock boundary.
 
 `agents.<agent>.effort` applies to that agent's primary and cross-review runs:
 

@@ -19,9 +19,10 @@ jq -n \
         agents: {
             alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "", timeout_seconds: 2700, runner: $runner},
             beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "", runner: $runner},
-            paused: {label: "Paused", enabled: false, model: "", effort: "", runner: $runner}
+            paused: {label: "Paused", enabled: false, model: "", effort: "", runner: $runner},
+            pi: {label: "Pi", enabled: false, model: "local-model", effort: "", max_tool_calls: 400}
         },
-        reviewers: ["alpha", "beta", "paused"],
+        reviewers: ["alpha", "beta", "paused", "pi"],
         synthesizer: "alpha",
         default_repository: "fixture",
         repositories: {
@@ -60,6 +61,24 @@ assert_file_contains "$show_output" 'Primary finding contract: markdown' 'Markdo
 assert_file_contains "$show_output" 'Cross-review finding contract: markdown' 'Markdown remains the backward-compatible cross-review contract default'
 assert_file_contains "$show_output" 'Final finding contract: markdown' 'Markdown remains the backward-compatible final contract default'
 assert_file_contains "$show_output" 'timeout=45m\ 00s' 'configured agent timeout is visible in diagnostics'
+assert_file_contains "$show_output" 'pi: label=Pi model=local-model effort='"'"''"'"' timeout=disabled max_tool_calls=400' \
+    'configured Pi tool-call budget is visible in diagnostics'
+assert_file_contains "$show_output" 'alpha: label=Alpha model=mock-alpha effort='"'"''"'"' timeout=45m\ 00s max_tool_calls=unlimited' \
+    'agents without a tool-call budget report it as unlimited'
+
+invalid_budget_agent_config="$test_root/invalid-budget-agent.json"
+jq '.agents.alpha.max_tool_calls = 400' "$config_file" >"$invalid_budget_agent_config"
+if "$repo_root/bin/review-pr" --config "$invalid_budget_agent_config" --show-config >/dev/null 2>&1; then
+    fail 'max_tool_calls must be rejected for agents that cannot enforce it'
+fi
+pass 'max_tool_calls is rejected for agents other than pi'
+
+invalid_budget_value_config="$test_root/invalid-budget-value.json"
+jq '.agents.pi.max_tool_calls = 2.5' "$config_file" >"$invalid_budget_value_config"
+if "$repo_root/bin/review-pr" --config "$invalid_budget_value_config" --show-config >/dev/null 2>&1; then
+    fail 'fractional max_tool_calls must fail validation'
+fi
+pass 'fractional max_tool_calls is rejected'
 
 invalid_timeout_config="$test_root/invalid-timeout.json"
 jq '.agents.alpha.timeout_seconds = -1' "$config_file" >"$invalid_timeout_config"

@@ -4,6 +4,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Optional `agents.pi.max_tool_calls` enables a bundled Pi extension (`review-pr-pi-guard.js`) for
+  tool-enabled Pi phases. It blocks identical repeated tool calls, blocks every call after the
+  configured budget while asking for the final output, terminates the agent if tool use persists,
+  and writes one summary line per attempt to the log. `0` keeps the duplicate guard without a
+  budget; omitting the key leaves Pi unchanged. Configuration validation rejects the key for agents
+  that cannot enforce it. Motivation: one observed local-model attempt issued 953 tool calls of
+  which only 112 were distinct, repeating a ~20-command inspection cycle 42 times across 9
+  compactions until the wall-clock timeout.
+
 ### Fixed
 
 - Cross-review and final `ndjson-v1` records classified `REJECTED` or `UNCERTAIN` may now carry a

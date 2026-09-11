@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-rm -f "${prefix}/bin/review-pr" "${prefix}/libexec/review-pr/review-pr" "${prefix}/libexec/review-pr/review-pr-agy" "${prefix}/libexec/review-pr/config-path"
+rm -f "${prefix}/bin/review-pr" "${prefix}/libexec/review-pr/review-pr" "${prefix}/libexec/review-pr/review-pr-agy" "${prefix}/libexec/review-pr/review-pr-pi-guard.js" "${prefix}/libexec/review-pr/config-path"
 rmdir "${prefix}/libexec/review-pr" 2>/dev/null || true
 rm -f "${prefix}/share/review-pr/review-pr.example.json" "${prefix}/share/review-pr/review-pr.schema.json" \
     "${prefix}/share/review-pr/review-pr-findings-v1.schema.json" "${prefix}/share/review-pr/VERSION"

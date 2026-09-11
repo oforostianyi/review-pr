@@ -31,6 +31,7 @@ cp "${repository_root}/config/review-pr-findings-v1.schema.json" "${package_root
 cp "${repository_root}/docs/review-pr.md" "${package_root}/docs/review-pr.md"
 cp "${repository_root}/docs/review-pr-finding-contract.md" "${package_root}/docs/review-pr-finding-contract.md"
 cp "${repository_root}/runners/review-pr-agy" "${package_root}/runners/review-pr-agy"
+cp "${repository_root}/runners/review-pr-pi-guard.js" "${package_root}/runners/review-pr-pi-guard.js"
 cp "${repository_root}/CHANGELOG.md" "${package_root}/CHANGELOG.md"
 cp "${repository_root}/README.md" "${package_root}/README.md"
 cp "${repository_root}/install.sh" "${package_root}/install.sh"
@@ -39,7 +40,7 @@ cp "${repository_root}/review-pr-launcher" "${package_root}/review-pr-launcher"
 cp "${repository_root}/VERSION" "${package_root}/VERSION"
 chmod 0755 "$package_root" "${package_root}/bin" "${package_root}/config" "${package_root}/docs" "${package_root}/runners"
 chmod 0755 "${package_root}/bin/review-pr" "${package_root}/runners/review-pr-agy" "${package_root}/install.sh" "${package_root}/uninstall.sh" "${package_root}/review-pr-launcher"
-chmod 0644 "${package_root}/VERSION" "${package_root}/README.md" "${package_root}/CHANGELOG.md" "${package_root}/config/review-pr.example.json" "${package_root}/config/review-pr.schema.json" "${package_root}/config/review-pr-findings-v1.schema.json" "${package_root}/docs/review-pr.md" "${package_root}/docs/review-pr-finding-contract.md"
+chmod 0644 "${package_root}/runners/review-pr-pi-guard.js" "${package_root}/VERSION" "${package_root}/README.md" "${package_root}/CHANGELOG.md" "${package_root}/config/review-pr.example.json" "${package_root}/config/review-pr.schema.json" "${package_root}/config/review-pr-findings-v1.schema.json" "${package_root}/docs/review-pr.md" "${package_root}/docs/review-pr-finding-contract.md"
 
 archive=${repository_root}/dist/${package_name}.tar.gz
 if tar --version 2>/dev/null | grep -q GNU; then
