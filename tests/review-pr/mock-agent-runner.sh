@@ -303,6 +303,15 @@ case "$behavior" in
         emit_valid_ndjson_cross
         write_usage null 58
         ;;
+    final-ndjson-preamble)
+        printf '%s\n' 'Here is the requested structured final synthesis:'
+        emit_valid_ndjson_final
+        write_usage null 58
+        ;;
+    unsafe-final-ndjson-repair)
+        emit_valid_ndjson_final | sed '0,/"classification":"CONFIRMED"/s//"classification":"UNCERTAIN"/' | sed '0,/"severity":"P1"/s//"severity":null/'
+        write_usage null 59
+        ;;
     unsafe-cross-ndjson-repair)
         emit_valid_ndjson_cross | sed '0,/"classification":"CONFIRMED"/s//"classification":"UNCERTAIN"/'
         write_usage null 59

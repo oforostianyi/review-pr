@@ -1,10 +1,8 @@
 # Portable atomic-finding contract
 
 Status: accepted on 2026-09-10; implementation is proceeding as an opt-in staged rollout.
-The primary, cross-review, and final parsers, canonical sidecars, and deterministic renderers are
-implemented behind independent opt-in settings. Primary and cross-review output also have bounded,
-field-stable schema-repair passes before any ordinary whole-review retry; final repair remains a
-separate later rollout step and currently fails closed.
+The primary, cross-review, and final parsers, canonical sidecars, deterministic renderers, and
+bounded field-stable schema-repair passes are implemented behind independent opt-in settings.
 
 ## Problem
 
@@ -95,8 +93,8 @@ important-rejections section. It will generate the existing language-independent
 the current exact RIGHT-side anchor validator remains authoritative. Reader-facing strings are
 localized; enums, IDs, provenance, and validation controls are not.
 
-Final schema repair will be bounded separately from semantic synthesis. It may repair transport or
-record metadata only after all decision records are safely parseable, and must keep classification,
+Final schema repair is bounded separately from semantic synthesis. It may repair transport or
+record metadata only after all decision records are safely parseable, and keeps classification,
 severity, cross-review refs, derived primary provenance, anchors, and substantive fields stable.
 Failure preserves the original and repair responses and publishes no canonical final report.
 

@@ -25,6 +25,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - Opt-in structured final synthesis over canonical cross-review sidecars, with complete source-ref
   coverage, orchestrator-derived primary provenance, strict final-only rejection metadata,
   deterministic localized Markdown, manifest-backed resume, and artifact-only final reruns.
+- One bounded structured-final schema-repair pass that permits transport/schema correction while
+  freezing decisions, severities, refs, anchors, rejection presentation, and substantive content.
 - `REVIEW_PR_OUTPUT_CONTRACT` for custom runners and configured commands.
 
 ### Changed

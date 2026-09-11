@@ -293,7 +293,7 @@ Structured cross-review requires `primary: "ndjson-v1"` and `reporting.compariso
 
 Structured final synthesis requires structured primary and cross-review inputs plus `comparison_sections.final: "none"` or `"standalone"`. The finalizer receives canonical cross-review JSON rather than localized Markdown. Every cross-review `{agent, source_id}` must be covered, unknown refs fail validation, and only confirmed records may carry `P0`–`P3`. The model never restates primary provenance: the orchestrator derives it through the validated cross-review graph and stores it in the canonical final sidecar. The final Markdown header, metadata table, classification table, actionable findings, rejected-findings section, localization, and anchor markers are rendered deterministically. `include_in_rejected_summary` only controls whether an important rejected decision is explained in that human section.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable primary or cross-review response first receives a dedicated field-stable repair pass. Cross-review repair cannot change classification, severity, `source_refs`, contributing agents, or any substantive finding content. Final schema repair is intentionally not enabled yet; an invalid final stream is preserved and rejected rather than guessed. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
+There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
 ## Optional comparison reports
 
@@ -679,6 +679,11 @@ all substantive fields against a parsed baseline and rejects the repair on any d
 Structured cross-review has an equivalent `REVIEW_PR_PHASE=cross-review findings repair` pass. It
 also freezes classification, severity, source provenance, and contributing agents, then reruns the
 complete schema, input-coverage, and changed-line validation before publishing any artifact.
+
+Structured final synthesis uses `REVIEW_PR_PHASE=final findings repair` for the equivalent bounded
+pass. It also freezes `include_in_rejected_summary`; primary provenance is still derived by the
+orchestrator and must not be emitted by the model. A failed or content-changing repair publishes no
+canonical final NDJSON, sidecar, or Markdown report.
 
 Every configured reviewer runs once successfully during primary review and once successfully during cross-review, subject to the configured attempt limit. A cross-reviewer receives every other primary report but never its own. The configured synthesizer then receives all primary and cross-review reports, producing the core `N -> N -> 1` pipeline. When final comparison mode is `standalone`, one additional, bounded synthesis pass produces the optional companion comparison report without changing the core final verdict.
 

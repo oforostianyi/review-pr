@@ -3349,6 +3349,162 @@ process_final_ndjson_output() {
     mv -- "$rendered_file" "$output_file"
 }
 
+build_final_repair_baseline() {
+    local input_file=$1 baseline_file=$2 parsed_file line trimmed
+    local object_count=0 saw_trailing_prose=false
+
+    new_temp_file 'final-repair-parsed'; parsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        trimmed=${line#"${line%%[![:space:]]*}"}
+        trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+        [[ -n "$trimmed" ]] || continue
+        [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
+        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+            [[ "$saw_trailing_prose" == false ]] || return 1
+            object_count=$((object_count + 1))
+            continue
+        fi
+        [[ "$trimmed" == \{* || "$trimmed" == \[* ]] && return 1
+        (( object_count == 0 )) || saw_trailing_prose=true
+    done <"$input_file"
+    (( object_count > 0 )) || return 1
+
+    jq -e -s '
+        def content:
+            {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
+             recommendation, classification, severity, category, contributing_agents,
+             verification_limitations, existing_feedback, include_in_rejected_summary};
+        def has_content:
+            . as $r | all(["source_id", "source_refs", "title", "claim", "anchor", "evidence",
+                "failure_scenario", "recommendation", "classification", "severity", "category",
+                "contributing_agents", "verification_limitations", "existing_feedback",
+                "include_in_rejected_summary"][]; . as $key | $r | has($key));
+        def valid_completion_content:
+            has("summary") and (.summary | type == "string") and
+            has("verification_limitations") and (.verification_limitations | type == "array") and
+            has("positive_evidence") and (.positive_evidence | type == "array");
+        ([.[] | select(.record == "finding")]) as $findings |
+        ([.[] | select(.record == "complete")]) as $completions |
+        if ((all(.[]; .record == "finding" or .record == "complete")) and
+            (all($findings[]; has_content)) and
+            (([$findings[].source_id] | unique | length) == ($findings | length)) and
+            ($completions | length) <= 1 and
+            (($findings | length) > 0 or ($completions | length) == 1))
+        then {
+            findings: [$findings[] | content],
+            completion: (if (($completions | length) == 1 and ($completions[0] | valid_completion_content))
+                then ($completions[0] | {summary, verification_limitations, positive_evidence})
+                else {summary: "", verification_limitations: [], positive_evidence: []} end)
+        }
+        else error("unsafe final repair baseline") end
+    ' "$parsed_file" >"$baseline_file" 2>/dev/null
+}
+
+validate_final_repair_stability() {
+    local baseline_file=$1 canonical_file=$2
+    jq -e --slurpfile baseline "$baseline_file" '
+        def content:
+            {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
+             recommendation, classification, severity, category, contributing_agents,
+             verification_limitations, existing_feedback, include_in_rejected_summary};
+        {findings: [.findings[] | content],
+         completion: {summary, verification_limitations, positive_evidence}} == $baseline[0]
+    ' "$canonical_file" >/dev/null
+}
+
+write_final_finding_repair_prompt() {
+    local prompt_file=$1 failure_reason=$2 baseline_file=$3 draft_file=$4
+    cat >"$prompt_file" <<EOF
+This is one bounded schema-repair pass for an already completed final synthesis. It is not a new review or a new synthesis.
+
+Return only a complete ndjson-v1 stream, one JSON object per physical line, with no fence, preamble, commentary, or trailing text. Do not inspect the repository or use tools.
+
+The rejected draft failed with: ${failure_reason}
+
+Preserve every finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, and include_in_rejected_summary. Any difference is rejected. Primary provenance is derived later and must not be added. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record.
+
+Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
+
+===== BEGIN PRESERVED BASELINE =====
+$(cat -- "$baseline_file")
+===== END PRESERVED BASELINE =====
+
+===== BEGIN REJECTED NDJSON DRAFT =====
+$(cat -- "$draft_file")
+===== END REJECTED NDJSON DRAFT =====
+EOF
+}
+
+attempt_final_ndjson_repair() {
+    local output_file=$1 log_file=$2 usage_file=$3 usage_json_file=$4 started_at=$5 error_log=$6
+    local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
+    local baseline_file repair_prompt repair_output repair_log repair_usage repair_usage_json combined_usage_json
+    local repair_pid heartbeat_pid repair_status repair_stop_reason
+    local diagnostic_base="${error_log%.log}-schema-repair"
+    local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
+    local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
+    local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
+
+    new_temp_file 'final-repair-baseline'; baseline_file=$NEW_TEMP_FILE
+    if ! build_final_repair_baseline "$output_file" "$baseline_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
+        return 1
+    fi
+    new_temp_file 'final-repair-prompt'; repair_prompt=$NEW_TEMP_FILE
+    new_temp_file 'final-repair-output'; repair_output=$NEW_TEMP_FILE
+    new_temp_file 'final-repair-log'; repair_log=$NEW_TEMP_FILE
+    new_temp_file 'final-repair-usage'; repair_usage=$NEW_TEMP_FILE
+    new_temp_file 'final-repair-usage-json'; repair_usage_json=$NEW_TEMP_FILE
+    new_temp_file 'final-repair-combined'; combined_usage_json=$NEW_TEMP_FILE
+    write_final_finding_repair_prompt "$repair_prompt" "$original_failure_reason" "$baseline_file" "$output_file"
+    assert_new_target "$source_diagnostic"
+    cp -- "$output_file" "$source_diagnostic"
+
+    activity_log 'Final ndjson-v1 output is structurally repairable; starting one bounded schema-repair pass'
+    start_agent "$FINAL_SYNTHESIZER" 'final findings repair' "$repair_prompt" "$repair_output" "$repair_log" "$repair_usage" "$repair_usage_json"
+    repair_pid=$STARTED_PID
+    set_dashboard_status final "$FINAL_SYNTHESIZER" RUNNING "$repair_pid" "$started_at" 0
+    heartbeat_agent 'final findings repair' "$FINAL_SYNTHESIZER" "$repair_pid" "$started_at" & heartbeat_pid=$!
+    RUNNING_PIDS=("$repair_pid" "$heartbeat_pid")
+    if wait "$repair_pid"; then repair_status=0; else repair_status=$?; fi
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    RUNNING_PIDS=()
+    repair_stop_reason=$(jq -r '.stop_reason // ""' "$repair_usage_json" 2>/dev/null || true)
+
+    if (( repair_status == 0 )) && [[ "$repair_stop_reason" != length && -s "$repair_output" ]]; then
+        FINAL_PROCESSED_RAW_FILE="" FINAL_PROCESSED_FINDINGS_FILE=""
+        if process_final_ndjson_output "$repair_output" \
+            && validate_final_repair_stability "$baseline_file" "$FINAL_PROCESSED_FINDINGS_FILE"; then
+            mv -- "$repair_output" "$output_file"
+            merge_usage_summaries "$usage_json_file" "$repair_usage_json" "$combined_usage_json"
+            mv -- "$combined_usage_json" "$usage_json_file"
+            jq -r '.reported_total_tokens // empty' "$usage_json_file" >"$usage_file"
+            [[ ! -s "$repair_log" ]] || { printf '\n--- bounded final schema-repair diagnostics ---\n' >>"$log_file"; cat -- "$repair_log" >>"$log_file"; }
+            preserve_error_log "$log_file" "$log_diagnostic"
+            FINDING_CONTRACT_FAILURE_REASON=""
+            activity_log 'Final ndjson-v1 schema repaired without changing decisions, provenance, or content'
+            return 0
+        fi
+        if [[ -s "$FINAL_PROCESSED_RAW_FILE" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$FINAL_PROCESSED_RAW_FILE" "$output_diagnostic"
+        elif [[ -s "$repair_output" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$repair_output" "$output_diagnostic"
+        fi
+        FINAL_PROCESSED_RAW_FILE="" FINAL_PROCESSED_FINDINGS_FILE=""
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_changed_decisions_provenance_or_content"
+    elif (( repair_status != 0 )); then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_exit_${repair_status}"
+    elif [[ "$repair_stop_reason" == length ]]; then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_output_token_limit"
+    else FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_empty_output"
+    fi
+    preserve_error_log "$repair_log" "$log_diagnostic"
+    if [[ -s "$repair_usage_json" ]]; then assert_new_target "$usage_diagnostic"; mv -- "$repair_usage_json" "$usage_diagnostic"; fi
+    if [[ -s "$repair_output" && ! -e "$output_diagnostic" ]]; then assert_new_target "$output_diagnostic"; mv -- "$repair_output" "$output_diagnostic"; fi
+    return 1
+}
+
 build_cross_repair_baseline() {
     local input_file=$1 baseline_file=$2 parsed_file line trimmed
     local object_count=0 saw_trailing_prose=false
@@ -7611,12 +7767,19 @@ run_final_synthesis() {
     fi
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         if ! process_final_ndjson_output "$final_output"; then
-            set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$final_finished_at" "$final_token_display"
-            preserve_error_log "$final_log" "$error_log"
-            preserve_agent_failure_artifacts "$FINAL_SYNTHESIZER" "$final_output" "$final_usage" "$final_usage_json" "$error_log" "final synthesis"
-            FINAL_FAILURE_REASON="invalid final ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-            activity_log "Failed final synthesis after $(format_duration "$((final_finished_at - final_started_at))"): ${FINAL_FAILURE_REASON}"
-            return 1
+            printf 'final ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"$final_log"
+            if attempt_final_ndjson_repair "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
+                final_finished_at=$(date +%s)
+                read_token_usage "$final_usage"
+                final_token_display=$TOKEN_USAGE_DISPLAY
+            else
+                set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$(date +%s)" "$final_token_display"
+                preserve_error_log "$final_log" "$error_log"
+                preserve_agent_failure_artifacts "$FINAL_SYNTHESIZER" "$final_output" "$final_usage" "$final_usage_json" "$error_log" "final synthesis"
+                FINAL_FAILURE_REASON="invalid final ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
+                activity_log "Failed final synthesis after $(format_duration "$((final_finished_at - final_started_at))"): ${FINAL_FAILURE_REASON}"
+                return 1
+            fi
         fi
     else
         normalize_final_markdown "$final_output"

@@ -653,6 +653,8 @@ run_ndjson_cross_case() {
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
     printf '%s\n' cross-ndjson-preamble >"$scenarios/beta-cross-review"
     printf '%s\n' valid-ndjson >"$scenarios/beta-cross-review-findings-repair"
+    printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' valid-ndjson >"$scenarios/alpha-final-findings-repair"
 
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
@@ -722,6 +724,10 @@ run_ndjson_cross_case() {
         'structured final synthesis receives canonical cross-review inputs'
     assert_false 'structured final synthesis does not receive localized cross-review Markdown' \
         grep -Fq -- '### [CONFIRMED/P1]' "$final_prompt"
+    assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
+        'structured final usage includes generation and bounded repair passes'
+    assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \
+        'structured final repair preserves the original invalid response'
 
     sleep 1
     PATH="$fake_bin:$PATH" \
@@ -1007,6 +1013,51 @@ run_ndjson_resume_case() {
     assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" 'structured resume completes the remaining pipeline'
 }
 
+run_ndjson_unsafe_final_repair_case() {
+    local case_dir="$suite_root/ndjson-unsafe-final-repair"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" config_temp="$case_dir/config.tmp.json"
+    local manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture unsafe final schema repair.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' unsafe-final-ndjson-repair >"$scenarios/alpha-final-findings-repair"
+
+    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'content-changing final schema repair must fail closed'
+    fi
+    pass 'content-changing final schema repair fails closed'
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" \
+        'unsafe final repair cannot publish human Markdown'
+    assert_file_not_exists "$work_dir/${stem}-final-findings.json" \
+        'unsafe final repair cannot publish canonical findings'
+    assert_file_not_exists "$work_dir/${stem}-final-raw.ndjson" \
+        'unsafe final repair cannot publish canonical raw NDJSON'
+    assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \
+        'unsafe final repair preserves the original rejected response'
+    assert_file_exists "$work_dir/${stem}-final-error-schema-repair-invalid-raw.ndjson" \
+        'unsafe final repair preserves the content-changing repair response'
+    assert_file_contains "$case_dir/stderr.log" 'repair_changed_decisions_provenance_or_content' \
+        'unsafe final repair reports its stability violation'
+}
+
 run_full_success_case
 run_ndjson_primary_case
 run_ndjson_cross_case
@@ -1014,6 +1065,7 @@ run_ndjson_cross_resume_case
 run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case
+run_ndjson_unsafe_final_repair_case
 run_resume_case
 run_comparison_failure_case
 run_facts_collection_failure_case

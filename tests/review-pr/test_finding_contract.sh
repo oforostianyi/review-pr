@@ -168,6 +168,25 @@ jq '.[0].include_in_rejected_summary = true' "$final_records" >"$final_bad_rejec
 assert_false 'only rejected findings may enter the important-rejections summary' \
     validate_final_ndjson_records "$final_bad_rejected_flag" "$test_root/final-bad-flag-canonical.json" "$final_expected_refs"
 
+final_repairable="$test_root/final-repairable.ndjson"
+{
+    printf '%s\n' 'Structured final synthesis follows:'
+    jq -c '.[]' "$final_records"
+} >"$final_repairable"
+final_repair_baseline="$test_root/final-repair-baseline.json"
+assert_true 'final transport prose produces a safe repair baseline' \
+    build_final_repair_baseline "$final_repairable" "$final_repair_baseline"
+assert_true 'unchanged final decisions and provenance satisfy repair stability' \
+    validate_final_repair_stability "$final_repair_baseline" "$final_canonical"
+changed_final_canonical="$test_root/final-changed-classification.json"
+jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$final_canonical" >"$changed_final_canonical"
+assert_false 'final repair stability rejects reclassification' \
+    validate_final_repair_stability "$final_repair_baseline" "$changed_final_canonical"
+changed_final_flag="$test_root/final-changed-rejection-flag.json"
+jq '.findings[0].include_in_rejected_summary = true' "$final_canonical" >"$changed_final_flag"
+assert_false 'final repair stability rejects changes to rejection presentation decisions' \
+    validate_final_repair_stability "$final_repair_baseline" "$changed_final_flag"
+
 FINALIZATION_LANGUAGE=EN
 FINAL_HEADER_TITLE='# Code Review: [PR #1](https://example.test/1) — Fixture'
 FINAL_HEADER_TABLE_HEADER='| Field | Value |'
