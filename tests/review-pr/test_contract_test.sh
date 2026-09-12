@@ -17,10 +17,10 @@ jq -n \
     --arg runner "$test_dir/mock-agent-runner.sh" \
     '{
         agents: {
-            alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "low", runner: $runner},
-            beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "medium", command: [$runner]},
-            paused: {label: "Paused", enabled: false, model: "mock-paused", effort: "", runner: $runner},
-            codex: {label: "Codex", enabled: false, model: "mock-codex", effort: "low"}
+            alpha: {"label": "Alpha", enabled: true, model: "mock-alpha", effort: "low", runner: $runner},
+            beta: {"label": "Beta", enabled: true, model: "mock-beta", effort: "medium", command: [$runner]},
+            paused: {"label": "Paused", enabled: false, model: "mock-paused", effort: "", runner: $runner},
+            codex: {"label": "Codex", enabled: false, model: "mock-codex", effort: "low"}
         },
         reviewers: ["alpha", "beta"],
         synthesizer: "alpha",

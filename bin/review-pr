@@ -623,7 +623,7 @@ load_config() {
             type == "object" and
             ((keys - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds"]) | length == 0) and
             (if has("enabled") then (.enabled | type == "boolean") else true end) and
-            (if has("label") then (.label | type == "string") else true end) and
+            (if has("label") then (.["label"] | type == "string") else true end) and
             (if has("model") then (.model | type == "string") else true end) and
             (if has("effort") then (.effort | type == "string") else true end) and
             (if has("runner") then (.runner | type == "string") else true end) and
@@ -765,7 +765,7 @@ load_config() {
     fi
 
     while IFS= read -r agent; do
-        config_value=$(jq -r --arg agent "$agent" '.agents[$agent].label // ""' "$CONFIG_FILE")
+        config_value=$(jq -r --arg agent "$agent" '.agents[$agent]["label"] // ""' "$CONFIG_FILE")
         if [[ -n "$config_value" ]]; then
             AGENT_LABELS[$agent]=$config_value
         fi
@@ -1231,7 +1231,7 @@ dashboard_agent_label() {
     fi
     available_model_length=$((29 - ${#label} - 3))
     if (( available_model_length <= 0 )); then
-        printf '%s\n' "${label:0:15}..."
+        printf '%s\n' "${"label":0:15}..."
         return
     fi
     if (( ${#model} > available_model_length )); then
@@ -2218,19 +2218,19 @@ extract_right_side_ranges() {
             }
         ' \
         | jq -Rn '
-            [inputs | split("\t") | {start: (.[0] | tonumber), end: (.[1] | tonumber)}]
-            | sort_by(.start, .end)
+            [inputs | split("\t") | {start: (.[0] | tonumber), "end": (.[1] | tonumber)}]
+            | sort_by(.start, .["end"])
             | reduce .[] as $range ([];
-                if length == 0 or $range.start > (.[-1].end + 1) then
+                if length == 0 or $range.start > (.[-1]["end"] + 1) then
                     . + [$range]
                 else
-                    .[-1].end = ([.[-1].end, $range.end] | max)
+                    .[-1]["end"] = ([.[-1]["end"], $range["end"]] | max)
                 end
               )
         ' >"$output_file"; then
         return 1
     fi
-    jq -e 'type == "array" and all(.[]; (.start | type == "number") and (.end | type == "number") and .start > 0 and .end >= .start)' \
+    jq -e 'type == "array" and all(.[]; (.start | type == "number") and (.["end"] | type == "number") and .start > 0 and .["end"] >= .start)' \
         "$output_file" >/dev/null
 }
 
@@ -2304,7 +2304,7 @@ collect_changed_line_map() {
             fi
             ranges_json=$(jq -c . "$ranges_file")
         fi
-        line_count=$(jq '[.[] | (.end - .start + 1)] | add // 0' <<<"$ranges_json")
+        line_count=$(jq '[.[] | (.["end"] - .start + 1)] | add // 0' <<<"$ranges_json")
         if (( line_count > 0 )); then
             inline_anchorable_json=true
         else
@@ -2376,7 +2376,7 @@ collect_changed_line_map() {
         all(.files[];
             (.path | type == "string") and
             (.right_side_ranges | type == "array") and
-            all(.right_side_ranges[]; .start > 0 and .end >= .start)
+            all(.right_side_ranges[]; .start > 0 and .["end"] >= .start)
         )
     ' "$temp_map" >/dev/null; then
         die 'Generated changed-line map failed structural validation'
@@ -2720,15 +2720,15 @@ validate_primary_ndjson_records() {
             if .kind == "changed-line" then
                 (.file | type == "string" and length > 0) and
                 (.start | type == "number" and floor == . and . >= 1) and
-                (.end | type == "number" and floor == . and . >= 1) and
-                (.start <= .end) and
+                (.["end"] | type == "number" and floor == . and . >= 1) and
+                (.start <= .["end"]) and
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and
                         .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
             elif .kind == "pr-level" then
-                .file == null and .start == null and .end == null
+                .file == null and .start == null and .["end"] == null
             else false
             end;
         def valid_existing_feedback:
@@ -2855,7 +2855,7 @@ render_primary_findings_markdown() {
             if .kind == "changed-line" then
                 $file_label + ": `" + .file + "`\n" +
                 $line_label + ": `" +
-                    (if .start == .end then (.start | tostring) else ((.start | tostring) + "-" + (.end | tostring)) end) + "`"
+                    (if .start == .["end"] then (.start | tostring) else ((.start | tostring) + "-" + (.["end"] | tostring)) end) + "`"
             else
                 $file_label + ": —\n" + $line_label + ": —"
             end;
@@ -2981,15 +2981,15 @@ validate_cross_ndjson_records() {
             if .kind == "changed-line" then
                 (.file | type == "string" and length > 0) and
                 (.start | type == "number" and floor == . and . >= 1) and
-                (.end | type == "number" and floor == . and . >= 1) and
-                (.start <= .end) and
+                (.["end"] | type == "number" and floor == . and . >= 1) and
+                (.start <= .["end"]) and
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and
                         .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
             elif .kind == "pr-level" then
-                .file == null and .start == null and .end == null
+                .file == null and .start == null and .["end"] == null
             else false
             end;
         def valid_existing_feedback:
@@ -3119,7 +3119,7 @@ render_cross_findings_markdown() {
         def anchor_text:
             if .kind == "changed-line" then
                 $file_label + ": `" + .file + "`\n" + $line_label + ": `" +
-                (if .start == .end then (.start | tostring) else ((.start | tostring) + "-" + (.end | tostring)) end) + "`"
+                (if .start == .["end"] then (.start | tostring) else ((.start | tostring) + "-" + (.["end"] | tostring)) end) + "`"
             else $file_label + ": —\n" + $line_label + ": —" end;
         $heading + "\n\n" +
         (if (.findings | length) == 0 then $no_findings
@@ -3283,14 +3283,14 @@ validate_final_ndjson_records() {
             if .kind == "changed-line" then
                 (.file | type == "string" and length > 0) and
                 (.start | type == "number" and floor == . and . >= 1) and
-                (.end | type == "number" and floor == . and . >= 1) and
-                (.start <= .end) and
+                (.["end"] | type == "number" and floor == . and . >= 1) and
+                (.start <= .["end"]) and
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
             elif .kind == "pr-level" then
-                .file == null and .start == null and .end == null
+                .file == null and .start == null and .["end"] == null
             else false end;
         def valid_existing_feedback:
             type == "object" and exact_keys(["state", "thread_ids"]) and
@@ -3748,7 +3748,7 @@ render_final_findings_markdown() {
                 (if .anchor.kind == "changed-line" then
                     (if $problem == "Проблема" then "Файл" else "File" end) + ": `" + .anchor.file + "`\n" +
                     (if $problem == "Проблема" then "Рядок" else "Line" end) + ": `" +
-                    (if .anchor.start == .anchor.end then (.anchor.start | tostring) else ((.anchor.start | tostring) + "-" + (.anchor.end | tostring)) end) + "`"
+                    (if .anchor.start == .anchor["end"] then (.anchor.start | tostring) else ((.anchor.start | tostring) + "-" + (.anchor["end"] | tostring)) end) + "`"
                  else (if $problem == "Проблема" then "Файл: —\nРядок: —" else "File: —\nLine: —" end) end) + "\n\n" +
                 $problem + ":\n\n" + .claim + "\n\n" +
                 $failure + ":\n\n" + .failure_scenario + "\n\n" +
@@ -3864,14 +3864,14 @@ describe_ndjson_validation_failure() {
             if .kind == "changed-line" then
                 (.file | type == "string" and length > 0) and
                 (.start | type == "number" and floor == . and . >= 1) and
-                (.end | type == "number" and floor == . and . >= 1) and
-                (.start <= .end) and
+                (.["end"] | type == "number" and floor == . and . >= 1) and
+                (.start <= .["end"]) and
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor.end and .end >= $anchor.end)))
+                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
             elif .kind == "pr-level" then
-                .file == null and .start == null and .end == null
+                .file == null and .start == null and .["end"] == null
             else false end;
         def valid_existing_feedback:
             type == "object" and ((keys - ["state", "thread_ids"]) | length) == 0 and
@@ -8292,7 +8292,7 @@ validate_final_anchors() {
                     reason=file_not_in_exact_diff
                 elif ! jq -e --arg path "$file" --argjson line "$end_number" '
                     .files
-                    | any(.path == $path and (.right_side_ranges | any(.start <= $line and .end >= $line)))
+                    | any(.path == $path and (.right_side_ranges | any(.start <= $line and .["end"] >= $line)))
                 ' "$CHANGED_LINE_MAP_FILE" >/dev/null; then
                     finding_status=invalid
                     reason=line_not_changed_on_right_side
@@ -9019,7 +9019,7 @@ write_contract_test_prompt() {
     local record
     case "$phase" in
         primary)
-            record=$(jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,end:10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}')
+            record=$(jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,"end":10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}')
             ;;
         cross)
             record='{"record":"finding","schema_version":1,"source_id":"FIX-CROSS-001","source_refs":[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The fixture line confirms the supplied claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-primary"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]}}'
@@ -9170,7 +9170,7 @@ EOF
             summary=$(jq -c --arg agent "$agent" --arg label "$(agent_label "$agent")" --arg phase "$phase" \
                 --arg model "$summary_model" --arg effort "$summary_effort" \
                 --arg result "$result" --argjson passed "$status_json" \
-                '. + [{agent:$agent,label:$label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
+                '. + [{agent:$agent,"label":$label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
             printf '%-18s %-8s %s\n' "$(agent_label "$agent")" "$phase" "${result^^}"
         done
     done

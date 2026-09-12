@@ -17,10 +17,10 @@ jq -n \
     --arg runner "$test_dir/mock-agent-runner.sh" \
     '{
         agents: {
-            alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "", timeout_seconds: 2700, runner: $runner},
-            beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "", runner: $runner},
-            paused: {label: "Paused", enabled: false, model: "", effort: "", runner: $runner},
-            pi: {label: "Pi", enabled: false, model: "local-model", effort: "", max_tool_calls: 400}
+            alpha: {"label": "Alpha", enabled: true, model: "mock-alpha", effort: "", timeout_seconds: 2700, runner: $runner},
+            beta: {"label": "Beta", enabled: true, model: "mock-beta", effort: "", runner: $runner},
+            paused: {"label": "Paused", enabled: false, model: "", effort: "", runner: $runner},
+            pi: {"label": "Pi", enabled: false, model: "local-model", effort: "", max_tool_calls: 400}
         },
         reviewers: ["alpha", "beta", "paused", "pi"],
         synthesizer: "alpha",

@@ -66,8 +66,8 @@ write_config() {
         --argjson concurrency "$max_concurrency" \
         '{
             agents: {
-                alpha: {label: "Alpha", enabled: true, model: "mock-alpha", effort: "low", timeout_seconds: 2700, runner: $runner},
-                beta: {label: "Beta", enabled: true, model: "mock-beta", effort: "medium", runner: $runner}
+                alpha: {"label": "Alpha", enabled: true, model: "mock-alpha", effort: "low", timeout_seconds: 2700, runner: $runner},
+                beta: {"label": "Beta", enabled: true, model: "mock-beta", effort: "medium", runner: $runner}
             },
             reviewers: ["alpha", "beta"],
             synthesizer: "alpha",
@@ -491,7 +491,7 @@ run_anchor_repair_case() {
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     assert_file_exists "$work_dir/${stem}-changed-lines.json" \
         'full run publishes the exact changed-line map'
-    assert_eq 'true' "$(jq -r '.files[] | select(.path == "fixture odd [name].txt") | any(.right_side_ranges[]; .start <= 1 and .end >= 1)' "$work_dir/${stem}-changed-lines.json")" \
+    assert_eq 'true' "$(jq -r '.files[] | select(.path == "fixture odd [name].txt") | any(.right_side_ranges[]; .start <= 1 and .["end"] >= 1)' "$work_dir/${stem}-changed-lines.json")" \
         'integration map contains the actual modified RIGHT-side line'
     assert_file_exists "$report_dir/${stem}-final.md" \
         'bounded anchor repair can publish an otherwise unchanged valid final report'
@@ -828,7 +828,7 @@ write_three_agent_config() {
     local config_file=$1 checkout=$2 reviews=$3
     write_config "$config_file" "$checkout" "$reviews" 3
     jq --arg runner "$test_dir/mock-agent-runner.sh" '
-        .agents.gamma = {label: "Gamma", enabled: true, model: "mock-gamma", effort: "", runner: $runner} |
+        .agents.gamma = {"label": "Gamma", enabled: true, model: "mock-gamma", effort: "", runner: $runner} |
         .reviewers = ["alpha", "beta", "gamma"] |
         .reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
         .reporting.comparison_sections = {cross_review: "none", final: "none"} |

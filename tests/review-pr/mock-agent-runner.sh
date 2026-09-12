@@ -157,7 +157,7 @@ emit_valid_ndjson_primary() {
         source_id: ($agent + ":F-001"),
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
-        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, "end": 1},
         evidence: ["The exact changed branch is present in the supplied diff."],
         failure_scenario: "The fixture request reaches the changed branch and fails.",
         recommendation: "Correct the changed branch.",
@@ -228,7 +228,7 @@ emit_valid_ndjson_cross() {
         source_refs: [.value],
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
-        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, "end": 1},
         evidence: ["The exact changed branch confirms the supplied finding."],
         failure_scenario: (if $rejected then null else "The fixture request reaches the changed branch and fails." end),
         recommendation: "Correct the changed branch.",
@@ -274,7 +274,7 @@ emit_valid_ndjson_final() {
         jq -c '.[-1:] | {
             record: "finding", schema_version: 1, source_id: "FINAL-002", source_refs: .,
             title: "Fixture split topic", claim: "The split topic of the compound claim also holds.",
-            anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+            anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, "end": 1},
             evidence: ["The split cross-review record confirms the second topic."],
             failure_scenario: "The fixture request reaches the second topic.", recommendation: "Correct the second topic.",
             classification: "CONFIRMED", severity: "P3", category: "correctness",
@@ -290,7 +290,7 @@ emit_valid_ndjson_final() {
         source_refs: .,
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
-        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, "end": 1},
         evidence: ["Both canonical cross-reviews confirm the exact changed branch."],
         failure_scenario: "The fixture request reaches the changed branch and fails.",
         recommendation: "Correct the changed branch.",
@@ -316,7 +316,7 @@ emit_valid_ndjson_final() {
 emit_contract_ndjson() {
     case "$phase" in
         'primary review')
-            jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,end:10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}'
+            jq -nc --arg agent "$agent" '{record:"finding",schema_version:1,source_id:"FIX-PRIMARY-001",title:"Fixture contract finding",claim:"The fixture changed branch can fail.",anchor:{kind:"changed-line",file:"fixture/Changed.php",start:10,"end":10},evidence:["The fixture line is explicitly changed."],failure_scenario:"A fixture request reaches the changed branch.",recommendation:"Correct the fixture branch.",classification:null,severity:"P2",category:"correctness",contributing_agents:[$agent],verification_limitations:[],existing_feedback:{state:"new",thread_ids:[]}}'
             ;;
         cross-review)
             printf '%s\n' '{"record":"finding","schema_version":1,"source_id":"FIX-CROSS-001","source_refs":[{"agent":"fixture-primary","source_id":"FIX-PRIMARY-001"}],"title":"Fixture contract finding","claim":"The fixture changed branch can fail.","anchor":{"kind":"changed-line","file":"fixture/Changed.php","start":10,"end":10},"evidence":["The fixture line confirms the supplied claim."],"failure_scenario":"A fixture request reaches the changed branch.","recommendation":"Correct the fixture branch.","classification":"CONFIRMED","severity":"P2","category":"correctness","contributing_agents":["fixture-primary"],"verification_limitations":[],"existing_feedback":{"state":"new","thread_ids":[]}}'

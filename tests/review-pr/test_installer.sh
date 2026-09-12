@@ -49,7 +49,7 @@ jq -n \
     '{
         agents: {
             personal: {
-                label: "Personal agent",
+                "label": "Personal agent",
                 enabled: true,
                 model: "personal-model",
                 effort: "custom",
@@ -85,7 +85,7 @@ backup_file=$(find "$config_dir/backups" -type f -name 'config-*.json' -print | 
 assert_file_exists "$backup_file" 'installer creates a timestamped configuration backup'
 assert_true 'configuration backup is byte-for-byte complete' \
     cmp -s "$test_root/config-before.json" "$backup_file"
-assert_eq 'Personal agent' "$(jq -r '.agents.personal.label' "$config_dir/config.json")" \
+assert_eq 'Personal agent' "$(jq -r '.agents.personal["label"]' "$config_dir/config.json")" \
     'installer preserves personalized agents'
 assert_eq 'A private prompt that must survive upgrades.' \
     "$(jq -r '.prompts.final[0]' "$config_dir/config.json")" \

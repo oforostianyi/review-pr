@@ -62,13 +62,13 @@ assert_eq "$HEAD_SHA" "$(jq -r '.head_sha' "$CHANGED_LINE_MAP_FILE")" \
     'changed-line map records the exact head commit'
 assert_eq '7' "$(jq -r '.files | length' "$CHANGED_LINE_MAP_FILE")" \
     'changed-line map retains every changed path'
-assert_eq 'true' "$(jq -r '.files[] | select(.path == "modified file.txt") | any(.right_side_ranges[]; .start <= 3 and .end >= 3)' "$CHANGED_LINE_MAP_FILE")" \
+assert_eq 'true' "$(jq -r '.files[] | select(.path == "modified file.txt") | any(.right_side_ranges[]; .start <= 3 and .["end"] >= 3)' "$CHANGED_LINE_MAP_FILE")" \
     'modified RIGHT-side line is anchorable'
-assert_eq 'false' "$(jq -r '.files[] | select(.path == "modified file.txt") | any(.right_side_ranges[]; .start <= 2 and .end >= 2)' "$CHANGED_LINE_MAP_FILE")" \
+assert_eq 'false' "$(jq -r '.files[] | select(.path == "modified file.txt") | any(.right_side_ranges[]; .start <= 2 and .["end"] >= 2)' "$CHANGED_LINE_MAP_FILE")" \
     'unchanged context line is excluded from the map'
 assert_eq 'rename-old.txt' "$(jq -r '.files[] | select(.path == "rename-new.txt") | .old_path' "$CHANGED_LINE_MAP_FILE")" \
     'rename map keeps the old path but keys anchors by the RIGHT-side path'
-assert_eq 'true' "$(jq -r '.files[] | select(.path == "rename-new.txt") | any(.right_side_ranges[]; .start <= 7 and .end >= 7)' "$CHANGED_LINE_MAP_FILE")" \
+assert_eq 'true' "$(jq -r '.files[] | select(.path == "rename-new.txt") | any(.right_side_ranges[]; .start <= 7 and .["end"] >= 7)' "$CHANGED_LINE_MAP_FILE")" \
     'content changed within a rename has a RIGHT-side anchor'
 assert_eq '0' "$(jq -r '.files[] | select(.path == "deleted.txt") | .right_side_line_count' "$CHANGED_LINE_MAP_FILE")" \
     'deleted file has no fabricated RIGHT-side lines'
