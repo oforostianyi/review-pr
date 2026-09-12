@@ -194,7 +194,7 @@ run_full_success_case() {
         'final synthesizer receives the duplicate-feedback rule'
 
     cross_alpha_checksum=$(cksum "$work_dir/${stem}-cross-alpha.md")
-    gh_calls_before=$(wc -l <"$gh_log")
+    gh_calls_before=$(wc -l <"$gh_log" | tr -d ' ')
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_FAKE_GH_LOG="$gh_log" \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
@@ -202,7 +202,7 @@ run_full_success_case() {
         >"$case_dir/rerun-output.txt" 2>"$case_dir/rerun-stderr.log"
     assert_eq "$cross_alpha_checksum" "$(cksum "$work_dir/${stem}-cross-alpha.md")" \
         'artifact-only final rerun does not overwrite a source cross-review'
-    assert_eq "$gh_calls_before" "$(wc -l <"$gh_log")" \
+    assert_eq "$gh_calls_before" "$(wc -l <"$gh_log" | tr -d ' ')" \
         'artifact-only final rerun performs no GitHub calls'
     rerun_final_prompt=$(find "$capture" -type f -name 'final-synthesis-alpha-attempt-1.prompt' -print | sort | tail -n 1)
     assert_file_contains "$rerun_final_prompt" '===== BEGIN AUTHORITATIVE REPOSITORY FACTS =====' \
@@ -214,14 +214,14 @@ run_full_success_case() {
     legacy_manifest_temp="${manifest}.legacy.tmp"
     jq 'del(.artifacts.repository_facts, .artifacts.changed_lines)' "$manifest" >"$legacy_manifest_temp"
     mv -- "$legacy_manifest_temp" "$manifest"
-    gh_calls_before=$(wc -l <"$gh_log")
+    gh_calls_before=$(wc -l <"$gh_log" | tr -d ' ')
     sleep 1
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_FAKE_GH_LOG="$gh_log" \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
         "$repo_root/bin/review-pr" --config "$config" --rerun-final --run "$timestamp" 123 \
         >"$case_dir/legacy-rerun-output.txt" 2>"$case_dir/legacy-rerun-stderr.log"
-    assert_eq "$gh_calls_before" "$(wc -l <"$gh_log")" \
+    assert_eq "$gh_calls_before" "$(wc -l <"$gh_log" | tr -d ' ')" \
         'historical manifest without repository facts remains artifact-only'
     assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" \
         'AUTHORITATIVE REPOSITORY FACTS UNAVAILABLE' \

@@ -28,6 +28,14 @@ prompt_block_lines() {
     ' <<<"$prompt_text"
 }
 
+# Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
+# GNU and BSD tools, unlike sed's GNU-only "0,/re/" address.
+replace_first_literal() {
+    awk -v needle="$1" -v replacement="$2" '
+        !done { position = index($0, needle); if (position > 0) { $0 = substr($0, 1, position - 1) replacement substr($0, position + length(needle)); done = 1 } }
+        { print }'
+}
+
 if [[ -n "$scenario_directory" && -f "${scenario_directory}/${agent}-${phase_key}" ]]; then
     IFS= read -r behavior <"${scenario_directory}/${agent}-${phase_key}"
 fi
@@ -422,15 +430,15 @@ case "$behavior" in
         write_usage null 58
         ;;
     unsafe-final-ndjson-repair)
-        emit_valid_ndjson_final | sed '0,/"classification":"CONFIRMED"/s//"classification":"UNCERTAIN"/' | sed '0,/"severity":"P1"/s//"severity":null/'
+        emit_valid_ndjson_final | replace_first_literal '"classification":"CONFIRMED"' '"classification":"UNCERTAIN"' | replace_first_literal '"severity":"P1"' '"severity":null'
         write_usage null 59
         ;;
     unsafe-cross-ndjson-repair)
-        emit_valid_ndjson_cross | sed '0,/"classification":"CONFIRMED"/s//"classification":"UNCERTAIN"/'
+        emit_valid_ndjson_cross | replace_first_literal '"classification":"CONFIRMED"' '"classification":"UNCERTAIN"'
         write_usage null 59
         ;;
     unsafe-ndjson-repair)
-        emit_valid_ndjson_primary | sed '0,/The fixture changed branch can fail\./s//The repair rewrote the finding claim./'
+        emit_valid_ndjson_primary | replace_first_literal 'The fixture changed branch can fail.' 'The repair rewrote the finding claim.'
         write_usage null 59
         ;;
     fail-once)

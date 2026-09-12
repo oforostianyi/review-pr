@@ -791,18 +791,18 @@ sed 's/"start":10,"end":10/"start":13,"end":13/' \
 assert_invalid_contract context-line 'schema_or_completeness_validation_failed: finding[F-001].anchor' "$wrong_line"
 
 classified="$test_root/classified-source.ndjson"
-sed '0,/"classification":null/s//"classification":"CONFIRMED"/' \
-    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$classified"
+replace_first_literal '"classification":null' '"classification":"CONFIRMED"' \
+    <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$classified"
 assert_invalid_contract primary-classification 'schema_or_completeness_validation_failed: finding[F-001].classification' "$classified"
 
 foreign_provenance="$test_root/foreign-provenance.ndjson"
-sed '0,/"contributing_agents":\["codex"\]/s//"contributing_agents":["codex","claude"]/' \
-    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$foreign_provenance"
+replace_first_literal '"contributing_agents":["codex"]' '"contributing_agents":["codex","claude"]' \
+    <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$foreign_provenance"
 assert_invalid_contract foreign-primary-provenance 'schema_or_completeness_validation_failed: finding[F-001].contributing_agents' "$foreign_provenance"
 
 missing_thread_id="$test_root/missing-thread-id.ndjson"
-sed '0,/"state":"new","thread_ids":\[\]/s//"state":"confirmed-existing","thread_ids":[]/' \
-    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
+replace_first_literal '"state":"new","thread_ids":[]' '"state":"confirmed-existing","thread_ids":[]' \
+    <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
 assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
 
 preamble="$test_root/preamble-source.ndjson"

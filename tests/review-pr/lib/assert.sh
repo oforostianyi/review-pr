@@ -84,3 +84,10 @@ portable_mktemp_dir() {
     mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX"
 }
 
+# Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
+# GNU and BSD tools, unlike sed's GNU-only "0,/re/" address.
+replace_first_literal() {
+    awk -v needle="$1" -v replacement="$2" '
+        !done { position = index($0, needle); if (position > 0) { $0 = substr($0, 1, position - 1) replacement substr($0, position + length(needle)); done = 1 } }
+        { print }'
+}

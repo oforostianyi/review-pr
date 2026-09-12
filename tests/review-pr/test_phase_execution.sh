@@ -194,7 +194,7 @@ DASHBOARD_SHOW_PID=true
 DASHBOARD_COLOR_ENABLED=false
 calculate_dashboard_line_count
 render_dashboard_snapshot false 2>"$CASE_DIR/frame.txt"
-assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt")" \
+assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt" | tr -d ' ')" \
     'the rendered frame height matches the cursor movement used for redraws'
 assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/frame.txt")" \
     'one frame draws the primary section title exactly once'
