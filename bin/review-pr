@@ -4414,10 +4414,38 @@ append_required_source_refs_to_prompt() {
     } >>"$prompt_file"
 }
 
+readonly FINAL_RESOLUTION_CONTRACT_BLOCK='Dispute resolutions: when the prompt contains a REQUIRED RESOLUTIONS block, emit exactly one resolution record per listed dispute, before the complete record, and no other resolution records. A resolution record has exactly these keys: record, schema_version, dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations.
+- record is "resolution", schema_version is 1; dispute_id, primary_ref, and conflicting_refs ({"agent","source_id"} pairs) are copied exactly from the block.
+- final_source_id names the finding record in this stream that covers the dispute; its source_refs must include every conflicting ref.
+- dispute_kind is factual (the reviewers disagree about what the code does or whether something exists), severity (they agree on the fact and disagree on impact), or mixed.
+- resolution_status is resolved, uncertain, or not_applicable; not_applicable is allowed only for a severity dispute.
+- verification_method is source, command, test, repository_rule, runtime, or manual. A factual or mixed dispute is resolved only by a method other than manual, and its covering finding may be CONFIRMED only when the dispute is resolved. When the fact could not be measured, set resolution_status to uncertain and classify the covering finding UNCERTAIN: the number of reviewers never settles a fact.
+- command is null or an argv array of non-empty strings describing the measurement (no shell string). It is required when verification_method is command or test. The orchestrator records it and does not execute it.
+- observed states what the measurement or source read showed; required when resolution_status is resolved.
+- basis is explicit_repository_rule, skill_rule, inferred_convention, or general_engineering. basis_source is a repository path (optionally path:line) for explicit_repository_rule, the configured skill name for skill_rule, and null otherwise. A finding whose only basis is inferred_convention cannot carry P0 or P1.
+- limitations is a string array of what remains unverified.'
+
+append_required_resolutions_to_prompt() {
+    local prompt_file=$1
+    local disputes_file=$2
+
+    {
+        printf '\n===== BEGIN REQUIRED RESOLUTIONS =====\n'
+        printf '%s\n' 'The cross-reviewers disagree about the primary findings listed below. Emit exactly one resolution record per listed dispute, copying dispute_id, primary_ref, and conflicting_refs exactly; emit no resolution record for anything else. When the list is "none", emit no resolution records.'
+        if [[ "$(jq 'length' "$disputes_file")" == 0 ]]; then
+            printf 'none\n'
+        else
+            jq -c '.[]' "$disputes_file"
+        fi
+        printf '===== END REQUIRED RESOLUTIONS =====\n'
+    } >>"$prompt_file"
+}
+
 write_final_prompt() {
     local prompt_file=$1
     shift
     local synthesizer_label
+    local dispute_contract_block=''
     local comparison_prompt_block
     local final_format_block
     local label
@@ -4427,6 +4455,7 @@ write_final_prompt() {
     synthesizer_label=$(agent_label "$FINAL_SYNTHESIZER")
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         comparison_prompt_block='Extended comparison content is not part of this machine-readable synthesis. A standalone comparison may be generated later from the deterministic final report.'
+        [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] || dispute_contract_block=$FINAL_RESOLUTION_CONTRACT_BLOCK
         final_format_block=$(cat <<EOF
 Output contract: ndjson-v1. This orchestrator contract overrides every Markdown format requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text.
 
@@ -4441,6 +4470,7 @@ Classify every supplied canonical cross-review finding. Each output finding has 
 - evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; anchor an affected consumer, caller, or flow to the changed line that exposes it, and use pr-level only when no changed line causes the finding (test coverage, migration, documentation), naming the file and symbol in evidence.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - All reader-facing string values must use ${FINAL_LANGUAGE_NAME} (${FINALIZATION_LANGUAGE}). Fixed enum values, IDs, agent keys, and paths remain unchanged.
+${dispute_contract_block}
 
 Finish with exactly one final record and no records after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs. Even with no confirmed findings, every input ref must still be classified before the complete record.
 
@@ -4553,6 +4583,11 @@ EOF
             } >>"$prompt_file"
         done
         append_required_source_refs_to_prompt "$prompt_file" final
+        if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
+            new_temp_file 'final-disputes'
+            build_final_disputes "$NEW_TEMP_FILE" || die "Cannot detect cross-review disputes for final synthesis"
+            append_required_resolutions_to_prompt "$prompt_file" "$NEW_TEMP_FILE"
+        fi
     fi
     while [[ "$FINAL_FINDING_CONTRACT_MODE" != ndjson-v1 && $# -ge 2 ]]; do
         label=$1

@@ -228,6 +228,24 @@ assert_eq '0' "$(jq 'length' "$disputes_file")" 'agreeing cross-reviews produce 
 unset 'CROSS_FINDINGS_OUTPUTS[gamma]'
 REVIEW_AGENTS=(alpha)
 
+resolutions_prompt="$test_root/required-resolutions-prompt.md"
+printf 'Prompt body\n' >"$resolutions_prompt"
+printf '%s\n' '[{"dispute_id":"dispute:beta:beta:F-001","primary_ref":{"agent":"beta","source_id":"beta:F-001"},"kind_hint":"factual","conflicting_refs":[{"agent":"alpha","source_id":"alpha:C-001","classification":"CONFIRMED","severity":"P1"},{"agent":"gamma","source_id":"gamma:C-001","classification":"REJECTED","severity":null}]}]' >"$disputes_file"
+append_required_resolutions_to_prompt "$resolutions_prompt" "$disputes_file"
+assert_file_contains "$resolutions_prompt" '===== BEGIN REQUIRED RESOLUTIONS =====' \
+    'the final prompt gets a required-resolutions block'
+assert_file_contains "$resolutions_prompt" '"dispute_id":"dispute:beta:beta:F-001"' \
+    'each detected dispute is listed as one compact JSON line'
+assert_file_contains "$resolutions_prompt" 'exactly one resolution record per listed dispute' \
+    'the block states the one-record-per-dispute rule'
+printf '[]\n' >"$disputes_file"
+printf 'Prompt body\n' >"$resolutions_prompt"
+append_required_resolutions_to_prompt "$resolutions_prompt" "$disputes_file"
+assert_file_contains "$resolutions_prompt" 'none' \
+    'an empty dispute list is stated explicitly so the model emits no resolution records'
+assert_true 'the resolution contract text names every record key' \
+    grep -Fq -- 'dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations' <<<"$FINAL_RESOLUTION_CONTRACT_BLOCK"
+
 final_records="$test_root/final-records.json"
 final_canonical="$test_root/final-canonical.json"
 jq -n '{
