@@ -1,0 +1,18 @@
+# Every regular file the release archive must contain, relative to the
+# review-pr-<version>/ root, one per line, sorted. packaging/build-package.sh
+# copies exactly these files; tests/review-pr/test_package.sh checks that the
+# archive matches this list in both directions.
+CHANGELOG.md
+README.md
+VERSION
+bin/review-pr
+config/review-pr-findings-v1.schema.json
+config/review-pr.example.json
+config/review-pr.schema.json
+docs/review-pr-finding-contract.md
+docs/review-pr.md
+install.sh
+review-pr-launcher
+runners/review-pr-agy
+runners/review-pr-pi-guard.js
+uninstall.sh

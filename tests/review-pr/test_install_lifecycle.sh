@@ -217,7 +217,8 @@ upgrade_config_dir="$upgrade_home/.config/review-pr"
 upgrade_checkout="$test_root/upgrade checkout"
 mkdir -p -- "$upgrade_home"
 make_review_checkout "$upgrade_checkout"
-HOME=$upgrade_home PATH="$fake_bin:$PATH" sh "$old_package/install.sh" \
+# CI runners export XDG_CONFIG_HOME, so the default location is pinned explicitly.
+HOME=$upgrade_home XDG_CONFIG_HOME="$upgrade_home/.config" PATH="$fake_bin:$PATH" sh "$old_package/install.sh" \
     --repo "$upgrade_checkout" --github-repository example/repository --reviews-dir "$reviews_dir" \
     >"$test_root/old-install.txt" 2>&1 || fail "old package install failed: $(cat "$test_root/old-install.txt")"
 assert_eq 'review-pr 1.13.0' "$(HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --version)" \
@@ -236,7 +237,7 @@ cp -- "$test_root/legacy-config.json" "$upgrade_config_dir/config.json"
 mkdir -p -- "$upgrade_config_dir/skills/claude/my-private-skill"
 printf '%s\n' 'private skill contents' >"$upgrade_config_dir/skills/claude/my-private-skill/SKILL.md"
 
-HOME=$upgrade_home PATH="$fake_bin:$PATH" sh "$package_root/install.sh" \
+HOME=$upgrade_home XDG_CONFIG_HOME="$upgrade_home/.config" PATH="$fake_bin:$PATH" sh "$package_root/install.sh" \
     --repo "$upgrade_checkout" --github-repository example/repository \
     >"$test_root/upgrade-install.txt" 2>&1 || fail "upgrade install failed: $(cat "$test_root/upgrade-install.txt")"
 assert_eq "review-pr ${package_version}" "$(HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --version)" \

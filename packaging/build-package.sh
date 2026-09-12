@@ -25,7 +25,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-mkdir -p "${package_root}/bin" "${package_root}/config" "${package_root}/docs" "${package_root}/runners" "${repository_root}/dist"
+dist_dir=${REVIEW_PR_DIST_DIR:-${repository_root}/dist}
+mkdir -p "${package_root}/bin" "${package_root}/config" "${package_root}/docs" "${package_root}/runners" "$dist_dir"
 cp "${repository_root}/bin/review-pr" "${package_root}/bin/review-pr"
 cp "${repository_root}/config/review-pr.example.json" "${package_root}/config/review-pr.example.json"
 cp "${repository_root}/config/review-pr.schema.json" "${package_root}/config/review-pr.schema.json"
@@ -44,7 +45,7 @@ chmod 0755 "$package_root" "${package_root}/bin" "${package_root}/config" "${pac
 chmod 0755 "${package_root}/bin/review-pr" "${package_root}/runners/review-pr-agy" "${package_root}/install.sh" "${package_root}/uninstall.sh" "${package_root}/review-pr-launcher"
 chmod 0644 "${package_root}/runners/review-pr-pi-guard.js" "${package_root}/VERSION" "${package_root}/README.md" "${package_root}/CHANGELOG.md" "${package_root}/config/review-pr.example.json" "${package_root}/config/review-pr.schema.json" "${package_root}/config/review-pr-findings-v1.schema.json" "${package_root}/docs/review-pr.md" "${package_root}/docs/review-pr-finding-contract.md"
 
-archive=${repository_root}/dist/${package_name}.tar.gz
+archive=${dist_dir}/${package_name}.tar.gz
 if tar --version 2>/dev/null | grep -q GNU; then
     tar --owner=0 --group=0 --numeric-owner -C "$staging_root" -czf "$archive" "$package_name"
 else
@@ -53,9 +54,9 @@ fi
 chmod 0644 "$archive"
 
 if command -v sha256sum >/dev/null 2>&1; then
-    (cd "${repository_root}/dist" && sha256sum "${package_name}.tar.gz" >"${package_name}.tar.gz.sha256")
+    (cd "$dist_dir" && sha256sum "${package_name}.tar.gz" >"${package_name}.tar.gz.sha256")
 elif command -v shasum >/dev/null 2>&1; then
-    (cd "${repository_root}/dist" && shasum -a 256 "${package_name}.tar.gz" >"${package_name}.tar.gz.sha256")
+    (cd "$dist_dir" && shasum -a 256 "${package_name}.tar.gz" >"${package_name}.tar.gz.sha256")
 else
     printf '%s\n' 'WARNING: neither sha256sum nor shasum is available; checksum not created.' >&2
 fi
