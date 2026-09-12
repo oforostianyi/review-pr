@@ -401,6 +401,19 @@ installation, or the orchestrator may append a local copy from
 prevents a review. Teams can distribute their own skills as a separate overlay without patching the
 core executable or replacing the user's `config.json`.
 
+A team overlay is an ordinary directory tree that each member copies into place, for example:
+
+1. Ship `skills/<agent>/<skill-name>/SKILL.md` for every agent that should receive the methodology
+   (`claude`, `codex`, `pi`, `agy`, or a custom agent name); the installer preserves existing copies
+   and never overwrites a member's own edits.
+2. Ship a JSON fragment for `profiles.<profile>.skills` that maps agents to `<skill-name>`, plus the
+   `repositories.<alias>` entries with `profile` set, and merge it into `config.json` with `jq`.
+3. Keep repository rules the skill relies on (contribution guides, ADRs, lint configuration) inside
+   the reviewed repository itself, so a finding can cite an explicit rule with its path.
+
+Nothing in the overlay is executed: skill text is appended to the agent prompt as methodology, and
+the orchestrated-mode safety rules in the core prompt take precedence over it.
+
 Review repository and config can also be overridden without editing JSON:
 
 ```bash
@@ -438,6 +451,19 @@ Extract a newer archive and run its `install.sh` with the same prefix/config opt
 
 Use `review-pr --version` to identify the installed release. See `CHANGELOG.md` in the release archive for release notes and compatibility-impacting changes.
 
+Rollback works the same way: extract the previous archive and run its `install.sh` with the same
+options. Program files are replaced wholesale and the configuration is backed up again first. If a
+newer release migrated `config.json` (for example the legacy single `review_repository` field into
+`repositories`), restore the matching pre-upgrade copy from `<config-dir>/backups/config-<timestamp>.json`
+before running the older version; backups are byte-for-byte copies and are never pruned by the
+installer or the uninstaller.
+
+Report compatibility: Markdown reports and `*-manifest.json` files written by earlier releases stay
+readable, and `--rerun-final` and `--run` accept them as long as the recorded PR head still matches.
+Structured `ndjson-v1` artifacts carry `schema_version: 1`; a release that introduces a new schema
+version says so in `CHANGELOG.md`, and the default configuration keeps the Markdown contracts, so an
+upgrade never changes the output format of an existing configuration by itself.
+
 ## Uninstall
 
 Remove installed program files while preserving configuration:
@@ -454,6 +480,32 @@ To remove the configuration too:
 
 Review reports and the dedicated Git checkout are never deleted by the uninstaller.
 
+## Security model
+
+- **Agents run with your privileges.** Every configured `command`, `runner`, or built-in CLI is
+  started as the invoking user without a shell: `agents.<name>.command` is an argv array, so
+  configuration values are never re-parsed by `sh`. Only commands named in the active configuration
+  are required or executed.
+- **The review checkout is disposable.** The orchestrator works in the dedicated clone at the exact PR
+  head, refuses tracked changes there, and never touches other repositories. The Antigravity runner
+  goes further and reviews a throwaway Git worktree, so accidental edits are discarded.
+- **PR text is untrusted input.** PR descriptions, comments, and review threads are passed to agents
+  inside a clearly delimited context block with an instruction to treat them as data, never as
+  instructions; the checked-out source and exact diff remain the source of truth.
+- **Orchestrator-executed commands are allow-listed.** With `reporting.execute_measurements`
+  enabled, the orchestrator runs only read-only tools (`rg`, `grep`, `git show|log|diff|...`, `ls`,
+  `cat`, `head`, `wc`, `test`) proposed by the finalizer, without a shell, inside the review checkout,
+  with a ten-second timeout and bounded, credential-redacted output. Anything else is recorded as
+  skipped and never run. The feature is off by default.
+- **Pi tool calls are bounded.** `agents.pi.max_tool_calls` loads a small extension that blocks
+  duplicate tool calls and terminates the agent after the budget, so a looping local model cannot run
+  indefinitely.
+- **Antigravity permissions are explicit.** Headless AGY denies any command not covered by an allow
+  rule; the reference documents the read-only rule set the runner expects. Grant only those.
+- **Nothing is uploaded by the orchestrator.** GitHub access is read-only through `gh` (PR metadata,
+  comments, review threads, check runs). Reports stay in `reviews_directory`; publishing them is a
+  manual step.
+
 ## Troubleshooting
 
 - **Bash 5.1 or newer is required:** on macOS run `brew install bash`; the launcher searches Apple Silicon and Intel Homebrew paths automatically. `REVIEW_PR_BASH=/custom/path/bash` is also supported.
@@ -461,3 +513,21 @@ Review reports and the dedicated Git checkout are never deleted by the uninstall
 - **GitHub errors:** run `gh auth status` and verify access to the repository and its pull requests/checks.
 - **Configured skill unavailable:** it is advisory only. Install the named skill for that agent, change the name, set it to `""`, or remove the mapping; the orchestrator does not fail because a local skill file is absent.
 - **Review repository has tracked changes:** preserve or commit them elsewhere; this checkout is intentionally dedicated to reviews.
+- **An agent times out:** the phase log reports `timeout after <n>s` and the manifest records the
+  attempt under `attempt_failures`. Raise `agents.<name>.timeout_seconds` for slow local models, or
+  lower `execution.max_concurrency` so agents do not compete for the same GPU or API quota. A resume
+  with `--run <timestamp>` re-runs only the agents that did not complete.
+- **A local model loops on tool calls:** set `agents.pi.max_tool_calls` (a few hundred is generous
+  for a large PR). The guard blocks repeated identical calls, terminates the agent when the budget is
+  spent, and writes a summary into the agent log; the final diagnostics record it as
+  `pi_guard_budget_exhausted` or `pi_guard_duplicates_blocked`.
+- **A local model hits its output token limit** (`stop_reason: length`, failure reason
+  `repair_output_token_limit`, or a truncated NDJSON stream): reasoning models can spend most of the
+  budget thinking before they print the contract. Use a larger output limit in the model server,
+  pick a non-reasoning finalizer with `finalization.model`, or reduce the input by running with fewer
+  reviewers. The orchestrator never publishes a truncated report; the partial output is kept as
+  `*-error-partial-raw.ndjson` for inspection.
+- **Invalid structured output:** the failure reason names the field, for example
+  `schema_or_completeness_validation_failed: finding[F-2].anchor`. One bounded repair pass asks the
+  same agent to fix only the schema; substantive fields are frozen and a changed decision is rejected.
+  The invalid response and the repair exchange are kept next to the run's `*-error*` artifacts.

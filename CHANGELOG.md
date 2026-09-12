@@ -14,6 +14,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
   archive into a temporary directory, verifies its checksum, modes, and manifest, and installs from
   the extracted archive.
 
+### Changed
+
+- README documents the security model (agents run as the user without a shell, disposable review
+  checkout, untrusted PR context, allow-listed measurements, bounded Pi tool calls, read-only GitHub
+  access), rollback and backup restoration, report compatibility across releases, a team overlay
+  guide without company content, and troubleshooting for agent timeouts, tool-call loops, output
+  token limits, and invalid structured output.
+
 ### Fixed
 
 - Run manifests record the measured review-thread state as `review_threads: {status, reason}`, and a
