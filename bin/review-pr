@@ -3497,7 +3497,7 @@ render_final_findings_markdown() {
                 .resolutions | to_entries[] |
                 "| " + ((.key + 1) | tostring) + " | `" + .value.dispute_id + "` | " + .value.dispute_kind + " | " +
                 .value.resolution_status + " | " + .value.verification_method + " | " +
-                ((if .value.command == null then "" else "`" + (.value.command | join(" ")) + "` " end) + (.value.observed | cell)) + " | " +
+                ((if .value.command == null then "" else "`" + (.value.command | join(" ")) + "` " end) + (if (.value.observed // "") == "" then "—" else (.value.observed | cell) end)) + " | " +
                 (.value.basis + (if .value.basis_source == null then "" else " (`" + (.value.basis_source | cell) + "`)" end)) + " |"
             ' "$resolutions_file"
         fi

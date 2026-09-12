@@ -519,6 +519,9 @@ assert_false 'a final report without resolutions has no dispute section' \
     grep -Fq -- 'review-pr:dispute-resolutions' "$rendered_with_resolutions"
 assert_true 'a final report with the dispute table still passes the legacy structural validator' \
     validate_final_markdown "$test_root/processed-final.md"
+render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$test_root/resolution-null-observed-canonical.json"
+assert_file_contains "$rendered_with_resolutions" '| factual | uncertain | source | — | general_engineering |' \
+    'a null observed value renders as a dash, not the word null'
 
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
