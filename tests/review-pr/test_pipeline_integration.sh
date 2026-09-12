@@ -788,6 +788,10 @@ run_ndjson_cross_case() {
         'structured cross-review maps the skill cross-review columns onto record fields'
     assert_file_contains "$alpha_prompt" 'inferred convention' \
         'structured cross-review states the explicit-rule versus inferred-convention basis policy'
+    for captured in primary-review-alpha-attempt-1 cross-review-alpha-attempt-1 final-synthesis-alpha-attempt-1; do
+        assert_file_contains "$capture/${captured}.prompt" 'one single final message' \
+            "the ${captured%%-alpha*} contract asks for the whole stream in one final message"
+    done
     assert_file_contains "$final_prompt" '===== BEGIN KNOWN LIMITATIONS =====' \
         'structured final synthesis receives the orchestrator-known limitations'
     assert_file_contains "$final_prompt" 'is a verification limitation, never a finding by itself' \

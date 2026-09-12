@@ -4729,7 +4729,7 @@ write_primary_prompt() {
     reviewer_label=$(agent_label "$reviewer")
     if [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         output_contract_block=$(cat <<EOF
-Output contract: ndjson-v1. This orchestrator contract overrides any Markdown formatting requested by a skill. Return only newline-delimited JSON: exactly one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text.
+Output contract: ndjson-v1. This orchestrator contract overrides any Markdown formatting requested by a skill. Return only newline-delimited JSON: exactly one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
 
 Every issue must be one atomic finding record with exactly these keys: record, schema_version, source_id, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback.
 
@@ -4837,7 +4837,7 @@ EOF
         # block below is the only formatting instruction under ndjson-v1.
         cross_instructions_block=''
         output_contract_block=$(cat <<'EOF'
-Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text.
+Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
 
 Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of {"agent":"input-agent-key","source_id":"input-source-id"}. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
 
@@ -5027,7 +5027,7 @@ write_final_prompt() {
         comparison_prompt_block='Extended comparison content is not part of this machine-readable synthesis. A standalone comparison may be generated later from the deterministic final report.'
         [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] || dispute_contract_block=$FINAL_RESOLUTION_CONTRACT_BLOCK
         final_format_block=$(cat <<EOF
-Output contract: ndjson-v1. This orchestrator contract overrides every Markdown format requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text.
+Output contract: ndjson-v1. This orchestrator contract overrides every Markdown format requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
 
 Classify every supplied canonical cross-review finding. Each output finding has exactly these keys: record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary.
 
