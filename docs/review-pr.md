@@ -19,7 +19,11 @@ atomic artifact publication, configuration backup, usage summaries, and comparis
 regressions. The integration suite also verifies authoritative repository facts, stacked-PR
 detection, exact filenames with shell metacharacters, unresolved references, and failure before an
 agent starts. Changed-line fixtures cover renamed, added, deleted, deletion-only, binary, context,
-range, and newline-containing paths, plus bounded anchor repair.
+range, and newline-containing paths, plus bounded anchor repair. The install lifecycle suite stages
+the package into an empty HOME with a prefix containing a space, performs a clean install, runs
+`--version` and `--show-config` through the installed launcher, reinstalls twice to check
+idempotency and same-second backup naming, and uninstalls with and without `--purge-config` while
+verifying that backups, portable skills, published reviews, and the review checkout are never touched.
 
 To run the static syntax check separately:
 
