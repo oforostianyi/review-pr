@@ -3067,7 +3067,7 @@ validate_cross_ndjson_records() {
             (.anchor | valid_anchor) and
             (.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
             (.failure_scenario | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
-            (.recommendation | type == "string" and length > 0) and
+            (.recommendation | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
             (.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) and
             (if .classification == "CONFIRMED" then (.severity | IN("P0", "P1", "P2", "P3")) else .severity == null end) and
             (.category | type == "string" and length > 0) and
@@ -3366,7 +3366,7 @@ validate_final_ndjson_records() {
             (.anchor | valid_anchor) and
             (.evidence | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
             (.failure_scenario | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
-            (.recommendation | type == "string" and length > 0) and
+            (.recommendation | (type == "string" and length > 0) or ($record.classification != "CONFIRMED" and (. == null or . == ""))) and
             (.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) and
             (if .classification == "CONFIRMED" then (.severity | IN("P0", "P1", "P2", "P3")) else .severity == null end) and
             (.include_in_rejected_summary | type == "boolean") and
@@ -3956,7 +3956,9 @@ describe_ndjson_validation_failure() {
                 problem("failure_scenario"; $r.failure_scenario |
                     (type == "string" and length > 0) or
                     ($phase != "primary" and $r.classification != "CONFIRMED" and (. == null or . == ""))),
-                problem("recommendation"; $r.recommendation | type == "string" and length > 0),
+                problem("recommendation"; $r.recommendation |
+                    (type == "string" and length > 0) or
+                    ($phase != "primary" and $r.classification != "CONFIRMED" and (. == null or . == ""))),
                 problem("classification";
                     if $phase == "primary" then $r.classification == null
                     else ($r.classification | IN("CONFIRMED", "REJECTED", "UNCERTAIN")) end),

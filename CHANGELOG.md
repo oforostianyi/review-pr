@@ -18,6 +18,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - The three `ndjson-v1` contracts now state that the whole stream must arrive in one single final
   message, because a hosted CLI ends the turn on the first message and a record sent as a first
   instalment left the review with `stream.no_complete` and missing source refs.
+- A REJECTED or UNCERTAIN cross-review or final record may carry a `null` or empty
+  `recommendation`, like `failure_scenario` already could; Codex rejected a claim with
+  `recommendation: null` and the strict rule failed an otherwise complete cross-review twice.
 - Cleanup terminates the whole process tree of every running agent subshell, so an orchestrator
   that exits early no longer leaves `codex`, `claude`, or `pi` processes running and spending quota.
 

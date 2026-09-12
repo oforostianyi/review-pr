@@ -195,8 +195,8 @@
           "description": "Non-empty for unclassified primary and CONFIRMED records; may be null or empty for REJECTED and UNCERTAIN records."
         },
         "recommendation": {
-          "type": "string",
-          "minLength": 1
+          "type": ["string", "null"],
+          "description": "Non-empty for unclassified primary and CONFIRMED records; may be null or empty for REJECTED and UNCERTAIN records, which have nothing to recommend."
         },
         "classification": {
           "type": ["string", "null"],

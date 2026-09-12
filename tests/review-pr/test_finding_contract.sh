@@ -138,6 +138,21 @@ rejected_null_canonical="$test_root/cross-rejected-null-canonical.json"
 jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null' "$cross_records" >"$rejected_null_scenario"
 assert_true 'a rejected cross-review claim may use a null failure_scenario' \
     validate_cross_ndjson_records "$rejected_null_scenario" "$rejected_null_canonical" alpha "$cross_expected_refs"
+rejected_null_recommendation="$test_root/cross-rejected-null-recommendation.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null | .[0].recommendation = null' "$cross_records" >"$rejected_null_recommendation"
+assert_true 'a rejected cross-review claim may use a null recommendation' \
+    validate_cross_ndjson_records "$rejected_null_recommendation" "$test_root/cross-rejected-null-recommendation-canonical.json" alpha "$cross_expected_refs"
+uncertain_empty_recommendation="$test_root/cross-uncertain-empty-recommendation.json"
+jq '.[0].classification = "UNCERTAIN" | .[0].severity = null | .[0].recommendation = ""' "$cross_records" >"$uncertain_empty_recommendation"
+assert_true 'an uncertain cross-review claim may leave recommendation empty' \
+    validate_cross_ndjson_records "$uncertain_empty_recommendation" "$test_root/cross-uncertain-empty-recommendation-canonical.json" alpha "$cross_expected_refs"
+confirmed_null_recommendation="$test_root/cross-confirmed-null-recommendation.json"
+jq '.[0].recommendation = null' "$cross_records" >"$confirmed_null_recommendation"
+assert_false 'a confirmed cross-review finding still requires a recommendation' \
+    validate_cross_ndjson_records "$confirmed_null_recommendation" "$test_root/cross-confirmed-null-recommendation-canonical.json" alpha "$cross_expected_refs"
+assert_eq 'finding[alpha:C-001].recommendation' \
+    "$(describe_ndjson_validation_failure cross "$confirmed_null_recommendation" alpha "$cross_expected_refs")" \
+    'cross-review diagnostics name the missing recommendation'
 rejected_null_rendered="$test_root/cross-rejected-null.md"
 assert_true 'a rejected claim with a null failure scenario renders' \
     render_cross_findings_markdown "$rejected_null_canonical" "$rejected_null_rendered" EN
@@ -387,6 +402,14 @@ final_rejected_null_scenario="$test_root/final-rejected-null-scenario.json"
 jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null' "$final_records" >"$final_rejected_null_scenario"
 assert_true 'a rejected final claim may use a null failure_scenario' \
     validate_final_ndjson_records "$final_rejected_null_scenario" "$test_root/final-rejected-null-canonical.json" "$final_expected_refs"
+final_rejected_null_recommendation="$test_root/final-rejected-null-recommendation.json"
+jq '.[0].classification = "REJECTED" | .[0].severity = null | .[0].failure_scenario = null | .[0].recommendation = null' "$final_records" >"$final_rejected_null_recommendation"
+assert_true 'a rejected final claim may use a null recommendation' \
+    validate_final_ndjson_records "$final_rejected_null_recommendation" "$test_root/final-rejected-null-recommendation-canonical.json" "$final_expected_refs"
+final_confirmed_null_recommendation="$test_root/final-confirmed-null-recommendation.json"
+jq '.[0].recommendation = null' "$final_records" >"$final_confirmed_null_recommendation"
+assert_false 'a confirmed final finding still requires a recommendation' \
+    validate_final_ndjson_records "$final_confirmed_null_recommendation" "$test_root/final-confirmed-null-recommendation-canonical.json" "$final_expected_refs"
 final_confirmed_null_scenario="$test_root/final-confirmed-null-scenario.json"
 jq '.[0].failure_scenario = null' "$final_records" >"$final_confirmed_null_scenario"
 assert_false 'a confirmed final finding rejects a null failure scenario' \
