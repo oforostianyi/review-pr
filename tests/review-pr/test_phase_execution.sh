@@ -199,4 +199,23 @@ assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt")" \
 assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/frame.txt")" \
     'one frame draws the primary section title exactly once'
 
+AGENT_LABELS[wide]='An unusually long agent label'
+AGENT_MODELS[wide]='provider/some-model'
+AGENT_EFFORTS[wide]=''
+assert_eq 'An unusually lo...' "$(dashboard_agent_label wide primary)" \
+    'a label that leaves no room for the model is truncated to fifteen characters'
+AGENT_LABELS[alpha]='Alpha'
+AGENT_MODELS[alpha]='vendor/gpt-5.6-terra'
+AGENT_EFFORTS[alpha]='high'
+assert_eq 'Alpha (gpt-5.6-terra high)' "$(dashboard_agent_label alpha primary)" \
+    'the dashboard label drops the provider prefix and keeps the effort'
+AGENT_MODELS[alpha]='vendor/a-very-long-model-identifier-that-overflows'
+assert_eq 'Alpha (a-very-long-model-...)' "$(dashboard_agent_label alpha primary)" \
+    'an overlong model identifier is truncated with an ellipsis inside the fixed dashboard width'
+FINALIZATION_MODEL='final-model'
+FINALIZATION_EFFORT_CONFIGURED=false
+assert_eq 'Alpha (final-model high)' "$(dashboard_agent_label alpha final)" \
+    'the final phase shows the configured finalization model'
+FINALIZATION_MODEL=''
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
