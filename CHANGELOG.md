@@ -16,6 +16,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
   resumed run or an artifact-only `--rerun-final` restores it from the source manifest (or, for older
   runs, from the GitHub context snapshot) instead of reporting `github_review_threads_unavailable:
   not_fetched` in the final diagnostics.
+- The jq programs compile on jq 1.6 again, the documented minimum: `label` and `end` are reserved
+  words there, so object keys, field accesses, and a `--arg` variable using those names were
+  rewritten; CI runs the full suite against a pinned jq 1.6 release.
 
 ## [1.14.0] - 2026-09-12
 
