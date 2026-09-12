@@ -3632,6 +3632,75 @@ collect_orchestrator_diagnostics() {
     ' >"$output_file"
 }
 
+# Reviewer-reported limitations and positive evidence, aggregated across the
+# run's canonical sidecars by normalized text with provenance. All phases of
+# one run share a language, so text merging is deterministic within a run.
+collect_reviewer_records() {
+    local field=$1 final_canonical=$2
+    local agent
+
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        if [[ -s "${PRIMARY_FINDINGS_OUTPUTS[$agent]:-}" ]]; then
+            jq -c --arg phase primary --arg agent "$agent" --arg field "$field" '
+                (if $field == "verification_limitations" then
+                    (.findings[]? | .source_id as $sid | (.[$field] // [])[] | {text: ., phase: $phase, agent: $agent, finding_ref: {agent: $agent, source_id: $sid}})
+                 else empty end),
+                ((.[$field] // [])[] | {text: ., phase: $phase, agent: $agent, finding_ref: null})
+            ' "${PRIMARY_FINDINGS_OUTPUTS[$agent]}" 2>/dev/null || true
+        fi
+        if [[ -s "${CROSS_FINDINGS_OUTPUTS[$agent]:-}" ]]; then
+            jq -c --arg phase cross-review --arg agent "$agent" --arg field "$field" '
+                (if $field == "verification_limitations" then
+                    (.findings[]? | .source_id as $sid | (.[$field] // [])[] | {text: ., phase: $phase, agent: $agent, finding_ref: {agent: $agent, source_id: $sid}})
+                 else empty end),
+                ((.[$field] // [])[] | {text: ., phase: $phase, agent: $agent, finding_ref: null})
+            ' "${CROSS_FINDINGS_OUTPUTS[$agent]}" 2>/dev/null || true
+        fi
+    done
+    if [[ -s "$final_canonical" ]]; then
+        jq -c --arg field "$field" '
+            (if $field == "verification_limitations" then
+                (.findings[]? | .source_id as $sid | (.[$field] // [])[] | {text: ., phase: "final", agent: null, finding_ref: {agent: null, source_id: $sid}})
+             else empty end),
+            ((.[$field] // [])[] | {text: ., phase: "final", agent: null, finding_ref: null})
+        ' "$final_canonical" 2>/dev/null || true
+    fi
+}
+
+aggregate_reviewer_limitations() {
+    local final_canonical=$1 output_file=$2
+    collect_reviewer_records verification_limitations "$final_canonical" | jq -s '
+        def norm: ascii_downcase | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
+        [.[] | select(.text | type == "string" and length > 0)]
+        | group_by(.text | norm)
+        | map({
+            text: .[0].text,
+            phases: (map(.phase) | unique),
+            agents: (map(.agent) | map(select(. != null)) | unique),
+            finding_refs: (map(.finding_ref) | map(select(. != null)) | unique_by(.agent, .source_id))
+          })
+        | sort_by(-(.agents | length), (.text | norm))
+    ' >"$output_file"
+}
+
+aggregate_positive_evidence() {
+    local final_canonical=$1 output_file=$2
+    collect_reviewer_records positive_evidence "$final_canonical" | jq -s '
+        def norm: ascii_downcase | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
+        def kind: if test("[A-Za-z0-9_./-]+\\.[A-Za-z]{1,5}(:[0-9]+)?|::|\\(\\)") then "verified_safe" else "no_issue_found" end;
+        [.[] | select(.text | type == "string" and length > 0)]
+        | group_by(.text | norm)
+        | map({
+            text: .[0].text,
+            kind: (.[0].text | kind),
+            phases: (map(.phase) | unique),
+            agents: (map(.agent) | map(select(. != null)) | unique)
+          })
+        | sort_by(-(.agents | length), (.text | norm))
+        | .[:12]
+    ' >"$output_file"
+}
+
 render_final_findings_markdown() {
     local canonical_file=$1
     local output_file=$2

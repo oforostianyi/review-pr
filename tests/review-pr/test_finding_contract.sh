@@ -632,6 +632,47 @@ collect_orchestrator_diagnostics "$orchestrator_diagnostics"
 assert_eq '0' "$(jq 'length' "$orchestrator_diagnostics")" 'a clean run has no orchestrator diagnostics'
 WORK_DIR=$test_root
 
+agg_root="$test_root/aggregation"
+mkdir -p -- "$agg_root"
+jq -n '{agent: "alpha", phase: "primary", findings: [{source_id: "A-1", verification_limitations: ["Database was not reachable."]}],
+        verification_limitations: ["No staging environment was available"], positive_evidence: ["src/App/Service.php:10 validates the input before dispatch", "No issues were found in the migration order"]}' >"$agg_root/alpha.json"
+jq -n '{agent: "beta", phase: "primary", findings: [{source_id: "B-1", verification_limitations: []}],
+        verification_limitations: ["database was NOT reachable", "Docker socket access was denied"], positive_evidence: ["src/App/Service.php:10 validates the input before dispatch"]}' >"$agg_root/beta.json"
+jq -n '{agent: "alpha", phase: "cross-review", findings: [{source_id: "alpha:C-1", verification_limitations: ["The referenced upstream commit is unavailable locally"]}],
+        verification_limitations: [], positive_evidence: []}' >"$agg_root/cross-alpha.json"
+jq -n '{findings: [{source_id: "FINAL-1", verification_limitations: []}], verification_limitations: ["Migrations were not executed"], positive_evidence: ["down() removes the seeded rows in dependency order"]}' >"$agg_root/final.json"
+REVIEW_AGENTS=(alpha beta)
+PRIMARY_FINDINGS_OUTPUTS[alpha]="$agg_root/alpha.json"
+PRIMARY_FINDINGS_OUTPUTS[beta]="$agg_root/beta.json"
+CROSS_FINDINGS_OUTPUTS[alpha]="$agg_root/cross-alpha.json"
+unset 'CROSS_FINDINGS_OUTPUTS[beta]'
+reviewer_limitations="$agg_root/reviewers.json"
+assert_true 'reviewer limitations aggregate across primary, cross-review, and final sidecars' \
+    aggregate_reviewer_limitations "$agg_root/final.json" "$reviewer_limitations"
+assert_eq '5' "$(jq 'length' "$reviewer_limitations")" 'limitations that differ only in case or trailing punctuation merge into one entry'
+assert_eq 'alpha,beta' "$(jq -r '.[] | select(.text | test("not reachable"; "i")) | .agents | join(",")' "$reviewer_limitations")" \
+    'a merged limitation keeps every contributing agent'
+assert_eq 'A-1' "$(jq -r '.[] | select(.text | test("not reachable"; "i")) | .finding_refs[0].source_id' "$reviewer_limitations")" \
+    'a finding-level limitation keeps its finding ref'
+assert_eq 'final' "$(jq -r '.[] | select(.text | test("Migrations")) | .phases[0]' "$reviewer_limitations")" \
+    'the final completion limitation is attributed to the final phase'
+positive_evidence="$agg_root/positive.json"
+assert_true 'positive evidence aggregates with provenance' \
+    aggregate_positive_evidence "$agg_root/final.json" "$positive_evidence"
+assert_eq '3' "$(jq 'length' "$positive_evidence")" 'duplicate positive evidence merges into one entry'
+assert_eq 'alpha,beta' "$(jq -r '.[0].agents | join(",")' "$positive_evidence")" 'the entry shared by two agents is ranked first'
+assert_eq 'verified_safe' "$(jq -r '.[0].kind' "$positive_evidence")" 'evidence naming a file and line is labelled verified_safe'
+assert_eq 'no_issue_found' "$(jq -r '.[] | select(.text | test("No issues")) | .kind' "$positive_evidence")" 'evidence without a file or symbol is labelled no_issue_found'
+many_root="$agg_root/many"
+mkdir -p -- "$many_root"
+jq -n '{agent: "alpha", phase: "primary", findings: [], verification_limitations: [], positive_evidence: [range(0; 14) | "Item \(.) is fine"]}' >"$many_root/alpha.json"
+PRIMARY_FINDINGS_OUTPUTS[alpha]="$many_root/alpha.json"
+PRIMARY_FINDINGS_OUTPUTS[beta]="$agg_root/beta.json"
+aggregate_positive_evidence "$agg_root/final.json" "$positive_evidence"
+assert_eq '12' "$(jq 'length' "$positive_evidence")" 'positive evidence is capped at twelve entries'
+REVIEW_AGENTS=(alpha)
+unset 'PRIMARY_FINDINGS_OUTPUTS[beta]'
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"
