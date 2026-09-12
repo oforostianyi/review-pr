@@ -708,6 +708,40 @@ printf 'Prompt body\n' >"$known_prompt"
 append_known_limitations_to_prompt "$known_prompt" "$agg_root/known.json"
 assert_file_contains "$known_prompt" 'none' 'an empty record list is stated explicitly'
 
+diag_sidecar="$agg_root/final-diagnostics.json"
+jq -n '{contract: "ndjson-v1", schema_version: 1, phase: "final-synthesis",
+        orchestrator: [{type: "github_check_failed", scope: "run", phase: null, agent: null, detail: "phpunit: failure", refs: []},
+                       {type: "agent_attempt_timeout", scope: "agent", phase: "cross-review", agent: "beta", detail: "beta attempt 1/2 (timeout after 5s)", refs: []}],
+        reviewers: [{text: "Could not run the test suite", phases: ["primary"], agents: ["alpha", "beta"], finding_refs: ["alpha:F-1"]}],
+        positive_evidence: [{text: "src/File.php:10 guards the null path", kind: "verified_safe", phases: ["primary"], agents: ["alpha"]}]}' >"$diag_sidecar"
+diag_rendered="$agg_root/final-with-diagnostics.md"
+assert_true 'the final renderer accepts a diagnostics sidecar' \
+    render_final_findings_markdown "$final_canonical" "$diag_rendered" '' "$diag_sidecar"
+assert_file_contains "$diag_rendered" '<!-- review-pr:verification-limitations -->' 'the limitations section carries its marker'
+assert_file_contains "$diag_rendered" '## Verification limitations' 'the limitations section has the English heading'
+assert_file_contains "$diag_rendered" '**CI check failed:** phpunit: failure' 'an orchestrator record renders its label and detail'
+assert_file_contains "$diag_rendered" '(cross-review, beta)' 'an agent-scoped record names its phase and agent'
+assert_file_contains "$diag_rendered" 'Could not run the test suite (alpha, beta)' 'a merged reviewer limitation lists its agents'
+assert_file_contains "$diag_rendered" '<!-- review-pr:positive-evidence -->' 'the positive-evidence section carries its marker'
+assert_file_contains "$diag_rendered" '## Positive evidence' 'the positive-evidence section has the English heading'
+assert_file_contains "$diag_rendered" 'src/File.php:10 guards the null path (alpha)' 'positive evidence lists its agents'
+assert_true 'a final report with diagnostics sections passes the legacy structural validator' \
+    validate_final_markdown "$diag_rendered"
+FINALIZATION_LANGUAGE=UA
+configure_finalization_language
+render_final_findings_markdown "$final_canonical" "$diag_rendered" '' "$diag_sidecar"
+assert_file_contains "$diag_rendered" '## Обмеження перевірки' 'the limitations heading is localized'
+assert_file_contains "$diag_rendered" '## Позитивні докази' 'the positive-evidence heading is localized'
+assert_file_contains "$diag_rendered" '**Перевірка CI не пройшла:** phpunit: failure' 'orchestrator labels are localized'
+FINALIZATION_LANGUAGE=EN
+configure_finalization_language
+jq '.orchestrator = [] | .reviewers = [] | .positive_evidence = []' "$diag_sidecar" >"$agg_root/empty-diagnostics.json"
+render_final_findings_markdown "$final_canonical" "$diag_rendered" '' "$agg_root/empty-diagnostics.json"
+assert_false 'an empty diagnostics sidecar renders no limitations section' \
+    grep -q 'review-pr:verification-limitations' "$diag_rendered"
+assert_false 'an empty diagnostics sidecar renders no positive-evidence section' \
+    grep -q 'review-pr:positive-evidence' "$diag_rendered"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

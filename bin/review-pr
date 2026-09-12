@@ -107,6 +107,8 @@ FINAL_CLASSIFICATION_HEADING='## Classification table'
 FINAL_CLASSIFICATION_TABLE_HEADER='| # | Source | Claim | Classification | Severity | Verification |'
 FINAL_REJECTED_FINDINGS_HEADING='## Rejected findings'
 FINAL_DISPUTE_RESOLUTIONS_HEADING='## Dispute resolutions'
+FINAL_VERIFICATION_LIMITATIONS_HEADING='## Verification limitations'
+FINAL_POSITIVE_EVIDENCE_HEADING='## Positive evidence'
 FINAL_ACTIONABLE_FINDING_TEMPLATE='<!-- review-pr:anchor:changed-line -->
 ### [P0/P1/P2/P3] Title
 
@@ -890,6 +892,8 @@ configure_finalization_language() {
             FINAL_CLASSIFICATION_TABLE_HEADER='| # | Source | Claim | Classification | Severity | Verification |'
             FINAL_REJECTED_FINDINGS_HEADING='## Rejected findings'
             FINAL_DISPUTE_RESOLUTIONS_HEADING='## Dispute resolutions'
+            FINAL_VERIFICATION_LIMITATIONS_HEADING='## Verification limitations'
+            FINAL_POSITIVE_EVIDENCE_HEADING='## Positive evidence'
             FINAL_ACTIONABLE_FINDING_TEMPLATE='<!-- review-pr:anchor:changed-line -->
 ### [P0/P1/P2/P3] Title
 
@@ -974,6 +978,8 @@ Give a prioritized numbered list derived only from confirmed findings. Keep unce
             FINAL_CLASSIFICATION_TABLE_HEADER='| # | Джерело | Твердження | Класифікація | Серйозність | Перевірка |'
             FINAL_REJECTED_FINDINGS_HEADING='## Відхилені знахідки'
             FINAL_DISPUTE_RESOLUTIONS_HEADING='## Вирішення суперечок'
+            FINAL_VERIFICATION_LIMITATIONS_HEADING='## Обмеження перевірки'
+            FINAL_POSITIVE_EVIDENCE_HEADING='## Позитивні докази'
             FINAL_ACTIONABLE_FINDING_TEMPLATE='<!-- review-pr:anchor:changed-line -->
 ### [P0/P1/P2/P3] Заголовок
 
@@ -3706,6 +3712,7 @@ render_final_findings_markdown() {
     local canonical_file=$1
     local output_file=$2
     local resolutions_file=${3:-}
+    local diagnostics_file=${4:-}
     local problem_label=Problem failure_label='Failure scenario' evidence_label=Evidence recommendation_label=Recommendation
     local no_rejected='_None._'
     local resolutions_table_header='| # | Dispute | Kind | Status | Method | Observed | Basis |'
@@ -3774,6 +3781,44 @@ render_final_findings_markdown() {
                 (.value.basis + (if .value.basis_source == null then "" else " (`" + (.value.basis_source | cell) + "`)" end)) + " |" +
                 (if $measured then " " + (.value | measured_cell) + " |" else "" end)
             ' "$resolutions_file"
+        fi
+        if [[ -n "$diagnostics_file" && -s "$diagnostics_file" ]]; then
+            if [[ "$(jq '((.orchestrator // []) | length) + ((.reviewers // []) | length) > 0' "$diagnostics_file")" == true ]]; then
+                printf '\n%s\n\n%s\n\n' '<!-- review-pr:verification-limitations -->' "$FINAL_VERIFICATION_LIMITATIONS_HEADING"
+                jq -r --arg language "$FINALIZATION_LANGUAGE" '
+                    def cell: tostring | gsub("[\\r\\n]+"; " ");
+                    def type_label:
+                        if $language == "UA" then
+                            {github_review_threads_unavailable: "Гілки обговорення недоступні", github_review_threads_partial: "Гілки обговорення завантажені частково",
+                             github_check_failed: "Перевірка CI не пройшла", github_check_cancelled: "Перевірку CI скасовано", github_check_pending: "Перевірка CI не завершена", github_check_skipped: "Перевірку CI пропущено",
+                             changed_line_map_unavailable: "Карта змінених рядків недоступна", repository_facts_measurement_failed: "Факти репозиторію не виміряні",
+                             agent_attempt_timeout: "Спроба агента перевищила час", agent_attempt_output_limit: "Спроба агента досягла ліміту виводу", agent_attempt_invalid_output: "Спроба агента дала недійсний вивід", agent_attempt_failed: "Спроба агента не вдалася",
+                             pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів",
+                             measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна"}
+                        else
+                            {github_review_threads_unavailable: "Review threads unavailable", github_review_threads_partial: "Review threads partial",
+                             github_check_failed: "CI check failed", github_check_cancelled: "CI check cancelled", github_check_pending: "CI check pending", github_check_skipped: "CI check skipped",
+                             changed_line_map_unavailable: "Changed-line map unavailable", repository_facts_measurement_failed: "Repository facts not measured",
+                             agent_attempt_timeout: "Agent attempt timed out", agent_attempt_output_limit: "Agent attempt hit the output limit", agent_attempt_invalid_output: "Agent attempt produced invalid output", agent_attempt_failed: "Agent attempt failed",
+                             pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked",
+                             measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable"}
+                        end as $labels | ($labels[.type] // .type);
+                    def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
+                    def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
+                    def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
+                    def finding_refs: (.finding_refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
+                    ([(.orchestrator // [])[] | "- **" + type_label + ":** " + (.detail | cell) + provenance + refs] +
+                     [(.reviewers // [])[] | "- " + (.text | cell) + agents + finding_refs]) | join("\n")
+                ' "$diagnostics_file"
+            fi
+            if (( $(jq '(.positive_evidence // []) | length' "$diagnostics_file") > 0 )); then
+                printf '\n%s\n\n%s\n\n' '<!-- review-pr:positive-evidence -->' "$FINAL_POSITIVE_EVIDENCE_HEADING"
+                jq -r '
+                    def cell: tostring | gsub("[\\r\\n]+"; " ");
+                    def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
+                    [.positive_evidence[] | "- " + (.text | cell) + agents] | join("\n")
+                ' "$diagnostics_file"
+            fi
         fi
     } >"$output_file"
 }
