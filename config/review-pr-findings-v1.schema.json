@@ -7,6 +7,9 @@
       "$ref": "#/$defs/finding"
     },
     {
+      "$ref": "#/$defs/resolution"
+    },
+    {
       "$ref": "#/$defs/complete"
     }
   ],
@@ -252,6 +255,84 @@
           }
         }
       ]
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Opt-in final-synthesis record (reporting.dispute_resolution) that settles one cross-review dispute detected by the orchestrator.",
+      "required": [
+        "record",
+        "schema_version",
+        "dispute_id",
+        "primary_ref",
+        "conflicting_refs",
+        "final_source_id",
+        "dispute_kind",
+        "resolution_status",
+        "verification_method",
+        "command",
+        "observed",
+        "basis",
+        "basis_source",
+        "limitations"
+      ],
+      "properties": {
+        "record": {
+          "const": "resolution"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "dispute_id": {
+          "type": "string",
+          "pattern": "^dispute:[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "primary_ref": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "conflicting_refs": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
+        },
+        "final_source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "dispute_kind": {
+          "enum": ["factual", "severity", "mixed"]
+        },
+        "resolution_status": {
+          "enum": ["resolved", "uncertain", "not_applicable"]
+        },
+        "verification_method": {
+          "enum": ["source", "command", "test", "repository_rule", "runtime", "manual"]
+        },
+        "command": {
+          "type": ["array", "null"],
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Declarative argv array of the measurement. Recorded, never evaluated as a shell string."
+        },
+        "observed": {
+          "type": "string"
+        },
+        "basis": {
+          "enum": ["explicit_repository_rule", "skill_rule", "inferred_convention", "general_engineering"]
+        },
+        "basis_source": {
+          "type": ["string", "null"]
+        },
+        "limitations": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
     },
     "complete": {
       "type": "object",

@@ -246,6 +246,73 @@ assert_file_contains "$resolutions_prompt" 'none' \
 assert_true 'the resolution contract text names every record key' \
     grep -Fq -- 'dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations' <<<"$FINAL_RESOLUTION_CONTRACT_BLOCK"
 
+printf '%s\n' '[{"dispute_id":"dispute:beta:beta:F-001","primary_ref":{"agent":"beta","source_id":"beta:F-001"},"kind_hint":"factual","conflicting_refs":[{"agent":"alpha","source_id":"alpha:C-001","classification":"CONFIRMED","severity":"P1"},{"agent":"gamma","source_id":"gamma:C-001","classification":"REJECTED","severity":null}]}]' >"$disputes_file"
+resolution_fixture="$test_dir/fixtures/final-resolution-valid.ndjson"
+resolution_records="$test_root/resolution-records.json"
+resolution_final_canonical="$test_root/resolution-final-canonical.json"
+resolution_canonical="$test_root/resolutions-canonical.json"
+jq -s '[.[] | select(.record == "resolution")]' "$resolution_fixture" >"$resolution_records"
+jq -s '{findings: [.[] | select(.record == "finding")]}' "$resolution_fixture" >"$resolution_final_canonical"
+assert_true 'a measured factual resolution covering its dispute is valid' \
+    validate_final_resolutions "$resolution_records" "$resolution_final_canonical" "$disputes_file" "$resolution_canonical"
+assert_eq 'ndjson-v1' "$(jq -r '.contract' "$resolution_canonical")" 'the resolutions sidecar records its contract'
+assert_eq '1' "$(jq '.disputes | length' "$resolution_canonical")" 'the resolutions sidecar keeps the detected dispute list'
+assert_eq '' "$(describe_resolution_validation_failure "$resolution_records" "$resolution_final_canonical" "$disputes_file")" \
+    'a valid resolution set has no diagnostics'
+
+check_invalid_resolution() {
+    local label=$1 filter=$2 expected_detail=$3
+    local candidate="$test_root/resolution-${label}.json"
+    jq "$filter" "$resolution_records" >"$candidate"
+    assert_false "$label is rejected" \
+        validate_final_resolutions "$candidate" "$resolution_final_canonical" "$disputes_file" "$test_root/resolution-${label}-canonical.json"
+    assert_eq "$expected_detail" "$(describe_resolution_validation_failure "$candidate" "$resolution_final_canonical" "$disputes_file")" \
+        "$label has a stable diagnostic"
+}
+check_invalid_resolution manual-factual '.[0].verification_method = "manual"' \
+    'resolution[dispute:beta:beta:F-001].verification_method'
+check_invalid_resolution command-without-observed '.[0].observed = ""' \
+    'resolution[dispute:beta:beta:F-001].observed'
+check_invalid_resolution unknown-dispute '.[0].dispute_id = "dispute:beta:beta:F-999"' \
+    'resolutions.missing[dispute:beta:beta:F-001], resolutions.unknown[dispute:beta:beta:F-999]'
+check_invalid_resolution wrong-refs '.[0].conflicting_refs = [{agent: "alpha", source_id: "alpha:C-001"}]' \
+    'resolution[dispute:beta:beta:F-001].conflicting_refs'
+check_invalid_resolution wrong-final-link '.[0].final_source_id = "FINAL-404"' \
+    'resolution[dispute:beta:beta:F-001].final_source_id'
+check_invalid_resolution explicit-rule-without-source '.[0].basis = "explicit_repository_rule"' \
+    'resolution[dispute:beta:beta:F-001].basis_source'
+check_invalid_resolution shell-string-command '.[0].command = "rg -n changedBranch src/Changed.php"' \
+    'resolution[dispute:beta:beta:F-001].command'
+check_invalid_resolution not-applicable-factual '.[0].resolution_status = "not_applicable"' \
+    'resolution[dispute:beta:beta:F-001].resolution_status, resolution[dispute:beta:beta:F-001].confirmed_over_unresolved_factual'
+
+uncertain_resolution="$test_root/resolution-uncertain.json"
+jq '.[0].resolution_status = "uncertain" | .[0].verification_method = "manual" | .[0].command = null | .[0].observed = ""' "$resolution_records" >"$uncertain_resolution"
+assert_false 'a CONFIRMED finding over an unresolved factual dispute is rejected' \
+    validate_final_resolutions "$uncertain_resolution" "$resolution_final_canonical" "$disputes_file" "$test_root/resolution-uncertain-canonical.json"
+assert_eq 'resolution[dispute:beta:beta:F-001].confirmed_over_unresolved_factual' \
+    "$(describe_resolution_validation_failure "$uncertain_resolution" "$resolution_final_canonical" "$disputes_file")" \
+    'the diagnostic names the count-over-measurement violation'
+uncertain_final="$test_root/resolution-uncertain-final.json"
+jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$resolution_final_canonical" >"$uncertain_final"
+assert_true 'an UNCERTAIN finding over an unresolved factual dispute is valid' \
+    validate_final_resolutions "$uncertain_resolution" "$uncertain_final" "$disputes_file" "$test_root/resolution-uncertain-ok-canonical.json"
+
+inferred_resolution="$test_root/resolution-inferred.json"
+jq '.[0].basis = "inferred_convention"' "$resolution_records" >"$inferred_resolution"
+assert_false 'a P1 finding whose only basis is an inferred convention is rejected' \
+    validate_final_resolutions "$inferred_resolution" "$resolution_final_canonical" "$disputes_file" "$test_root/resolution-inferred-canonical.json"
+assert_eq 'resolution[dispute:beta:beta:F-001].inferred_convention_severity' \
+    "$(describe_resolution_validation_failure "$inferred_resolution" "$resolution_final_canonical" "$disputes_file")" \
+    'the diagnostic names the inferred-convention severity rule'
+
+severity_disputes="$test_root/severity-disputes.json"
+jq '.[0].kind_hint = "severity" | .[0].conflicting_refs[1].classification = "CONFIRMED" | .[0].conflicting_refs[1].severity = "P3"' "$disputes_file" >"$severity_disputes"
+severity_resolution="$test_root/resolution-severity.json"
+jq '.[0].dispute_kind = "severity" | .[0].resolution_status = "not_applicable" | .[0].verification_method = "manual" | .[0].command = null | .[0].observed = ""' "$resolution_records" >"$severity_resolution"
+assert_true 'a severity-only dispute may be reconciled without a measurement' \
+    validate_final_resolutions "$severity_resolution" "$resolution_final_canonical" "$severity_disputes" "$test_root/resolution-severity-canonical.json"
+
 final_records="$test_root/final-records.json"
 final_canonical="$test_root/final-canonical.json"
 jq -n '{

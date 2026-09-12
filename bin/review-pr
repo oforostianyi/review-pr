@@ -3353,6 +3353,89 @@ validate_final_ndjson_records() {
     ' "$records_file" >"$canonical_file"
 }
 
+# Shared jq definitions for resolution records. The caller binds $disputes
+# (the detected dispute list) and $findings (the canonical final findings).
+readonly RESOLUTION_JQ_DEFS='
+    def ref_key: .agent + ":" + .source_id;
+    def valid_ref: type == "object" and ((keys - ["agent", "source_id"]) | length) == 0 and
+        (.agent | type == "string" and length > 0) and (.source_id | type == "string" and length > 0);
+    def expected_refs($dispute): [$dispute.conflicting_refs[] | {agent, source_id}] | sort_by(.agent, .source_id);
+    def covering($r): [$findings[] | select(.source_id == $r.final_source_id)] | first // null;
+    def string_array: type == "array" and all(.[]; type == "string");
+    def argv_or_null: . == null or (type == "array" and length > 0 and all(.[]; type == "string" and length > 0));
+    def dispute_for($r): [$disputes[] | select(.dispute_id == $r.dispute_id)] | first // null;
+    def resolution_keys: ["basis", "basis_source", "command", "conflicting_refs", "dispute_id", "dispute_kind",
+        "final_source_id", "limitations", "observed", "primary_ref", "record", "resolution_status",
+        "schema_version", "verification_method"];
+    def resolution_problems:
+        . as $r | dispute_for($r) as $d | covering($r) as $f |
+        [
+          (if ((keys - resolution_keys) | length) > 0 or ((resolution_keys - keys) | length) > 0 then "keys" else empty end),
+          (if $r.record != "resolution" then "record" else empty end),
+          (if $r.schema_version != 1 then "schema_version" else empty end),
+          (if $d == null then empty
+           elif ($r.primary_ref | valid_ref | not) or ($r.primary_ref | {agent, source_id}) != ($d.primary_ref | {agent, source_id}) then "primary_ref" else empty end),
+          (if $d == null then empty
+           elif ($r.conflicting_refs | type == "array" and all(.[]; valid_ref)) | not then "conflicting_refs"
+           elif ($r.conflicting_refs | map({agent, source_id}) | sort_by(.agent, .source_id)) != expected_refs($d) then "conflicting_refs" else empty end),
+          (if $f == null then "final_source_id"
+           elif $d != null and (([$f.source_refs[] | ref_key]) | contains([expected_refs($d)[] | ref_key]) | not) then "final_source_id" else empty end),
+          (if ($r.dispute_kind | IN("factual", "severity", "mixed")) | not then "dispute_kind" else empty end),
+          (if ($r.resolution_status | IN("resolved", "uncertain", "not_applicable")) | not then "resolution_status"
+           elif $r.resolution_status == "not_applicable" and $r.dispute_kind != "severity" then "resolution_status" else empty end),
+          (if ($r.verification_method | IN("source", "command", "test", "repository_rule", "runtime", "manual")) | not then "verification_method"
+           elif $r.resolution_status == "resolved" and $r.dispute_kind != "severity" and $r.verification_method == "manual" then "verification_method" else empty end),
+          (if ($r.command | argv_or_null | not) then "command"
+           elif ($r.verification_method | IN("command", "test")) and $r.command == null then "command" else empty end),
+          (if ($r.observed | type == "string") | not then "observed"
+           elif $r.resolution_status == "resolved" and ($r.observed | length) == 0 then "observed" else empty end),
+          (if ($r.basis | IN("explicit_repository_rule", "skill_rule", "inferred_convention", "general_engineering")) | not then "basis" else empty end),
+          (if ($r.basis | IN("explicit_repository_rule", "skill_rule")) then (if ($r.basis_source | type == "string" and length > 0) | not then "basis_source" else empty end)
+           else (if $r.basis_source != null then "basis_source" else empty end) end),
+          (if ($r.limitations | string_array | not) then "limitations" else empty end),
+          (if $f != null and $r.dispute_kind != "severity" and $r.resolution_status != "resolved" and $f.classification == "CONFIRMED" then "confirmed_over_unresolved_factual" else empty end),
+          (if $f != null and $r.basis == "inferred_convention" and $f.classification == "CONFIRMED" and ($f.severity | IN("P0", "P1")) then "inferred_convention_severity" else empty end)
+        ];
+    def stream_problems:
+        ([.[].dispute_id | strings]) as $seen |
+        ([$disputes[].dispute_id]) as $expected |
+        (if (($expected - $seen) | length) > 0 then ["resolutions.missing[" + (($expected - $seen) | join(",")) + "]"] else [] end)
+        + (if (($seen - $expected) | length) > 0 then ["resolutions.unknown[" + (($seen - $expected) | unique | join(",")) + "]"] else [] end)
+        + (if ($seen | length) != ($seen | unique | length) then ["resolutions.duplicate"] else [] end);
+'
+
+describe_resolution_validation_failure() {
+    local resolutions_file=$1
+    local final_canonical_file=$2
+    local disputes_file=$3
+
+    jq -r --slurpfile disputes_wrapper "$disputes_file" --slurpfile canonical "$final_canonical_file" \
+        '$disputes_wrapper[0] as $disputes | $canonical[0].findings as $findings | '"$RESOLUTION_JQ_DEFS"'
+        ([.[] | objects]) as $records |
+        (($records | stream_problems)
+         + [$records[] | . as $r | (resolution_problems[]) | "resolution[" + ($r.dispute_id | tostring) + "]." + .])
+        | join(", ")
+    ' "$resolutions_file" 2>/dev/null || printf 'diagnostics_unavailable'
+}
+
+validate_final_resolutions() {
+    local resolutions_file=$1
+    local final_canonical_file=$2
+    local disputes_file=$3
+    local output_file=$4
+    local detail
+
+    detail=$(describe_resolution_validation_failure "$resolutions_file" "$final_canonical_file" "$disputes_file")
+    [[ -z "$detail" ]] || return 1
+    jq --slurpfile disputes "$disputes_file" '{
+        contract: "ndjson-v1",
+        schema_version: 1,
+        phase: "final-synthesis",
+        disputes: $disputes[0],
+        resolutions: .
+    }' "$resolutions_file" >"$output_file"
+}
+
 render_final_findings_markdown() {
     local canonical_file=$1
     local output_file=$2
