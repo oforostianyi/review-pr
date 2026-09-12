@@ -10,10 +10,23 @@ attempt=${REVIEW_PR_ATTEMPT:-1}
 phase_key=${phase// /-}
 phase_key=${phase_key//\//-}
 
+# The orchestrator supplies the prompt on stdin. Keep it: structured mocks
+# derive their required source refs and dispute list from its control blocks.
+prompt_text=$(cat)
 if [[ -n "${REVIEW_PR_MOCK_CAPTURE_DIR:-}" ]]; then
     mkdir -p -- "$REVIEW_PR_MOCK_CAPTURE_DIR"
-    cat >"${REVIEW_PR_MOCK_CAPTURE_DIR}/${phase_key}-${agent}-attempt-${attempt}.prompt"
+    printf '%s\n' "$prompt_text" >"${REVIEW_PR_MOCK_CAPTURE_DIR}/${phase_key}-${agent}-attempt-${attempt}.prompt"
 fi
+
+# Prints the JSON lines of one "===== BEGIN <name> =====" ... "===== END <name> =====" prompt block.
+prompt_block_lines() {
+    local name=$1
+    awk -v begin="===== BEGIN ${name} =====" -v end="===== END ${name} =====" '
+        $0 == begin {inside = 1; next}
+        $0 == end {inside = 0}
+        inside && /^\{/ {print}
+    ' <<<"$prompt_text"
+}
 
 if [[ -n "$scenario_directory" && -f "${scenario_directory}/${agent}-${phase_key}" ]]; then
     IFS= read -r behavior <"${scenario_directory}/${agent}-${phase_key}"
@@ -166,47 +179,71 @@ emit_valid_ndjson_primary() {
 }
 
 emit_valid_ndjson_cross() {
-    local source_agent=alpha
-    if [[ "$agent" == alpha ]]; then
-        source_agent=beta
+    # One record per required source ref. With "reject-first" the first listed
+    # ref is REJECTED and the rest CONFIRMED, which creates exactly one dispute
+    # when another cross-reviewer confirms that same primary finding.
+    local mode=${1:-confirm}
+    local refs_json source_agent
+    refs_json=$(prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s '.')
+    if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
+        source_agent=alpha
+        [[ "$agent" != alpha ]] || source_agent=beta
+        refs_json=$(jq -nc --arg a "$source_agent" '[{agent: $a, source_id: ($a + ":F-001")}]')
     fi
-    jq -nc --arg agent "$agent" --arg source_agent "$source_agent" '{
+    jq -c --arg agent "$agent" --arg mode "$mode" '
+        to_entries[] |
+        (.key == 0 and $mode == "reject-first") as $rejected |
+        {
         record: "finding",
         schema_version: 1,
-        source_id: ($agent + ":C-001"),
-        source_refs: [{agent: $source_agent, source_id: ($source_agent + ":F-001")}],
+        source_id: ($agent + ":C-" + (("00" + ((.key + 1) | tostring))[-3:])),
+        source_refs: [.value],
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
         anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
         evidence: ["The exact changed branch confirms the supplied finding."],
-        failure_scenario: "The fixture request reaches the changed branch and fails.",
+        failure_scenario: (if $rejected then null else "The fixture request reaches the changed branch and fails." end),
         recommendation: "Correct the changed branch.",
-        classification: "CONFIRMED",
-        severity: "P1",
+        classification: (if $rejected then "REJECTED" else "CONFIRMED" end),
+        severity: (if $rejected then null else "P1" end),
         category: "correctness",
-        contributing_agents: [$source_agent],
+        contributing_agents: [.value.agent],
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []}
-    }'
-    jq -nc '{
+    }' <<<"$refs_json"
+    jq -c '{
         record: "complete",
         schema_version: 1,
-        finding_count: 1,
-        summary: "The supplied fixture finding is confirmed.",
+        finding_count: length,
+        summary: "The supplied fixture findings were classified.",
         verification_limitations: [],
         positive_evidence: []
-    }'
+    }' <<<"$refs_json"
+}
+
+emit_resolution_records() {
+    local status=${1:-resolved} method=${2:-source}
+    prompt_block_lines 'REQUIRED RESOLUTIONS' | jq -c --arg status "$status" --arg method "$method" '{
+        record: "resolution", schema_version: 1, dispute_id, primary_ref,
+        conflicting_refs: [.conflicting_refs[] | {agent, source_id}],
+        final_source_id: "FINAL-001", dispute_kind: "factual", resolution_status: $status,
+        verification_method: $method, command: null,
+        observed: (if $status == "resolved" then "The changed branch was read directly; the disputed premise holds." else "" end),
+        basis: "general_engineering", basis_source: null, limitations: []}'
 }
 
 emit_valid_ndjson_final() {
-    jq -nc '{
+    local resolution_status=${1:-resolved} resolution_method=${2:-source}
+    local refs_json
+    refs_json=$(prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s '.')
+    if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
+        refs_json='[{"agent":"alpha","source_id":"alpha:C-001"},{"agent":"beta","source_id":"beta:C-001"}]'
+    fi
+    jq -c '{
         record: "finding",
         schema_version: 1,
         source_id: "FINAL-001",
-        source_refs: [
-            {agent: "alpha", source_id: "alpha:C-001"},
-            {agent: "beta", source_id: "beta:C-001"}
-        ],
+        source_refs: .,
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
         anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
@@ -216,11 +253,12 @@ emit_valid_ndjson_final() {
         classification: "CONFIRMED",
         severity: "P1",
         category: "correctness",
-        contributing_agents: ["alpha", "beta"],
+        contributing_agents: ([.[].agent] | unique),
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []},
         include_in_rejected_summary: false
-    }'
+    }' <<<"$refs_json"
+    emit_resolution_records "$resolution_status" "$resolution_method"
     jq -nc '{
         record: "complete",
         schema_version: 1,
@@ -320,6 +358,14 @@ case "$behavior" in
         printf '%s\n' 'Here is the requested structured review:'
         emit_valid_ndjson_primary
         write_usage null 58
+        ;;
+    cross-ndjson-rejected)
+        emit_valid_ndjson_cross reject-first
+        write_usage null 57
+        ;;
+    final-resolution-uncertain)
+        emit_valid_ndjson_final uncertain manual
+        write_usage null 57
         ;;
     cross-ndjson-preamble)
         printf '%s\n' 'Here is the requested structured cross-review:'

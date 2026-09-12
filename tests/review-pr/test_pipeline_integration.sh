@@ -799,6 +799,77 @@ run_ndjson_cross_case() {
         'structured final rerun publishes its own canonical sidecar'
 }
 
+write_three_agent_config() {
+    local config_file=$1 checkout=$2 reviews=$3
+    write_config "$config_file" "$checkout" "$reviews" 3
+    jq --arg runner "$test_dir/mock-agent-runner.sh" '
+        .agents.gamma = {label: "Gamma", enabled: true, model: "mock-gamma", effort: "", runner: $runner} |
+        .reviewers = ["alpha", "beta", "gamma"] |
+        .reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"} |
+        .reporting.dispute_resolution = true' "$config_file" >"$config_file.tmp"
+    mv -- "$config_file.tmp" "$config_file"
+}
+
+run_dispute_resolution_case() {
+    local case_dir="$suite_root/dispute-resolution"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem final_prompt
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture dispute resolution.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-rejected\n' >"$scenarios/gamma-cross-review"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "dispute-resolution pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    final_prompt="$capture/final-synthesis-alpha-attempt-1.prompt"
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'a disputed run completes with resolution records'
+    assert_file_contains "$final_prompt" '===== BEGIN REQUIRED RESOLUTIONS =====' 'the finalizer receives the detected disputes'
+    assert_file_contains "$final_prompt" '"dispute_id":"dispute:alpha:alpha:F-001"' 'the disputed primary finding is listed by its stable id'
+    assert_file_exists "$work_dir/${stem}-final-resolutions.json" 'the run publishes a resolutions sidecar'
+    assert_eq '1' "$(jq '.resolutions | length' "$work_dir/${stem}-final-resolutions.json")" 'one resolution per detected dispute'
+    assert_eq "${stem}-final-resolutions.json" "$(jq -r '.artifacts.final_resolutions' "$manifest")" 'the manifest records the resolutions sidecar'
+    assert_eq 'true' "$(jq -r '.reporting.dispute_resolution' "$manifest")" 'the manifest records the enabled feature'
+    assert_file_contains "${work_dir%/work}/${stem}-final.md" '<!-- review-pr:dispute-resolutions -->' 'the final report renders the dispute table'
+}
+
+run_dispute_resolution_failure_case() {
+    local case_dir="$suite_root/dispute-resolution-failure"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture dispute resolution failure.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-rejected\n' >"$scenarios/gamma-cross-review"
+    printf 'final-resolution-uncertain\n' >"$scenarios/alpha-final-synthesis"
+    printf 'final-resolution-uncertain\n' >"$scenarios/alpha-final-findings-repair"
+
+    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'a CONFIRMED finding over an unmeasured factual dispute must fail final synthesis'
+    fi
+    pass 'a CONFIRMED finding over an unmeasured factual dispute fails final synthesis'
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_contains "$case_dir/stderr.log" 'dispute_resolution_validation_failed: resolution[dispute:alpha:alpha:F-001].confirmed_over_unresolved_factual' \
+        'the failure names the count-over-measurement violation'
+    assert_file_not_exists "$work_dir/${stem}-final-resolutions.json" 'no resolutions sidecar is published for an invalid final'
+    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" 'no final report is published for an invalid final'
+}
+
 run_ndjson_cross_resume_case() {
     local case_dir="$suite_root/ndjson-cross-resume"
     local reviews="$case_dir/reviews"
@@ -1114,6 +1185,8 @@ run_ndjson_unsafe_final_repair_case() {
 run_full_success_case
 run_ndjson_primary_case
 run_ndjson_cross_case
+run_dispute_resolution_case
+run_dispute_resolution_failure_case
 run_ndjson_cross_resume_case
 run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case
