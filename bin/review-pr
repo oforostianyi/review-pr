@@ -6800,8 +6800,8 @@ create_full_manifest() {
     for agent in "${REVIEW_AGENTS[@]}"; do
         labels_json=$(jq -c \
             --arg agent "$agent" \
-            --arg label "$(agent_label "$agent")" \
-            '. + {($agent): $label}' <<<"$labels_json")
+            --arg agent_label "$(agent_label "$agent")" \
+            '. + {($agent): $agent_label}' <<<"$labels_json")
         timeout_seconds_json=$(jq -c \
             --arg agent "$agent" \
             --argjson timeout_seconds "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
@@ -9167,10 +9167,10 @@ EOF
                     summary_effort=$FINALIZATION_EFFORT
                 fi
             fi
-            summary=$(jq -c --arg agent "$agent" --arg label "$(agent_label "$agent")" --arg phase "$phase" \
+            summary=$(jq -c --arg agent "$agent" --arg agent_label "$(agent_label "$agent")" --arg phase "$phase" \
                 --arg model "$summary_model" --arg effort "$summary_effort" \
                 --arg result "$result" --argjson passed "$status_json" \
-                '. + [{agent:$agent,"label":$label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
+                '. + [{agent:$agent,"label":$agent_label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
             printf '%-18s %-8s %s\n' "$(agent_label "$agent")" "$phase" "${result^^}"
         done
     done
