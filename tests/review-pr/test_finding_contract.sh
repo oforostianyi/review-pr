@@ -587,6 +587,51 @@ assert_file_contains "$rendered_with_resolutions" '| exit 0 |' 'an executed meas
 EXECUTE_MEASUREMENTS_ENABLED=false
 MEASUREMENT_WORKING_DIRECTORY=''
 
+diag_root="$test_root/diagnostics"
+mkdir -p -- "$diag_root"
+PR_REVIEW_THREADS_STATUS=partial
+PR_REVIEW_THREADS_REASON=pagination_incomplete
+PR_CHECK_RUNS_JSON='[{"name":"phpunit","status":"completed","conclusion":"failure"},{"name":"phpunit","status":"completed","conclusion":"failure"},{"name":"lint","status":"in_progress","conclusion":null},{"name":"docs","status":"completed","conclusion":"skipped"},{"name":"build","status":"completed","conclusion":"success"}]'
+CHANGED_LINE_MAP_FILE="$diag_root/missing-map.json"
+REFERENCE_ANCESTRY_STATUS=measurement_failed
+RERUN_FINAL=true
+MANIFEST_FILE="$diag_root/manifest.json"
+jq -n '{attempt_failures: {primary: [], cross_review: ["beta attempt 1/2 (timeout after 5s)", "gamma attempt 1/2 (output token limit reached (32768 output tokens))"]},
+        failures: {primary: [], cross_review: [], final: [], comparison: []},
+        artifacts: {usage: {primary: {pi: "pi-usage.json"}, cross_review: {}, final: null, comparison: null}}}' >"$MANIFEST_FILE"
+jq -n '{agent: "pi", phase: "primary review", pi_guard: {executed: 40, duplicates_blocked: 3, budget_blocked: 0, terminated: false}}' >"$diag_root/pi-usage.json"
+WORK_DIR=$diag_root
+FINAL_PROCESSED_RESOLUTIONS_FILE="$diag_root/resolutions.json"
+jq '.resolutions[0].measurement = {executed: false, skipped_reason: "not_allowlisted"}' "$resolution_canonical" >"$FINAL_PROCESSED_RESOLUTIONS_FILE"
+orchestrator_diagnostics="$diag_root/orchestrator.json"
+assert_true 'orchestrator diagnostics are collected from the run state' \
+    collect_orchestrator_diagnostics "$orchestrator_diagnostics"
+assert_eq 'agent_attempt_output_limit,agent_attempt_timeout,changed_line_map_unavailable,checkout_unavailable,github_check_failed,github_check_pending,github_check_skipped,github_review_threads_partial,measurement_skipped,pi_guard_duplicates_blocked,repository_facts_measurement_failed' \
+    "$(jq -r '[.[].type] | sort | join(",")' "$orchestrator_diagnostics")" \
+    'every known orchestrator limitation becomes exactly one typed record'
+assert_eq '1' "$(jq '[.[] | select(.type == "github_check_failed")] | length' "$orchestrator_diagnostics")" \
+    'a duplicated failed check is recorded once'
+assert_eq 'phpunit: failure' "$(jq -r '.[] | select(.type == "github_check_failed") | .detail' "$orchestrator_diagnostics")" \
+    'a failed check names the check and its conclusion'
+assert_eq 'cross-review' "$(jq -r '.[] | select(.type == "agent_attempt_timeout") | .phase' "$orchestrator_diagnostics")" \
+    'an attempt failure keeps its phase'
+assert_eq 'beta' "$(jq -r '.[] | select(.type == "agent_attempt_timeout") | .agent' "$orchestrator_diagnostics")" \
+    'an attempt failure keeps its agent'
+assert_eq 'dispute:beta:beta:F-001' "$(jq -r '.[] | select(.type == "measurement_skipped") | .refs[0]' "$orchestrator_diagnostics")" \
+    'a skipped measurement references its dispute'
+assert_eq 'pi' "$(jq -r '.[] | select(.type == "pi_guard_duplicates_blocked") | .agent' "$orchestrator_diagnostics")" \
+    'guard counters from the published usage summary become a diagnostic'
+PR_REVIEW_THREADS_STATUS=available
+PR_CHECK_RUNS_JSON='[]'
+REFERENCE_ANCESTRY_STATUS=measured
+RERUN_FINAL=false
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+FINAL_PROCESSED_RESOLUTIONS_FILE=''
+jq -n '{attempt_failures: {primary: [], cross_review: []}, failures: {}, artifacts: {usage: {primary: {}, cross_review: {}}}}' >"$MANIFEST_FILE"
+collect_orchestrator_diagnostics "$orchestrator_diagnostics"
+assert_eq '0' "$(jq 'length' "$orchestrator_diagnostics")" 'a clean run has no orchestrator diagnostics'
+WORK_DIR=$test_root
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

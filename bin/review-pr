@@ -3558,6 +3558,80 @@ attach_measurements() {
     rm -f -- "$measurement_json"
 }
 
+# Diagnostics: typed records of the verification limits the orchestrator itself
+# measured during the run. They never depend on model text.
+pi_guard_usage_object() {
+    local guard_log=$1
+    if [[ -s "$guard_log" ]]; then
+        jq -s '{
+            executed: ([.[] | select(.event == "allowed")] | length),
+            duplicates_blocked: ([.[] | select(.event == "duplicate_blocked")] | length),
+            budget_blocked: ([.[] | select(.event == "budget_blocked" or .event == "terminated")] | length),
+            terminated: (any(.[]; .event == "terminated"))
+        }' "$guard_log"
+    else
+        printf '%s\n' '{"executed":0,"duplicates_blocked":0,"budget_blocked":0,"terminated":false}'
+    fi
+}
+
+collect_orchestrator_diagnostics() {
+    local output_file=$1
+    local manifest_json='{}' resolutions_json='null' usage_records='[]' map_available=true rerun=false usage_path
+
+    [[ -z "${MANIFEST_FILE:-}" || ! -s "$MANIFEST_FILE" ]] || manifest_json=$(cat -- "$MANIFEST_FILE")
+    [[ -z "${FINAL_PROCESSED_RESOLUTIONS_FILE:-}" || ! -s "$FINAL_PROCESSED_RESOLUTIONS_FILE" ]] || resolutions_json=$(cat -- "$FINAL_PROCESSED_RESOLUTIONS_FILE")
+    [[ -s "${CHANGED_LINE_MAP_FILE:-}" ]] || map_available=false
+    [[ "${RERUN_FINAL:-false}" != true ]] || rerun=true
+    usage_records=$(
+        jq -r '[.artifacts.usage.primary // {}, .artifacts.usage.cross_review // {}] | .[] | to_entries[] | .value | strings' <<<"$manifest_json" 2>/dev/null |
+        while IFS= read -r usage_path; do
+            [[ -n "$usage_path" && -s "${WORK_DIR}/${usage_path}" ]] || continue
+            jq -c 'select(has("pi_guard")) | {agent, phase, pi_guard}' "${WORK_DIR}/${usage_path}" 2>/dev/null || true
+        done | jq -s '.'
+    )
+    jq -n \
+        --arg threads_status "${PR_REVIEW_THREADS_STATUS:-unavailable}" \
+        --arg threads_reason "${PR_REVIEW_THREADS_REASON:-}" \
+        --argjson checks "${PR_CHECK_RUNS_JSON:-[]}" \
+        --argjson map_available "$map_available" \
+        --arg ancestry "${REFERENCE_ANCESTRY_STATUS:-}" \
+        --argjson manifest "$manifest_json" \
+        --argjson rerun "$rerun" \
+        --argjson resolutions "$resolutions_json" \
+        --argjson usage "$usage_records" '
+        def rec($type; $scope; $phase; $agent; $detail; $refs):
+            {type: $type, scope: $scope, phase: $phase, agent: $agent, detail: $detail, refs: $refs};
+        def attempt_regex: "^(?<agent>[A-Za-z0-9._-]+) attempt (?<n>[0-9]+)/[0-9]+ \\((?<reason>.*)\\)$";
+        [
+          (if $threads_status == "unavailable" then rec("github_review_threads_unavailable"; "run"; null; null; (if $threads_reason == "" then "review-thread state unavailable" else $threads_reason end); [])
+           elif $threads_status == "partial" then rec("github_review_threads_partial"; "run"; null; null; (if $threads_reason == "" then "review-thread state partial" else $threads_reason end); [])
+           else empty end),
+          ($checks[] | . as $c | (.conclusion // "") as $con | (.status // "") as $st | (($c.name // "unnamed") + ": ") as $name |
+            if $st != "completed" then rec("github_check_pending"; "run"; null; null; ($name + (if $st == "" then "pending" else $st end)); [])
+            elif ($con | IN("failure", "timed_out", "action_required", "startup_failure")) then rec("github_check_failed"; "run"; null; null; ($name + $con); [])
+            elif $con == "cancelled" then rec("github_check_cancelled"; "run"; null; null; ($name + $con); [])
+            elif ($con | IN("skipped", "neutral")) then rec("github_check_skipped"; "run"; null; null; ($name + $con); [])
+            else empty end),
+          (if $map_available then empty else rec("changed_line_map_unavailable"; "run"; null; null; "no RIGHT-side changed-line map was recorded for this run"; []) end),
+          (if ($ancestry | IN("measurement_failed", "commit_unavailable")) then rec("repository_facts_measurement_failed"; "run"; null; null; ("reference ancestry: " + $ancestry); []) else empty end),
+          (if $rerun then rec("checkout_unavailable"; "run"; null; null; "artifact-only final rerun: no repository checkout, measurements were not executed"; []) else empty end),
+          (($manifest.attempt_failures // {}) | to_entries[] | .key as $phase | (.value // [])[] | . as $text |
+            (if test(attempt_regex) then capture(attempt_regex) else {agent: null, reason: $text} end) as $m |
+            ($m.reason // $text) as $reason |
+            (if ($reason | test("timeout")) then "agent_attempt_timeout"
+             elif ($reason | test("output token limit")) then "agent_attempt_output_limit"
+             elif ($reason | test("invalid")) then "agent_attempt_invalid_output"
+             else "agent_attempt_failed" end) as $type |
+            rec($type; "agent"; ($phase | gsub("_"; "-")); $m.agent; $text; [])),
+          (($resolutions.resolutions // [])[] | select(.measurement != null and .measurement.executed == false) |
+            rec("measurement_skipped"; "finding"; "final"; null; (.measurement.skipped_reason // "unknown"); [.dispute_id])),
+          ($usage[] | . as $u |
+            (if ($u.pi_guard.duplicates_blocked // 0) > 0 then rec("pi_guard_duplicates_blocked"; "agent"; $u.phase; $u.agent; (($u.pi_guard.duplicates_blocked | tostring) + " identical tool calls blocked"); []) else empty end),
+            (if ($u.pi_guard.budget_blocked // 0) > 0 or ($u.pi_guard.terminated // false) then rec("pi_guard_budget_exhausted"; "agent"; $u.phase; $u.agent; (($u.pi_guard.budget_blocked | tostring) + " calls blocked after the budget" + (if ($u.pi_guard.terminated // false) then ", agent terminated" else "" end)); []) else empty end))
+        ] | unique_by(.type, .detail) | sort_by(.type, .detail)
+    ' >"$output_file"
+}
+
 render_final_findings_markdown() {
     local canonical_file=$1
     local output_file=$2
@@ -5690,6 +5764,11 @@ start_agent() {
                 extract_token_usage "$response_file" "$usage_file" "$usage_json_file" "$agent" "$phase" "$model" "$effort"
                 if [[ -n "$pi_guard_log_file" ]]; then
                     summarize_pi_guard_log "$pi_guard_log_file" "${AGENT_MAX_TOOL_CALLS[$agent]}" >>"$log_file"
+                    if pi_guard_usage_object "$pi_guard_log_file" >"${usage_json_file}.guard" \
+                        && jq --slurpfile guard "${usage_json_file}.guard" '. + {pi_guard: $guard[0]}' "$usage_json_file" >"${usage_json_file}.tmp"; then
+                        mv -- "${usage_json_file}.tmp" "$usage_json_file"
+                    fi
+                    rm -f -- "${usage_json_file}.guard" "${usage_json_file}.tmp"
                 fi
                 if (( exit_status == 0 )); then
                     pi_stop_reason=$(jq -r '.stop_reason // ""' "$usage_json_file" 2>/dev/null || true)
