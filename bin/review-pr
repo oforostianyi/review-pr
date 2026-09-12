@@ -3361,7 +3361,7 @@ validate_final_ndjson_records() {
 # (the detected dispute list) and $findings (the canonical final findings).
 readonly RESOLUTION_JQ_DEFS='
     def ref_key: .agent + ":" + .source_id;
-    def valid_ref: type == "object" and ((keys - ["agent", "source_id"]) | length) == 0 and
+    def valid_ref: type == "object" and ((keys - ["agent", "source_id", "classification", "severity"]) | length) == 0 and
         (.agent | type == "string" and length > 0) and (.source_id | type == "string" and length > 0);
     def expected_refs($dispute): [$dispute.conflicting_refs[] | {agent, source_id}] | sort_by(.agent, .source_id);
     def covering($r): [$findings[] | select(.source_id == $r.final_source_id)] | first // null;
@@ -3383,7 +3383,7 @@ readonly RESOLUTION_JQ_DEFS='
            elif ($r.conflicting_refs | type == "array" and all(.[]; valid_ref)) | not then "conflicting_refs"
            elif ($r.conflicting_refs | map({agent, source_id}) | sort_by(.agent, .source_id)) != expected_refs($d) then "conflicting_refs" else empty end),
           (if $f == null then "final_source_id"
-           elif $d != null and (([$f.source_refs[] | ref_key]) | contains([expected_refs($d)[] | ref_key]) | not) then "final_source_id" else empty end),
+           elif $d != null and ((([$f.source_refs[] | ref_key]) - ([$f.source_refs[] | ref_key] - [expected_refs($d)[] | ref_key])) | length) == 0 then "final_source_id" else empty end),
           (if ($r.dispute_kind | IN("factual", "severity", "mixed")) | not then "dispute_kind" else empty end),
           (if ($r.resolution_status | IN("resolved", "uncertain", "not_applicable")) | not then "resolution_status"
            elif $r.resolution_status == "not_applicable" and $r.dispute_kind != "severity" then "resolution_status" else empty end),
@@ -3436,7 +3436,7 @@ validate_final_resolutions() {
         schema_version: 1,
         phase: "final-synthesis",
         disputes: $disputes[0],
-        resolutions: .
+        resolutions: [.[] | .primary_ref |= {agent, source_id} | .conflicting_refs |= map({agent, source_id})]
     }' "$resolutions_file" >"$output_file"
 }
 
@@ -4549,8 +4549,8 @@ append_required_source_refs_to_prompt() {
 }
 
 readonly FINAL_RESOLUTION_CONTRACT_BLOCK='Dispute resolutions: when the prompt contains a REQUIRED RESOLUTIONS block, emit exactly one resolution record per listed dispute, before the complete record, and no other resolution records. A resolution record has exactly these keys: record, schema_version, dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations.
-- record is "resolution", schema_version is 1; dispute_id, primary_ref, and conflicting_refs ({"agent","source_id"} pairs) are copied exactly from the block.
-- final_source_id names the finding record in this stream that covers the dispute; its source_refs must include every conflicting ref.
+- record is "resolution", schema_version is 1; dispute_id, primary_ref, and conflicting_refs are copied from the block as listed (only agent and source_id are compared; the listed classification and severity may stay).
+- final_source_id names the finding record in this stream that carries the decision for the dispute; its source_refs must include at least one conflicting ref (a compound primary finding may have been split across several final records).
 - dispute_kind is factual (the reviewers disagree about what the code does or whether something exists), severity (they agree on the fact and disagree on impact), or mixed.
 - resolution_status is resolved, uncertain, or not_applicable; not_applicable is allowed only for a severity dispute.
 - verification_method is source, command, test, repository_rule, runtime, or manual. A factual or mixed dispute is resolved only by a method other than manual, and its covering finding may be CONFIRMED only when the dispute is resolved. When the fact could not be measured, set resolution_status to uncertain and classify the covering finding UNCERTAIN: the number of reviewers never settles a fact.

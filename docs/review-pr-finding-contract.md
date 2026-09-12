@@ -148,9 +148,13 @@ One additional record type in the same final NDJSON stream, before the terminal 
 Fields and their rules:
 
 - `dispute_id`, `primary_ref`, `conflicting_refs`: copied from the `REQUIRED RESOLUTIONS` block;
-  `conflicting_refs` must equal the listed cross-review refs, nothing more or less.
-- `final_source_id`: the `source_id` of the final finding record that covers this dispute. That
-  record must exist and its `source_refs` must include every `conflicting_refs` entry.
+  `conflicting_refs` must name exactly the listed cross-review refs by `agent` and `source_id`.
+  The listed `classification` and `severity` may be copied along; the canonical sidecar keeps only
+  `agent` and `source_id`.
+- `final_source_id`: the `source_id` of the final finding record that carries the decision for
+  this dispute. That record must exist and its `source_refs` must include at least one
+  `conflicting_refs` entry: a compound primary finding is often split by the cross-reviewers into
+  topics that land in different final records, so one record cannot be required to cover them all.
 - `dispute_kind`: `factual` (the reviewers disagree about what the code does or whether something
   exists), `severity` (they agree on the fact and disagree on impact), or `mixed`.
 - `resolution_status`: `resolved`, `uncertain`, or `not_applicable` (allowed only for `severity`

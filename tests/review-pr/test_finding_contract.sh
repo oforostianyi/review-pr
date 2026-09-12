@@ -269,6 +269,28 @@ check_invalid_resolution() {
     assert_eq "$expected_detail" "$(describe_resolution_validation_failure "$candidate" "$resolution_final_canonical" "$disputes_file")" \
         "$label has a stable diagnostic"
 }
+enriched_refs="$test_root/resolution-enriched-refs.json"
+jq '.[0].conflicting_refs = [{agent: "alpha", source_id: "alpha:C-001", classification: "CONFIRMED", severity: "P1"}, {agent: "gamma", source_id: "gamma:C-001", classification: "REJECTED", severity: null}]' \
+    "$resolution_records" >"$enriched_refs"
+assert_true 'conflicting refs copied with their listed classification and severity are accepted' \
+    validate_final_resolutions "$enriched_refs" "$resolution_final_canonical" "$disputes_file" "$test_root/resolution-enriched-canonical.json"
+assert_eq '[{"agent":"alpha","source_id":"alpha:C-001"},{"agent":"gamma","source_id":"gamma:C-001"}]' \
+    "$(jq -c '.resolutions[0].conflicting_refs' "$test_root/resolution-enriched-canonical.json")" \
+    'the canonical sidecar keeps only agent and source_id in conflicting refs'
+
+split_final="$test_root/resolution-split-final.json"
+jq '.findings[0].source_refs = [{agent: "alpha", source_id: "alpha:C-001"}] | .findings += [(.findings[0] | .source_id = "FINAL-002" | .source_refs = [{agent: "gamma", source_id: "gamma:C-001"}])]' \
+    "$resolution_final_canonical" >"$split_final"
+assert_true 'a resolution may name a final record that covers only part of the conflicting refs' \
+    validate_final_resolutions "$resolution_records" "$split_final" "$disputes_file" "$test_root/resolution-split-canonical.json"
+unrelated_final="$test_root/resolution-unrelated-final.json"
+jq '.findings[0].source_refs = [{agent: "alpha", source_id: "alpha:C-777"}]' "$resolution_final_canonical" >"$unrelated_final"
+assert_false 'a resolution may not name a final record that shares no conflicting ref' \
+    validate_final_resolutions "$resolution_records" "$unrelated_final" "$disputes_file" "$test_root/resolution-unrelated-canonical.json"
+assert_eq 'resolution[dispute:beta:beta:F-001].final_source_id' \
+    "$(describe_resolution_validation_failure "$resolution_records" "$unrelated_final" "$disputes_file")" \
+    'the diagnostic names the unlinked final record'
+
 check_invalid_resolution manual-factual '.[0].verification_method = "manual"' \
     'resolution[dispute:beta:beta:F-001].verification_method'
 check_invalid_resolution command-without-observed '.[0].observed = ""' \
