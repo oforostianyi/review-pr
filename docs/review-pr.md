@@ -348,6 +348,24 @@ Structured cross-review requires `primary: "ndjson-v1"` and `reporting.compariso
 
 Structured final synthesis requires structured primary and cross-review inputs plus `comparison_sections.final: "none"` or `"standalone"`. The finalizer receives canonical cross-review JSON rather than localized Markdown. Every cross-review `{agent, source_id}` must be covered, unknown refs fail validation, and only confirmed records may carry `P0`–`P3`. The model never restates primary provenance: the orchestrator derives it through the validated cross-review graph and stores it in the canonical final sidecar. The final Markdown header, metadata table, classification table, actionable findings, rejected-findings section, localization, and anchor markers are rendered deterministically. `include_in_rejected_summary` only controls whether an important rejected decision is explained in that human section.
 
+### Dispute resolutions (opt-in)
+
+`reporting.dispute_resolution: true` (default `false`) requires `finding_contract.final: "ndjson-v1"` and adds machine-readable resolutions of cross-review disagreements to final synthesis:
+
+```json
+{
+  "reporting": {
+    "finding_contract": {"primary": "ndjson-v1", "cross_review": "ndjson-v1", "final": "ndjson-v1"},
+    "comparison_sections": {"cross_review": "none", "final": "standalone"},
+    "dispute_resolution": true
+  }
+}
+```
+
+The orchestrator detects a dispute whenever the cross-review records that reference the same primary finding disagree in classification, or all confirm it with different severities. Each dispute receives a stable id derived from the primary ref (`dispute:<agent>:<source_id>`) and is listed in a `REQUIRED RESOLUTIONS` block of the final prompt. The finalizer answers with exactly one `resolution` record per dispute in the same NDJSON stream: the dispute kind (`factual`, `severity`, `mixed`), the status (`resolved`, `uncertain`, `not_applicable`), the verification method (`source`, `command`, `test`, `repository_rule`, `runtime`, `manual`), an optional declarative `command` as an argv array that the orchestrator records but never executes, what was observed, and whether the basis is an explicit repository rule (with its path), a configured skill rule, an inferred convention, or general engineering judgement.
+
+Validation enforces the principle that reviewer count never settles a fact: a factual or mixed dispute is `resolved` only with a method other than `manual`; a finding that covers an unresolved factual dispute cannot stay `CONFIRMED`; `not_applicable` is allowed only for severity-only disputes; and a finding whose only basis is an inferred convention cannot carry `P0` or `P1`. Failures use the granular reason format, for example `dispute_resolution_validation_failed: resolution[dispute:codex:codex.p1.notes].verification_method`, and the bounded schema repair freezes every resolution decision. Validated records are published as `work/*-final-resolutions.json` (with the detected dispute list), recorded in the manifest as `artifacts.final_resolutions`, and rendered as a localized `Dispute resolutions` table under a language-independent marker in the final report. Runs without the flag are unchanged; a resolution record they receive fails with `unexpected_resolution_records`. `--show-config` prints `Dispute resolution: enabled|disabled`.
+
 There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
 ### Real-agent contract test

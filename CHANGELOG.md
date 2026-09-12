@@ -4,6 +4,18 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `reporting.dispute_resolution` for structured final synthesis. The orchestrator detects
+  cross-review disagreements about the same primary finding, lists them in a `REQUIRED
+  RESOLUTIONS` prompt block, and validates one `resolution` record per dispute: dispute kind,
+  status, verification method, a recorded argv `command`, the observed result, and the basis
+  (explicit repository rule, skill rule, inferred convention, or general engineering). A factual
+  dispute cannot be resolved by reviewer count, an unresolved factual premise cannot back a
+  `CONFIRMED` finding, and an inferred convention cannot carry `P0`/`P1`. Validated records are
+  published as `*-final-resolutions.json`, recorded in the manifest, frozen during schema repair,
+  and rendered as a localized `Dispute resolutions` table. Runs without the flag are unchanged.
+
 ### Fixed
 
 - Primary, cross-review, and final `ndjson-v1` prompts now state the anchor policy explicitly: a
