@@ -102,6 +102,17 @@ PATH="$test_root/bin:$PATH" \
 assert_eq true "$(jq -r '.passed' "$codex_output/summary.json")" \
     'built-in Codex contract testing bypasses only the Git repository preflight'
 
+split_output="$test_root/codex-split"
+PATH="$test_root/bin:$PATH" REVIEW_PR_FAKE_CODEX_SPLIT_MESSAGES=true \
+    "$repo_root/bin/review-pr" --config "$config_file" contract-test \
+        --agent codex --phase primary --output "$split_output" >/dev/null 2>"$test_root/codex-split.stderr" || true
+assert_eq true "$(jq -r '.passed' "$split_output/summary.json" 2>/dev/null)" \
+    'a Codex answer spread over several agent messages is joined into one stream'
+assert_eq 2 "$(grep -c '^{' "$split_output/codex-primary-raw.ndjson" 2>/dev/null || printf 0)" \
+    'the joined Codex stream keeps every agent message line'
+assert_file_contains "$split_output/codex-primary-stderr.log" 'agent messages' \
+    'joining several Codex agent messages is logged as a transport deviation'
+
 failed_output="$test_root/failed"
 if REVIEW_PR_MOCK_BEHAVIOR=invalid \
     "$repo_root/bin/review-pr" --config "$config_file" contract-test \

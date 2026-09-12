@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex answer spread over several agent messages is joined in order before validation instead
+  of keeping only the last message, which made a structured cross-review fail with
+  `stream.no_complete` and missing source refs although every record had been produced. The raw
+  Codex event stream is now preserved as `*-events.jsonl` next to the other failure diagnostics,
+  as it already was for Pi.
+
 ## [1.15.0] - 2026-09-12
 
 ### Added

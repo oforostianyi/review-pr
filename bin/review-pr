@@ -1201,6 +1201,23 @@ agent_label() {
     printf '%s\n' "${AGENT_LABELS[$agent]:-$agent}"
 }
 
+# Codex may spread one answer over several agent messages, and
+# --output-last-message keeps only the final one. When the --json event
+# stream holds more than one agent message, join their texts in order so the
+# whole stream is validated, and record the deviation in the agent log.
+join_codex_agent_messages() {
+    local events_file=$1
+    local output_file=$2
+    local log_file=$3
+    local message_count
+
+    [[ -s "$events_file" ]] || return 0
+    message_count=$(jq -c 'select(.type? == "item.completed" and .item.type? == "agent_message") | .item.text' "$events_file" 2>/dev/null | wc -l | tr -d ' ')
+    (( message_count > 1 )) || return 0
+    jq -r 'select(.type? == "item.completed" and .item.type? == "agent_message") | .item.text' "$events_file" >"$output_file" 2>/dev/null || return 0
+    printf 'Codex returned %s agent messages; joined them into one output stream before validation.\n' "$message_count" >>"$log_file"
+}
+
 # Prints the CLI arguments that carry a configured effort to a built-in agent,
 # one per line: Claude --effort, Codex a reasoning override, Pi --thinking.
 agent_effort_arguments() {
@@ -4669,11 +4686,11 @@ preserve_agent_failure_artifacts() {
         mv -- "$usage_json_file" "$destination"
         activity_log "Failure usage details: ${destination}"
     fi
-    if [[ "$agent" == pi && -s "$response_file" ]]; then
+    if [[ ( "$agent" == pi || "$agent" == codex ) && -s "$response_file" ]]; then
         destination="${artifact_base}-events.jsonl"
         assert_new_target "$destination"
         mv -- "$response_file" "$destination"
-        activity_log "Raw Pi events: ${destination}"
+        activity_log "Raw $(agent_label "$agent") events: ${destination}"
     fi
     if [[ -s "$output_file" ]]; then
         if [[ "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
@@ -5872,6 +5889,7 @@ start_agent() {
                 else
                     exit_status=$?
                 fi
+                join_codex_agent_messages "$response_file" "$output_file" "$log_file"
                 extract_token_usage "$response_file" "$usage_file" "$usage_json_file" "$agent" "$phase" "$model" "$effort"
                 exit "$exit_status"
             ) &
