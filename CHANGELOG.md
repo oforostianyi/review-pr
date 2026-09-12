@@ -9,6 +9,10 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - GitHub Actions workflow `.github/workflows/ci.yml`: syntax check, `shellcheck`, private-data audit,
   and the full test suite on Linux (macOS for `main` and manual runs), then a package build with
   checksum and content verification uploaded as an artifact.
+- `packaging/build-package.sh` honours `REVIEW_PR_DIST_DIR` for the output directory, and
+  `packaging/package-manifest.txt` documents the exact archive contents; the test suite builds the
+  archive into a temporary directory, verifies its checksum, modes, and manifest, and installs from
+  the extracted archive.
 
 ### Fixed
 
