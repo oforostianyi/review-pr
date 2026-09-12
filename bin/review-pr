@@ -3477,6 +3477,7 @@ measurement_command_policy() {
 }
 
 redact_measurement_text() {
+    # Bracket classes spell out case-insensitivity because BSD sed has no I flag.
     sed -E \
         -e 's/ghp_[A-Za-z0-9]{20,}/[REDACTED]/g' \
         -e 's/github_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
@@ -3484,7 +3485,7 @@ redact_measurement_text() {
         -e 's/xox[abpr]-[A-Za-z0-9-]{10,}/[REDACTED]/g' \
         -e 's/AKIA[0-9A-Z]{16}/[REDACTED]/g' \
         -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]{16,}/\1[REDACTED]/g' \
-        -e 's/((password|passwd|secret|token|api[_-]?key)[[:space:]]*[=:][[:space:]]*)[^[:space:]"'"'"']+/\1[REDACTED]/Ig'
+        -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[[:space:]]*[=:][[:space:]]*)[^[:space:]"'"'"']+/\1[REDACTED]/g'
 }
 
 write_skipped_measurement() {
