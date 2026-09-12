@@ -475,6 +475,29 @@ assert_false 'an unmeasured factual resolution fails final processing' \
 assert_eq 'dispute_resolution_validation_failed: resolution[dispute:beta:beta:F-001].verification_method' \
     "$FINDING_CONTRACT_FAILURE_REASON" 'final processing exposes the resolution diagnostic'
 
+diagnostic_only_canonical="$test_root/diagnostic-only-final.json"
+jq '.findings[0].source_id = "F-9" | .findings[0].evidence = ["CI check phpunit failed", "Pipeline status: pending"]' \
+    "$FINAL_PROCESSED_FINDINGS_FILE" >"$diagnostic_only_canonical"
+assert_eq 'finding[F-9]' "$(describe_diagnostic_only_findings "$diagnostic_only_canonical")" \
+    'a confirmed finding whose only evidence is a failed or pending check is diagnostic-only'
+jq '.findings[0].evidence += ["src/App/Service.php:42 throws on null"]' "$diagnostic_only_canonical" >"$diagnostic_only_canonical.tmp"
+mv -- "$diagnostic_only_canonical.tmp" "$diagnostic_only_canonical"
+assert_eq '' "$(describe_diagnostic_only_findings "$diagnostic_only_canonical")" \
+    'one source-anchored evidence item clears the diagnostic-only check'
+jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null | .findings[0].evidence = ["CI check phpunit failed"]' \
+    "$diagnostic_only_canonical" >"$diagnostic_only_canonical.tmp"
+mv -- "$diagnostic_only_canonical.tmp" "$diagnostic_only_canonical"
+assert_eq '' "$(describe_diagnostic_only_findings "$diagnostic_only_canonical")" \
+    'an uncertain claim may cite a check failure as its reason'
+diagnostic_only_stream="$test_root/diagnostic-only.ndjson"
+jq -c 'if .record == "finding" then .evidence = ["CI check phpunit failed", "Pipeline status: pending"] else . end' \
+    "$resolution_fixture" >"$diagnostic_only_stream"
+cp -- "$diagnostic_only_stream" "$processed_final"
+assert_false 'a diagnostic-only confirmed finding fails final processing' \
+    process_final_ndjson_output "$processed_final"
+assert_eq 'diagnostic_only_finding: finding[FINAL-001]' "$FINDING_CONTRACT_FAILURE_REASON" \
+    'final processing names the diagnostic-only finding'
+
 resolution_baseline="$test_root/resolution-baseline.json"
 assert_true 'a stream with resolution records produces a repair baseline' \
     build_final_repair_baseline "$resolution_fixture" "$resolution_baseline"

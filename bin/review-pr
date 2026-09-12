@@ -3778,6 +3778,26 @@ render_final_findings_markdown() {
     } >"$output_file"
 }
 
+# A CONFIRMED finding needs source or runtime evidence. When every evidence item
+# only reports a failed, pending, or skipped check, a denied or failing tool, or
+# an unavailable resource, and none of them names a file, line, or symbol, the
+# finding restates a verification limitation and is rejected.
+describe_diagnostic_only_findings() {
+    local canonical_file=$1
+
+    jq -r '
+        def path_like: test("[A-Za-z0-9_./-]+\\.[a-z]{1,5}(:[0-9]+)?|::|\\(\\)");
+        def diagnostic_subject: test("check|\\bci\\b|pipeline|workflow|\\bjob\\b|\\bbuild\\b|\\btool\\b|permission|linter|test suite|test run"; "i");
+        def diagnostic_state: test("fail|pending|skipp|denied|unavailable|could not|cancel|error|status|missing|not run|did not run|timed out|timeout"; "i");
+        def diagnostic_item: (path_like | not) and diagnostic_subject and diagnostic_state;
+        [.findings[]
+            | select(.classification == "CONFIRMED")
+            | select((.evidence | type) == "array" and (.evidence | length) > 0 and all(.evidence[]; type == "string" and diagnostic_item))
+            | "finding[\(.source_id)]"]
+        | join(", ")
+    ' "$canonical_file"
+}
+
 describe_ndjson_validation_failure() {
     local phase=$1
     local records_file=$2
@@ -3951,6 +3971,11 @@ process_final_ndjson_output() {
     if ! validate_final_ndjson_records "$records_file" "$canonical_file" "$expected_refs_file"; then
         detail=$(describe_ndjson_validation_failure final "$records_file" '' "$expected_refs_file")
         FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
+        return 1
+    fi
+    detail=$(describe_diagnostic_only_findings "$canonical_file")
+    if [[ -n "$detail" ]]; then
+        FINDING_CONTRACT_FAILURE_REASON="diagnostic_only_finding: $detail"
         return 1
     fi
     if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
