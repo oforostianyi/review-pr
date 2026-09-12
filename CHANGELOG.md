@@ -19,6 +19,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - The jq programs compile on jq 1.6 again, the documented minimum: `label` and `end` are reserved
   words there, so object keys, field accesses, and a `--arg` variable using those names were
   rewritten; CI runs the full suite against a pinned jq 1.6 release.
+- Measurement redaction no longer depends on the GNU-only `sed` `I` flag, so credential
+  assignments are redacted on macOS as well; the test suite itself is portable to BSD `sed`, `wc`,
+  and the `/private` temporary directory, and CI runs it on `macos-latest`.
 
 ## [1.14.0] - 2026-09-12
 
