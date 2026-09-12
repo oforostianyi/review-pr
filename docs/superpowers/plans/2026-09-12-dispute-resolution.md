@@ -34,7 +34,7 @@
 **Interfaces:**
 - Produces: global `DISPUTE_RESOLUTION_ENABLED` (`true`/`false`, default `false`), set by `load_config`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/review-pr/test_config.sh` before the final `printf '%s assertions passed.\n'` line:
 
@@ -65,12 +65,12 @@ fi
 pass 'non-boolean dispute_resolution is rejected'
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_config.sh 2>&1 | grep -E 'not ok' | head -1`
 Expected: `not ok - dispute resolution can be enabled ...` (the configuration is rejected because `dispute_resolution` is an unknown reporting key).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `bin/review-pr`:
 
@@ -106,12 +106,12 @@ In `config/review-pr.schema.json`, inside `properties.reporting.properties` add:
 ```
 Keep the file's existing two-space formatting; edit textually, do not re-serialize the whole file.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_config.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: `20 assertions passed.` (16 before + 4).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/review-pr config/review-pr.schema.json tests/review-pr/test_config.sh
@@ -137,7 +137,7 @@ git commit -m "Add the reporting.dispute_resolution flag"
   ```
   `kind_hint` is `factual` when classifications differ and `severity` when all are `CONFIRMED` with different severities. It is informational for the model; the model decides `dispute_kind`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Insert after the `build_final_expected_refs` assertions in `tests/review-pr/test_finding_contract.sh`:
 
@@ -177,12 +177,12 @@ REVIEW_AGENTS=(alpha)
 
 Note: `$cross_canonical` (agent `alpha`, one `CONFIRMED P1` record covering `beta:beta:F-001`) already exists earlier in the file. The gamma copy keeps the same primary ref, so both reviewers judge the same primary finding.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|command not found' | head -2`
 Expected: `build_final_disputes: command not found` followed by a `not ok` line.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `bin/review-pr` directly after `build_final_expected_refs()`:
 
@@ -224,12 +224,12 @@ build_final_disputes() {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: `assertions passed.` with the count increased by 8 (no `not ok`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/review-pr tests/review-pr/test_finding_contract.sh
@@ -255,7 +255,7 @@ git commit -m "Detect cross-review disputes deterministically"
   ```
   and the constant `FINAL_RESOLUTION_CONTRACT_BLOCK` (text inserted into the final ndjson contract when the flag is on).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/review-pr/test_finding_contract.sh` right after the Task 2 block:
 
@@ -279,12 +279,12 @@ assert_true 'the resolution contract text names every record key' \
     grep -Fq -- 'dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations' <<<"$FINAL_RESOLUTION_CONTRACT_BLOCK"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|command not found' | head -2`
 Expected: `append_required_resolutions_to_prompt: command not found`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add after `append_required_source_refs_to_prompt()` in `bin/review-pr`:
 
@@ -335,12 +335,12 @@ In the ndjson `final_format_block` heredoc, after the bullet that begins `- All 
 ```
 (`write_final_prompt` already declares locals at its top; add `dispute_contract_block` there instead of mid-function if the function uses a single `local` block.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: no `not ok`, count increased by 5.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/review-pr tests/review-pr/test_finding_contract.sh
@@ -362,7 +362,7 @@ git commit -m "List required dispute resolutions in the final prompt"
   - `validate_final_resolutions <resolutions_records_file> <final_canonical_file> <disputes_file> <output_canonical_file>` — `resolutions_records_file` is a JSON array of the `record == "resolution"` objects; returns 0 and writes `{"contract":"ndjson-v1","schema_version":1,"phase":"final-synthesis","disputes":[...],"resolutions":[...]}`; returns 1 otherwise.
   - `describe_resolution_validation_failure <resolutions_records_file> <final_canonical_file> <disputes_file>` — prints comma-separated details such as `resolution[dispute:beta:beta:F-001].verification_method`, `resolutions.missing[dispute:...]`, `resolutions.unknown[...]`, `resolution[...].final_source_id`, `resolution[...].confirmed_over_unresolved_factual`, `resolution[...].inferred_convention_severity`.
 
-- [ ] **Step 1: Create the positive fixture**
+- [x] **Step 1: Create the positive fixture**
 
 `tests/review-pr/fixtures/final-resolution-valid.ndjson` (three physical lines):
 
@@ -372,7 +372,7 @@ git commit -m "List required dispute resolutions in the final prompt"
 {"record":"complete","schema_version":1,"finding_count":1,"summary":"One finding confirmed after measuring the disputed premise.","verification_limitations":[],"positive_evidence":[]}
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Append to `tests/review-pr/test_finding_contract.sh` after the Task 3 block (the variables `final_expected_refs`, `disputes_file` exist; `REVIEW_AGENTS` is `(alpha)` again):
 
@@ -445,12 +445,12 @@ assert_true 'a severity-only dispute may be reconciled without a measurement' \
     validate_final_resolutions "$severity_resolution" "$resolution_final_canonical" "$severity_disputes" "$test_root/resolution-severity-canonical.json"
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|command not found' | head -2`
 Expected: `validate_final_resolutions: command not found`.
 
-- [ ] **Step 4: Implement the validator and the diagnostics**
+- [x] **Step 4: Implement the validator and the diagnostics**
 
 Add after `validate_final_ndjson_records()` in `bin/review-pr`:
 
@@ -540,12 +540,12 @@ Note on the `unknown-dispute` expectation: `stream_problems` lists `resolutions.
 
 Also add the resolution record to `config/review-pr-findings-v1.schema.json`: a new `#/$defs/resolution` object (`additionalProperties: false`, the 14 required keys, enums as listed in the spec, `command` as `["array","null"]` of non-empty strings, `basis_source` as `["string","null"]`) and a third `$ref` in the top-level `oneOf`. Edit textually and verify with `jq empty config/review-pr-findings-v1.schema.json`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: no `not ok`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add bin/review-pr config/review-pr-findings-v1.schema.json tests/review-pr/fixtures/final-resolution-valid.ndjson tests/review-pr/test_finding_contract.sh
@@ -570,7 +570,7 @@ git commit -m "Validate resolution records against detected disputes"
 - Consumes: Tasks 2-4.
 - Produces: globals `FINAL_RESOLUTIONS_OUTPUT` (canonical path `${WORK_DIR}/${REPORT_STEM}-final-resolutions.json`, rerun: `${WORK_DIR}/${rerun_stem}-resolutions.json`), `FINAL_PROCESSED_RESOLUTIONS_FILE`; manifest key `artifacts.final_resolutions` (null when disabled); `process_final_ndjson_output` failure reasons `unexpected_resolution_records` and `dispute_resolution_validation_failed: <details>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/review-pr/test_finding_contract.sh` after the Task 4 block. This exercises `process_final_ndjson_output` end to end in library mode, which needs the same globals the earlier final tests set (`REVIEW_AGENTS=(alpha)`, `CROSS_FINDINGS_OUTPUTS[alpha]`, `FINALIZATION_LANGUAGE`, header variables). The fixture's finding covers `alpha:alpha:C-001` and `gamma:gamma:C-001`, so provide the gamma sidecar again:
 
@@ -628,12 +628,12 @@ REVIEW_AGENTS=(alpha)
 unset 'CROSS_FINDINGS_OUTPUTS[gamma]'
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok' | head -1`
 Expected: `not ok - a final stream with valid resolution records is processed` (the current validator rejects the unknown record type).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 1. Globals near line 183: add `FINAL_RESOLUTIONS_OUTPUT=""` and `FINAL_PROCESSED_RESOLUTIONS_FILE=""`. Where `FINAL_FINDINGS_OUTPUT` is assigned for the fresh run and the rerun, assign `FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"` and `"${WORK_DIR}/${rerun_stem}-resolutions.json"` respectively; add `assert_new_target "$FINAL_RESOLUTIONS_OUTPUT"` beside the existing `assert_new_target "$FINAL_FINDINGS_OUTPUT"` guarded by `[[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]`.
 
@@ -685,12 +685,12 @@ Expected: `not ok - a final stream with valid resolution records is processed` (
 
 6. Manifests: add `final_resolutions: (if $final_finding_contract == "ndjson-v1" and $dispute_resolution then $final_resolutions else null end)` next to `final_findings` in both manifest builders, with `--arg final_resolutions "${FINAL_RESOLUTIONS_OUTPUT##*/}"` and `--argjson dispute_resolution "$DISPUTE_RESOLUTION_ENABLED"`; record `dispute_resolution: $dispute_resolution` under the manifest `reporting` object.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: no `not ok` (the marker assertion passes only after Task 6; if it is the sole failure, proceed to Task 6 before committing, then commit both tasks together).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/review-pr tests/review-pr/test_finding_contract.sh
@@ -709,7 +709,7 @@ git commit -m "Process, repair, and publish dispute resolutions"
 - Consumes: the resolutions canonical file from Task 5.
 - Produces: `render_final_findings_markdown <canonical> <output> [resolutions_canonical]`; heading globals `FINAL_DISPUTE_RESOLUTIONS_HEADING` (`## Dispute resolutions` / `## Вирішення суперечок`) and the marker line `<!-- review-pr:dispute-resolutions -->`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append after the Task 5 block:
 
@@ -746,12 +746,12 @@ validate_final_ndjson_records "$test_root/resolution-final-records.json" "$resol
 ```
 where `$final_expected_refs_gamma` is produced by `build_final_expected_refs` while `REVIEW_AGENTS=(alpha gamma)` and `CROSS_FINDINGS_OUTPUTS[gamma]="$gamma_cross_canonical"` are set (reuse the Task 5 setup before it resets `REVIEW_AGENTS`).
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok' | head -1`
 Expected: `not ok - the English final report gets a dispute-resolution section`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Globals: `FINAL_DISPUTE_RESOLUTIONS_HEADING='## Dispute resolutions'` next to `FINAL_REJECTED_FINDINGS_HEADING`; in `configure_finalization_language` set the EN value in the EN branch and `'## Вирішення суперечок'` in the UA branch.
 
@@ -776,12 +776,12 @@ In `render_final_findings_markdown` add `local resolutions_file=${3:-}` and, aft
         fi
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash -n bin/review-pr && bash tests/review-pr/test_finding_contract.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: no `not ok`. Also run `bash tests/review-pr/test_validators.sh` (the legacy final Markdown validator must still accept a report with the new section; if it rejects the extra table, extend `validate_final_markdown` to ignore content after the `review-pr:dispute-resolutions` marker).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/review-pr tests/review-pr/test_finding_contract.sh
@@ -801,7 +801,7 @@ git commit -m "Render dispute resolutions in the final report"
 - Consumes: everything above.
 - Produces: mock behaviours `cross-ndjson-rejected` (a cross-review that classifies its source `REJECTED`) and `final-resolution-uncertain` (resolution records with `resolution_status: uncertain`, `verification_method: manual`, while the finding stays `CONFIRMED`). The mock reads the prompt from stdin into `prompt_text` at startup (today it is consumed only when a capture directory is set) and derives final `source_refs` from the `REQUIRED SOURCE REFS` block and resolutions from the `REQUIRED RESOLUTIONS` block.
 
-- [ ] **Step 1: Write the failing integration tests**
+- [x] **Step 1: Write the failing integration tests**
 
 Add to `tests/review-pr/test_pipeline_integration.sh` (model the structure on `run_ndjson_cross_case`; three agents so that two cross-reviewers judge the same primary finding):
 
@@ -880,12 +880,12 @@ run_dispute_resolution_failure_case() {
 
 Register both calls where the other cases run (after `run_ndjson_cross_case`).
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `bash tests/review-pr/test_pipeline_integration.sh 2>&1 | grep -E 'not ok|dispute' | head -3`
 Expected: the dispute case fails (the pipeline errors because the mock cross-review for three agents references the wrong peer or the final mock omits gamma's ref).
 
-- [ ] **Step 3: Implement the mock changes**
+- [x] **Step 3: Implement the mock changes**
 
 In `tests/review-pr/mock-agent-runner.sh`:
 
@@ -925,16 +925,16 @@ In `tests/review-pr/mock-agent-runner.sh`:
    ```
    Call `emit_resolution_records` between the finding and the complete record in `emit_valid_ndjson_final`; add behaviour `final-resolution-uncertain)` that emits the same finding, `emit_resolution_records uncertain manual`, and the complete record.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `bash tests/review-pr/test_pipeline_integration.sh 2>&1 | grep -E 'not ok|assertions passed'`
 Expected: no `not ok`. Then the whole suite: `bash tests/review-pr/run.sh 2>&1 | tail -2` → `All 12 review-pr test files passed.`
 
-- [ ] **Step 5: Document**
+- [x] **Step 5: Document**
 
 `docs/review-pr.md`, after the paragraph describing `reporting.finding_contract`: add a paragraph "Dispute resolutions" explaining the flag, the detection rule, the record, the sidecar, the table, and that commands are recorded but not executed. `CHANGELOG.md` Unreleased → `### Added`: one entry summarizing the feature. Run `packaging/private-data-audit.sh`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/review-pr/mock-agent-runner.sh tests/review-pr/test_pipeline_integration.sh docs/review-pr.md CHANGELOG.md
@@ -947,10 +947,10 @@ git commit -m "Exercise dispute resolutions end to end"
 
 **Files:** none in the repository; scratch files only.
 
-- [ ] **Step 1: Enable the flag locally** — add `"dispute_resolution": true` under `reporting` in the local configuration, then `review-pr --show-config | grep 'Dispute resolution'` → `enabled`.
-- [ ] **Step 2: Rerun an existing structured run's final phase** with `review-pr <repository>#<pr> --rerun-final --run <timestamp>` on a run whose cross-reviews disagree (the run from 2026-09-11 for the small pull request has four disputed primary refs). This uses only the local model.
-- [ ] **Step 3: Verify** the `*-resolutions.json` sidecar exists, its `disputes` length matches `build_final_disputes` on the same sidecars, the rendered report has the table, and the attempt log has no `dispute_resolution_validation_failed`. If the local model cannot satisfy the contract, keep the diagnostics, do not weaken the validator, and report which rule it failed.
-- [ ] **Step 4: Record the outcome** in the development plan (P5.x evidence) and the session handoff.
+- [x] **Step 1: Enable the flag locally** — add `"dispute_resolution": true` under `reporting` in the local configuration, then `review-pr --show-config | grep 'Dispute resolution'` → `enabled`.
+- [x] **Step 2: Rerun an existing structured run's final phase** with `review-pr <repository>#<pr> --rerun-final --run <timestamp>` on a run whose cross-reviews disagree (the run from 2026-09-11 for the small pull request has four disputed primary refs). This uses only the local model.
+- [x] **Step 3: Verify** the `*-resolutions.json` sidecar exists, its `disputes` length matches `build_final_disputes` on the same sidecars, the rendered report has the table, and the attempt log has no `dispute_resolution_validation_failed`. If the local model cannot satisfy the contract, keep the diagnostics, do not weaken the validator, and report which rule it failed.
+- [x] **Step 4: Record the outcome** in the development plan (P5.x evidence) and the session handoff.
 
 ## Self-review
 

@@ -312,7 +312,7 @@ check_invalid_resolution wrong-final-link '.[0].final_source_id = "FINAL-404"' \
     'resolution[dispute:beta:beta:F-001].final_source_id'
 check_invalid_resolution explicit-rule-without-source '.[0].basis = "explicit_repository_rule"' \
     'resolution[dispute:beta:beta:F-001].basis_source'
-check_invalid_resolution shell-string-command '.[0].command = "rg -n changedBranch src/Changed.php"' \
+check_invalid_resolution shell-string-command '.[0].command = "grep -n changedBranch src/Changed.php"' \
     'resolution[dispute:beta:beta:F-001].command'
 check_invalid_resolution not-applicable-factual '.[0].resolution_status = "not_applicable"' \
     'resolution[dispute:beta:beta:F-001].resolution_status, resolution[dispute:beta:beta:F-001].confirmed_over_unresolved_factual'
@@ -504,7 +504,7 @@ assert_file_contains "$rendered_with_resolutions" '## Dispute resolutions' 'the 
 assert_file_contains "$rendered_with_resolutions" '<!-- review-pr:dispute-resolutions -->' 'the section carries a language-independent marker'
 assert_file_contains "$rendered_with_resolutions" '| `dispute:beta:beta:F-001` | factual | resolved | command |' \
     'each resolution is one table row with kind, status, and method'
-assert_file_contains "$rendered_with_resolutions" '`rg -n changedBranch src/Changed.php`' \
+assert_file_contains "$rendered_with_resolutions" '`grep -n changedBranch src/Changed.php`' \
     'a recorded argv command is shown joined by spaces inside code formatting'
 FINALIZATION_LANGUAGE=UA
 configure_finalization_language
@@ -522,6 +522,70 @@ assert_true 'a final report with the dispute table still passes the legacy struc
 render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$test_root/resolution-null-observed-canonical.json"
 assert_file_contains "$rendered_with_resolutions" '| factual | uncertain | source | — | general_engineering |' \
     'a null observed value renders as a dash, not the word null'
+
+assert_eq 'allowed' "$(measurement_command_policy '["rg","-n","needle","sample.txt"]')" 'a read-only search inside the checkout is allowed'
+assert_eq 'allowed' "$(measurement_command_policy '["git","show","HEAD:sample.txt"]')" 'a read-only git subcommand is allowed'
+assert_eq 'not_allowlisted' "$(measurement_command_policy '["docker","compose","exec","db","mysql"]')" 'runtime tools are not allow-listed'
+assert_eq 'git_subcommand_not_allowlisted' "$(measurement_command_policy '["git","push","origin","main"]')" 'writing git subcommands are refused'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["rg","--pre","sh","needle","sample.txt"]')" 'preprocessor options that execute programs are refused'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","../outside.txt"]')" 'parent-directory paths are refused'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","/etc/hosts"]')" 'absolute paths are refused'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","-c","core.pager=sh","show","HEAD"]')" 'git configuration overrides are refused'
+assert_eq 'empty_command' "$(measurement_command_policy '[]')" 'an empty command is refused'
+assert_eq 'empty_command' "$(measurement_command_policy 'null')" 'a null command is refused'
+
+measure_dir="$test_root/measure-checkout"
+mkdir -p -- "$measure_dir/src"
+printf '%s\n' 'first line' 'needle here token=ghp_redactiontestREDACTIONTEST0123456789ab end' >"$measure_dir/sample.txt"
+printf '%s\n' 'function changedBranch() {}' >"$measure_dir/src/Changed.php"
+HEAD_SHA=cafebabe00000000000000000000000000000000
+measurement_json="$test_root/measurement.json"
+assert_true 'an allow-listed measurement runs in the checkout' \
+    run_measurement '["grep","-n","needle","sample.txt"]' "$measure_dir" "$measurement_json"
+assert_eq 'true' "$(jq -r '.executed' "$measurement_json")" 'the measurement records that it executed'
+assert_eq '0' "$(jq -r '.exit_status' "$measurement_json")" 'the measurement records the exit status'
+assert_true 'the measurement keeps a stdout excerpt' grep -q 'needle here' <<<"$(jq -r '.stdout_excerpt' "$measurement_json")"
+assert_false 'credential-like values are redacted from excerpts' grep -q 'ghp_redactiontest' <<<"$(jq -r '.stdout_excerpt' "$measurement_json")"
+assert_true 'redaction leaves a marker' grep -q 'REDACTED' <<<"$(jq -r '.stdout_excerpt' "$measurement_json")"
+assert_eq "$HEAD_SHA" "$(jq -r '.commit' "$measurement_json")" 'the measurement records the measured commit'
+run_measurement '["grep","-n","absent","sample.txt"]' "$measure_dir" "$measurement_json"
+assert_eq '1' "$(jq -r '.exit_status' "$measurement_json")" 'a non-zero exit status is recorded, not treated as an error'
+run_measurement '["docker","ps"]' "$measure_dir" "$measurement_json"
+assert_eq 'false' "$(jq -r '.executed' "$measurement_json")" 'a refused command is not executed'
+assert_eq 'not_allowlisted' "$(jq -r '.skipped_reason' "$measurement_json")" 'a refused command records the policy reason'
+long_output_dir="$test_root/measure-long"
+mkdir -p -- "$long_output_dir"
+head -c 6000 /dev/zero | tr '\0' 'x' >"$long_output_dir/long.txt"
+run_measurement '["cat","long.txt"]' "$long_output_dir" "$measurement_json"
+assert_eq '2000' "$(jq -r '.stdout_excerpt | length' "$measurement_json")" 'stdout excerpts are bounded'
+assert_eq 'true' "$(jq -r '.stdout_truncated' "$measurement_json")" 'truncation is recorded'
+
+EXECUTE_MEASUREMENTS_ENABLED=true
+MEASUREMENT_WORKING_DIRECTORY=$measure_dir
+measured_canonical="$test_root/resolutions-measured.json"
+cp -- "$resolution_canonical" "$measured_canonical"
+attach_measurements "$measured_canonical"
+assert_eq 'true' "$(jq -r '.resolutions[0].measurement.executed' "$measured_canonical")" 'a resolution with an allow-listed command gets an executed measurement'
+assert_eq '0' "$(jq -r '.resolutions[0].measurement.exit_status' "$measured_canonical")" 'the attached measurement carries the exit status'
+assert_eq 'Line 10 calls changedBranch() before the guard, so the failure path is reachable.' \
+    "$(jq -r '.resolutions[0].observed' "$measured_canonical")" 'the model claim in observed is left untouched'
+MEASUREMENT_WORKING_DIRECTORY=''
+cp -- "$resolution_canonical" "$measured_canonical"
+attach_measurements "$measured_canonical"
+assert_eq 'checkout_unavailable' "$(jq -r '.resolutions[0].measurement.skipped_reason' "$measured_canonical")" 'without a checkout the measurement is skipped with a reason'
+EXECUTE_MEASUREMENTS_ENABLED=false
+cp -- "$resolution_canonical" "$measured_canonical"
+attach_measurements "$measured_canonical"
+assert_eq 'false' "$(jq -r '.resolutions[0] | has("measurement")' "$measured_canonical")" 'measurements are not attached when execution is disabled'
+EXECUTE_MEASUREMENTS_ENABLED=true
+MEASUREMENT_WORKING_DIRECTORY=$measure_dir
+cp -- "$resolution_canonical" "$measured_canonical"
+attach_measurements "$measured_canonical"
+render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$measured_canonical"
+assert_file_contains "$rendered_with_resolutions" '| Measured |' 'the dispute table gains a Measured column when measurements exist'
+assert_file_contains "$rendered_with_resolutions" '| exit 0 |' 'an executed measurement shows its exit status'
+EXECUTE_MEASUREMENTS_ENABLED=false
+MEASUREMENT_WORKING_DIRECTORY=''
 
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA

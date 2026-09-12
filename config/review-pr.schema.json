@@ -137,6 +137,11 @@
           "default": false,
           "description": "Emit and validate opt-in resolution records for cross-review disagreements in the final ndjson-v1 stream. Requires finding_contract.final = ndjson-v1."
         },
+        "execute_measurements": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the allow-listed, read-only, shell-free commands proposed by resolution records inside the review checkout and attach the captured result to the resolutions sidecar. Requires dispute_resolution = true. Artifact-only final reruns skip execution."
+        },
         "include_comparison_sections": {
           "type": "boolean",
           "default": true,

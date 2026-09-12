@@ -156,6 +156,8 @@ PRIMARY_FINDING_CONTRACT_MODE=markdown
 CROSS_FINDING_CONTRACT_MODE=markdown
 FINAL_FINDING_CONTRACT_MODE=markdown
 DISPUTE_RESOLUTION_ENABLED=false
+EXECUTE_MEASUREMENTS_ENABLED=false
+MEASUREMENT_WORKING_DIRECTORY=""
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
@@ -527,8 +529,9 @@ load_config() {
         (if has("reporting") then
             (.reporting |
                 type == "object" and
-                ((keys - ["comparison_sections", "dispute_resolution", "finding_contract", "include_comparison_sections"]) | length == 0) and
+                ((keys - ["comparison_sections", "dispute_resolution", "execute_measurements", "finding_contract", "include_comparison_sections"]) | length == 0) and
                 (if has("dispute_resolution") then (.dispute_resolution | type == "boolean") else true end) and
+                (if has("execute_measurements") then (.execute_measurements | type == "boolean") else true end) and
                 (if has("include_comparison_sections") then (.include_comparison_sections | type == "boolean") else true end) and
                 (if has("finding_contract") then
                     (.finding_contract |
@@ -733,6 +736,11 @@ load_config() {
     if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
         [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
             || die 'reporting.dispute_resolution=true requires reporting.finding_contract.final=ndjson-v1'
+    fi
+    EXECUTE_MEASUREMENTS_ENABLED=$(jq -r '.reporting.execute_measurements // false' "$CONFIG_FILE")
+    if [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]]; then
+        [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]] \
+            || die 'reporting.execute_measurements=true requires reporting.dispute_resolution=true'
     fi
     STATUS_INTERVAL_SECONDS=$(jq -r '.status.log_interval_seconds // .status_interval_seconds // 30' "$CONFIG_FILE")
     STATUS_MODE=$(jq -r '.status.mode // "auto"' "$CONFIG_FILE")
@@ -2614,6 +2622,7 @@ show_configuration() {
     printf 'Cross-review finding contract: %s\n' "$CROSS_FINDING_CONTRACT_MODE"
     printf 'Final finding contract: %s\n' "$FINAL_FINDING_CONTRACT_MODE"
     printf 'Dispute resolution: %s\n' "$(if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then printf enabled; else printf disabled; fi)"
+    printf 'Measurement execution: %s\n' "$(if [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]]; then printf enabled; else printf disabled; fi)"
     printf 'Cross-review prompt: %s%s\n' "$CROSS_PROMPT_SOURCE" \
         "$(if [[ "$CROSS_PROMPT_SOURCE" == config && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then printf ' (Markdown instructions are not sent under ndjson-v1)'; fi)"
     printf 'Final prompt: %s%s\n' "$FINAL_PROMPT_SOURCE" \
@@ -3440,6 +3449,115 @@ validate_final_resolutions() {
     }' "$resolutions_file" >"$output_file"
 }
 
+# Measurements: allow-listed, read-only, shell-free execution of the commands a
+# resolution record proposes, inside the review checkout. The model's observed
+# text is never rewritten; the orchestrator's result is attached separately.
+readonly MEASUREMENT_TIMEOUT_SECONDS=10
+readonly MEASUREMENT_EXCERPT_LIMIT=2000
+
+measurement_command_policy() {
+    local argv_json=${1:-null}
+
+    jq -r \
+        --argjson allow '["rg", "grep", "git", "ls", "cat", "head", "wc", "test"]' \
+        --argjson git_ok '["show", "log", "diff", "ls-tree", "cat-file", "grep", "rev-parse", "blame"]' '
+        if type != "array" or length == 0 or (.[0] | type) != "string" or (.[0] | length) == 0 then "empty_command"
+        elif (all(.[]; type == "string" and length > 0) | not) then "unsafe_argument"
+        elif ((.[0] | IN($allow[])) | not) then "not_allowlisted"
+        elif any(.[1:][]; startswith("/") or startswith("~") or . == ".." or startswith("../") or contains("/../") or endswith("/..")) then "unsafe_argument"
+        elif .[0] == "rg" and any(.[1:][]; startswith("--pre")) then "unsafe_argument"
+        elif .[0] == "git" and any(.[1:][]; startswith("-c") or . == "-C" or startswith("--exec-path") or startswith("--git-dir") or startswith("--work-tree") or startswith("--config-env") or startswith("--namespace")) then "unsafe_argument"
+        elif .[0] == "git" and (((.[1] // "") | IN($git_ok[])) | not) then "git_subcommand_not_allowlisted"
+        else "allowed" end
+    ' <<<"$argv_json" 2>/dev/null || printf 'empty_command'
+}
+
+redact_measurement_text() {
+    sed -E \
+        -e 's/ghp_[A-Za-z0-9]{20,}/[REDACTED]/g' \
+        -e 's/github_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
+        -e 's/sk-[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
+        -e 's/xox[abpr]-[A-Za-z0-9-]{10,}/[REDACTED]/g' \
+        -e 's/AKIA[0-9A-Z]{16}/[REDACTED]/g' \
+        -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]{16,}/\1[REDACTED]/g' \
+        -e 's/((password|passwd|secret|token|api[_-]?key)[[:space:]]*[=:][[:space:]]*)[^[:space:]"'"'"']+/\1[REDACTED]/Ig'
+}
+
+write_skipped_measurement() {
+    local reason=$1 output_json=$2
+    jq -n --arg reason "$reason" --arg commit "${HEAD_SHA:-}" '{
+        executed: false, skipped_reason: $reason, exit_status: null,
+        stdout_excerpt: null, stderr_excerpt: null, stdout_truncated: false, stderr_truncated: false,
+        duration_ms: null, commit: (if $commit == "" then null else $commit end)
+    }' >"$output_json"
+}
+
+run_measurement() {
+    local argv_json=$1
+    local cwd=$2
+    local output_json=$3
+    local policy stdout_file stderr_file exit_status started finished duration_ms
+    local stdout_excerpt stderr_excerpt stdout_truncated=false stderr_truncated=false
+    local -a argv=()
+
+    policy=$(measurement_command_policy "$argv_json")
+    if [[ "$policy" != allowed ]]; then
+        write_skipped_measurement "$policy" "$output_json"
+        return 0
+    fi
+    if [[ -z "$cwd" || ! -d "$cwd" ]]; then
+        write_skipped_measurement checkout_unavailable "$output_json"
+        return 0
+    fi
+    mapfile -t argv < <(jq -r '.[]' <<<"$argv_json")
+    stdout_file=$(mktemp "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement-stdout.XXXXXX")
+    stderr_file=$(mktemp "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement-stderr.XXXXXX")
+    started=$EPOCHREALTIME
+    if (cd "$cwd" && run_with_agent_timeout "$MEASUREMENT_TIMEOUT_SECONDS" measurement "${argv[@]}" >"$stdout_file" 2>"$stderr_file" </dev/null); then
+        exit_status=0
+    else
+        exit_status=$?
+    fi
+    finished=$EPOCHREALTIME
+    duration_ms=$(awk -v a="$started" -v b="$finished" 'BEGIN { printf "%d", (b - a) * 1000 }')
+    (( $(wc -c <"$stdout_file") <= MEASUREMENT_EXCERPT_LIMIT )) || stdout_truncated=true
+    (( $(wc -c <"$stderr_file") <= MEASUREMENT_EXCERPT_LIMIT )) || stderr_truncated=true
+    stdout_excerpt=$(redact_measurement_text <"$stdout_file" | head -c "$MEASUREMENT_EXCERPT_LIMIT")
+    stderr_excerpt=$(redact_measurement_text <"$stderr_file" | head -c "$MEASUREMENT_EXCERPT_LIMIT")
+    rm -f -- "$stdout_file" "$stderr_file"
+    jq -n \
+        --argjson exit_status "$exit_status" \
+        --arg stdout "$stdout_excerpt" --arg stderr "$stderr_excerpt" \
+        --argjson stdout_truncated "$stdout_truncated" --argjson stderr_truncated "$stderr_truncated" \
+        --argjson duration_ms "$duration_ms" --arg commit "${HEAD_SHA:-}" '{
+        executed: true, skipped_reason: null, exit_status: $exit_status,
+        stdout_excerpt: $stdout, stderr_excerpt: $stderr,
+        stdout_truncated: $stdout_truncated, stderr_truncated: $stderr_truncated,
+        duration_ms: $duration_ms, commit: (if $commit == "" then null else $commit end)
+    }' >"$output_json"
+}
+
+attach_measurements() {
+    local canonical_file=$1
+    local count index command_json measurement_json updated
+
+    [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]] || return 0
+    count=$(jq '.resolutions | length' "$canonical_file")
+    measurement_json=$(mktemp "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement.XXXXXX")
+    updated=$(mktemp "${WORK_DIR:-${TMPDIR:-/tmp}}/.resolutions-measured.XXXXXX")
+    for (( index = 0; index < count; index++ )); do
+        command_json=$(jq -c --argjson i "$index" '.resolutions[$i] | if (.verification_method | IN("command", "test")) then .command else null end' "$canonical_file")
+        if [[ "$command_json" == null ]]; then
+            jq --argjson i "$index" '.resolutions[$i].measurement = null' "$canonical_file" >"$updated"
+        else
+            run_measurement "$command_json" "$MEASUREMENT_WORKING_DIRECTORY" "$measurement_json"
+            jq --argjson i "$index" --slurpfile measurement "$measurement_json" '.resolutions[$i].measurement = $measurement[0]' "$canonical_file" >"$updated"
+        fi
+        mv -- "$updated" "$canonical_file"
+    done
+    rm -f -- "$measurement_json"
+}
+
 render_final_findings_markdown() {
     local canonical_file=$1
     local output_file=$2
@@ -3447,9 +3565,16 @@ render_final_findings_markdown() {
     local problem_label=Problem failure_label='Failure scenario' evidence_label=Evidence recommendation_label=Recommendation
     local no_rejected='_None._'
     local resolutions_table_header='| # | Dispute | Kind | Status | Method | Observed | Basis |'
+    local measured_header=' Measured |' measured_separator='' with_measurements=false
     if [[ "$FINALIZATION_LANGUAGE" == UA ]]; then
         problem_label='Проблема'; failure_label='Сценарій збою'; evidence_label='Доказ'; recommendation_label='Рекомендація'; no_rejected='_Немає._'
         resolutions_table_header='| # | Суперечка | Тип | Статус | Метод | Спостережено | Підстава |'
+        measured_header=' Виміряно |'
+    fi
+    if [[ -n "$resolutions_file" && -s "$resolutions_file" ]] && [[ "$(jq '[.resolutions[]? | has("measurement")] | any' "$resolutions_file")" == true ]]; then
+        with_measurements=true
+        resolutions_table_header="${resolutions_table_header}${measured_header}"
+        measured_separator='---|'
     fi
 
     {
@@ -3491,14 +3616,19 @@ render_final_findings_markdown() {
         ' "$canonical_file"
         if [[ -n "$resolutions_file" && -s "$resolutions_file" ]] && (( $(jq '.resolutions | length' "$resolutions_file") > 0 )); then
             printf '\n%s\n\n%s\n\n%s\n%s\n' '<!-- review-pr:dispute-resolutions -->' "$FINAL_DISPUTE_RESOLUTIONS_HEADING" \
-                "$resolutions_table_header" '|---|---|---|---|---|---|---|'
-            jq -r '
+                "$resolutions_table_header" "|---|---|---|---|---|---|---|${measured_separator}"
+            jq -r --argjson measured "$with_measurements" '
                 def cell: tostring | gsub("\\|"; "\\\\|") | gsub("[\\r\\n]+"; "<br>");
+                def measured_cell:
+                    if .measurement == null then "—"
+                    elif .measurement.executed then "exit " + (.measurement.exit_status | tostring)
+                    else "skipped: " + (.measurement.skipped_reason // "unknown") end;
                 .resolutions | to_entries[] |
                 "| " + ((.key + 1) | tostring) + " | `" + .value.dispute_id + "` | " + .value.dispute_kind + " | " +
                 .value.resolution_status + " | " + .value.verification_method + " | " +
                 ((if .value.command == null then "" else "`" + (.value.command | join(" ")) + "` " end) + (if (.value.observed // "") == "" then "—" else (.value.observed | cell) end)) + " | " +
-                (.value.basis + (if .value.basis_source == null then "" else " (`" + (.value.basis_source | cell) + "`)" end)) + " |"
+                (.value.basis + (if .value.basis_source == null then "" else " (`" + (.value.basis_source | cell) + "`)" end)) + " |" +
+                (if $measured then " " + (.value | measured_cell) + " |" else "" end)
             ' "$resolutions_file"
         fi
     } >"$output_file"
@@ -3685,6 +3815,7 @@ process_final_ndjson_output() {
             FINDING_CONTRACT_FAILURE_REASON="dispute_resolution_validation_failed${detail:+: $detail}"
             return 1
         fi
+        attach_measurements "$resolutions_canonical_file"
         FINAL_PROCESSED_RESOLUTIONS_FILE=$resolutions_canonical_file
     fi
     if ! render_final_findings_markdown "$canonical_file" "$rendered_file" "$FINAL_PROCESSED_RESOLUTIONS_FILE" || [[ ! -s "$rendered_file" ]]; then FINDING_CONTRACT_FAILURE_REASON=markdown_render_failed; return 1; fi
@@ -9034,6 +9165,7 @@ if [[ "$RESUME_RUN" == true ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
+        MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO
     fi
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
         COMPARISON_REPORT="${REPORT_DIR}/${REPORT_STEM}-comparison.md"
@@ -9243,6 +9375,7 @@ if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
     FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
     FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
     FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
+    MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO
 fi
 if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
     COMPARISON_REPORT="${REPORT_DIR}/${REPORT_STEM}-comparison.md"

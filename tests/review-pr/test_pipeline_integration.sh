@@ -870,6 +870,107 @@ run_dispute_resolution_failure_case() {
     assert_file_not_exists "${work_dir%/work}/${stem}-final.md" 'no final report is published for an invalid final'
 }
 
+run_measured_resolution_case() {
+    local case_dir="$suite_root/dispute-measured"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem sidecar
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture measured resolution.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    jq '.reporting.execute_measurements = true' "$config" >"$config.tmp" && mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-rejected\n' >"$scenarios/gamma-cross-review"
+    printf 'final-resolution-measured\n' >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "measured-resolution pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    sidecar="$work_dir/${stem}-final-resolutions.json"
+    assert_eq 'true' "$(jq -r '.resolutions[0].measurement.executed' "$sidecar")" \
+        'an allow-listed command proposed by the finalizer is executed in the review checkout'
+    assert_eq '0' "$(jq -r '.resolutions[0].measurement.exit_status' "$sidecar")" \
+        'the measurement records the command exit status'
+    assert_eq "$REVIEW_PR_FAKE_PULL_HEAD_SHA" "$(jq -r '.resolutions[0].measurement.commit' "$sidecar")" \
+        'the measurement records the exact PR head it ran against'
+    assert_eq 'The changed branch was read directly; the disputed premise holds.' "$(jq -r '.resolutions[0].observed' "$sidecar")" \
+        'the model claim in observed is kept separate from the measurement'
+    assert_eq 'explicit_repository_rule' "$(jq -r '.resolutions[0].basis' "$sidecar")" \
+        'an explicit repository rule basis survives end to end'
+    assert_eq 'AGENTS.md' "$(jq -r '.resolutions[0].basis_source' "$sidecar")" \
+        'the explicit rule names its repository source'
+    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| Measured |' 'the final report shows the Measured column'
+    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| exit 0 |' 'the final report shows the measurement outcome'
+    assert_file_contains "${work_dir%/work}/${stem}-final.md" 'explicit_repository_rule (`AGENTS.md`)' 'the final report shows the rule source'
+}
+
+run_unavailable_measurement_case() {
+    local case_dir="$suite_root/dispute-unavailable"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem sidecar
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture unavailable measurement.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    jq '.reporting.execute_measurements = true' "$config" >"$config.tmp" && mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-rejected\n' >"$scenarios/gamma-cross-review"
+    printf 'final-resolution-unavailable\n' >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "unavailable-measurement pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    sidecar="$work_dir/${stem}-final-resolutions.json"
+    assert_eq 'UNCERTAIN' "$(jq -r '.findings[0].classification' "$work_dir/${stem}-final-findings.json")" \
+        'a factual dispute whose measurement is unavailable leaves the covering finding UNCERTAIN'
+    assert_eq 'uncertain' "$(jq -r '.resolutions[0].resolution_status' "$sidecar")" 'the resolution records the uncertain status'
+    assert_eq 'false' "$(jq -r '.resolutions[0].measurement.executed' "$sidecar")" 'a runtime tool proposed by the model is not executed'
+    assert_eq 'not_allowlisted' "$(jq -r '.resolutions[0].measurement.skipped_reason' "$sidecar")" 'the skipped measurement names the policy reason'
+    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| skipped: not_allowlisted |' 'the final report shows the skipped measurement'
+}
+
+run_split_claim_resolution_case() {
+    local case_dir="$suite_root/dispute-split"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem sidecar
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture split compound claim.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-split\n' >"$scenarios/gamma-cross-review"
+    printf 'final-split-refs\n' >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "split-claim pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    sidecar="$work_dir/${stem}-final-resolutions.json"
+    assert_eq '3' "$(jq -r '.disputes[0].conflicting_refs | length' "$sidecar")" \
+        'a compound claim split by one cross-reviewer yields a dispute over all three cross records'
+    assert_eq 'severity' "$(jq -r '.disputes[0].kind_hint' "$sidecar")" \
+        'confirmed records with different severities are detected as a severity dispute'
+    assert_eq '2' "$(jq -r '.finding_count' "$work_dir/${stem}-final-findings.json")" \
+        'the finalizer may keep the split topics as separate final records'
+    assert_eq 'FINAL-001' "$(jq -r '.resolutions[0].final_source_id' "$sidecar")" \
+        'the resolution names the final record that carries the decision even though it covers only part of the refs'
+    assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" 'the split-claim run completes'
+}
+
 run_ndjson_cross_resume_case() {
     local case_dir="$suite_root/ndjson-cross-resume"
     local reviews="$case_dir/reviews"
@@ -1187,6 +1288,9 @@ run_ndjson_primary_case
 run_ndjson_cross_case
 run_dispute_resolution_case
 run_dispute_resolution_failure_case
+run_measured_resolution_case
+run_unavailable_measurement_case
+run_split_claim_resolution_case
 run_ndjson_cross_resume_case
 run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case

@@ -183,4 +183,21 @@ if "$repo_root/bin/review-pr" --config "$dispute_wrong_type" --show-config >/dev
 fi
 pass 'non-boolean dispute_resolution is rejected'
 
+measure_config="$test_root/measure.json"
+measure_output="$test_root/measure-show-config.txt"
+jq '.reporting.execute_measurements = true' "$dispute_config" >"$measure_config"
+"$repo_root/bin/review-pr" --config "$measure_config" --show-config >"$measure_output"
+assert_file_contains "$measure_output" 'Measurement execution: enabled' \
+    'measurement execution can be enabled on top of dispute resolution'
+assert_file_contains "$dispute_output" 'Measurement execution: disabled' \
+    'measurement execution is disabled by default'
+measure_without_disputes="$test_root/measure-without-disputes.json"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+    .reporting.comparison_sections = {cross_review: "none", final: "none"} |
+    .reporting.execute_measurements = true' "$config_file" >"$measure_without_disputes"
+if "$repo_root/bin/review-pr" --config "$measure_without_disputes" --show-config >/dev/null 2>&1; then
+    fail 'measurement execution must require dispute resolution'
+fi
+pass 'measurement execution is rejected without dispute_resolution'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

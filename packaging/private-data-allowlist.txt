@@ -13,3 +13,7 @@ pattern:/Users/example(/[A-Za-z0-9._/-]*)?
 path:packaging/private-data-audit.sh
 path:packaging/private-data-allowlist.txt
 path:tests/review-pr/test_private_data_audit.sh
+
+# Fixture credential used by the measurement redaction test; it must look like a
+# real token so the redaction regex fires, and it is never a real secret.
+pattern:ghp_redactiontestREDACTIONTEST0123456789ab
