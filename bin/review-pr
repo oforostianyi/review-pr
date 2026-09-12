@@ -1231,7 +1231,7 @@ dashboard_agent_label() {
     fi
     available_model_length=$((29 - ${#label} - 3))
     if (( available_model_length <= 0 )); then
-        printf '%s\n' "${"label":0:15}..."
+        printf '%s\n' "${label:0:15}..."
         return
     fi
     if (( ${#model} > available_model_length )); then
