@@ -13,6 +13,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
   `packaging/package-manifest.txt` documents the exact archive contents; the test suite builds the
   archive into a temporary directory, verifies its checksum, modes, and manifest, and installs from
   the extracted archive.
+- `packaging/release-dry-run.sh` performs the release-candidate dry run (build, checksum, manifest,
+  isolated install, launcher smoke test, optional `contract-test` per agent, uninstall with and
+  without `--purge-config`) and writes a machine-readable checklist without private paths.
 
 ### Changed
 

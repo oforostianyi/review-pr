@@ -135,6 +135,21 @@ review-pr --version
 
 Each new full-run and final-rerun manifest records the exact `review_pr_version` used to create it. Release notes are maintained in the root `CHANGELOG.md` and are included in the portable release archive.
 
+
+Before tagging a release, run the release-candidate dry run from the source repository:
+
+```bash
+packaging/release-dry-run.sh --agent claude --agent codex
+```
+
+It builds the archive into a throwaway directory, verifies the checksum and
+`packaging/package-manifest.txt`, extracts and installs the archive into an isolated HOME, runs
+`--version` and `--show-config` through the installed launcher, runs `review-pr contract-test` for the
+named agents with the user's configuration (omit `--agent` to skip it, for example in CI), uninstalls
+with and without `--purge-config`, and writes a machine-readable checklist to
+`dist/release-dry-run-<version>.json` (`--output` overrides the path). Step details never contain
+the throwaway or home directory, so the checklist can be attached to release notes. The exit status
+is non-zero when any step fails.
 ## Execution concurrency and retry
 
 Primary reviews and cross-reviews run concurrently by default. Limit the number of reviewer processes that may run at once with:
