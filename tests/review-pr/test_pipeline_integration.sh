@@ -874,6 +874,124 @@ run_dispute_resolution_case() {
     assert_file_contains "${work_dir%/work}/${stem}-final.md" '<!-- review-pr:dispute-resolutions -->' 'the final report renders the dispute table'
 }
 
+run_cross_continuation_case() {
+    local case_dir="$suite_root/cross-continuation"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem gamma_findings gamma_raw continuation_prompt
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture interrupted cross-review.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-stops-early\n' >"$scenarios/gamma-cross-review"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "interrupted cross-review pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    gamma_findings="$work_dir/${stem}-cross-gamma-findings.json"
+    gamma_raw="$work_dir/${stem}-cross-gamma-raw.ndjson"
+    continuation_prompt="$capture/cross-review-findings-continuation-gamma-attempt-1.prompt"
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a cross-review that stopped early is continued instead of failing the run'
+    assert_eq '2' "$(jq '.findings | length' "$gamma_findings")" \
+        'the continued cross-review answers every required source ref'
+    assert_eq 'gamma:C-001' "$(jq -r '.findings[0].source_id' "$gamma_findings")" \
+        'the finding produced before the interruption keeps its place and its id'
+    assert_eq 'gamma:C-002' "$(jq -r '.findings[1].source_id' "$gamma_findings")" \
+        'the continued finding is appended after the kept one'
+    assert_eq '2' "$(grep -c '"record":"finding"' "$gamma_raw")" \
+        'the published raw stream is the merged stream'
+    assert_file_exists "$continuation_prompt" 'the continuation runs as its own pass'
+    assert_file_contains "$continuation_prompt" '===== BEGIN PENDING SOURCE REFS =====' \
+        'the continuation prompt lists only the unanswered refs'
+    assert_false 'the continuation prompt does not resend the kept record itself' \
+        grep -Fq '"source_id":"gamma:C-001"' "$continuation_prompt"
+    assert_file_contains "$continuation_prompt" 'gamma:C-001 already answers' \
+        'the continuation prompt names the kept record only as bookkeeping'
+    assert_file_exists "$work_dir/${stem}-cross-gamma-error-continuation-attempt-1-source-raw.ndjson" \
+        'the interrupted draft is preserved for inspection'
+    assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-cross-gamma-usage.json")" \
+        'cross-review usage counts the generation and the continuation pass'
+    assert_false 'a continued cross-review does not also run a schema repair' \
+        test -e "$work_dir/${stem}-cross-gamma-error-schema-repair-attempt-1-source-raw.ndjson"
+}
+
+run_cross_continuation_failure_case() {
+    local case_dir="$suite_root/cross-continuation-failure"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture unusable continuation.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-stops-early\n' >"$scenarios/gamma-cross-review"
+    printf 'cross-ndjson-ignores-pending\n' >"$scenarios/gamma-cross-review-findings-continuation"
+
+    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'a continuation that re-answers an already answered ref must not publish a review'
+    fi
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_contains "$case_dir/stderr.log" 'continuation_changed_kept_findings_or_remained_invalid' \
+        'the run reports why the continuation was refused'
+    assert_file_exists "$work_dir/${stem}-cross-gamma-error-continuation-attempt-1-invalid-raw.ndjson" \
+        'the refused merged stream is preserved for inspection'
+    assert_file_not_exists "$work_dir/${stem}-cross-gamma-findings.json" \
+        'a refused continuation publishes no canonical cross-review findings'
+    assert_file_not_exists "$work_dir/${stem}-cross-gamma-raw.ndjson" \
+        'a refused continuation publishes no raw cross-review stream'
+}
+
+run_final_continuation_case() {
+    local case_dir="$suite_root/final-continuation"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem final_findings continuation_prompt
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture interrupted final synthesis.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'final-ndjson-stops-early\n' >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "interrupted final synthesis pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    final_findings="$work_dir/${stem}-final-findings.json"
+    continuation_prompt="$capture/final-findings-continuation-alpha-attempt-1.prompt"
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a final synthesis that stopped early is continued instead of failing the run'
+    assert_eq 'FINAL-001' "$(jq -r '.findings[0].source_id' "$final_findings")" \
+        'the final finding produced before the interruption keeps its place'
+    assert_eq 'FINAL-002' "$(jq -r '.findings[1].source_id' "$final_findings")" \
+        'the continued final finding is appended after the kept one'
+    assert_eq '6' "$(jq '[.findings[].source_refs[]] | length' "$final_findings")" \
+        'the merged final stream covers every canonical cross-review ref'
+    assert_file_exists "$continuation_prompt" 'the final continuation runs as its own pass'
+    assert_file_contains "$continuation_prompt" 'INTERRUPTED FINAL SYNTHESIS' \
+        'the final continuation prompt names its own phase'
+    assert_file_exists "$work_dir/${stem}-final-error-continuation-source-raw.ndjson" \
+        'the interrupted final draft is preserved for inspection'
+    assert_file_exists "${work_dir%/work}/${stem}-final.md" \
+        'a continued final synthesis still publishes the report'
+}
+
 run_dispute_resolution_failure_case() {
     local case_dir="$suite_root/dispute-resolution-failure"
     local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
@@ -1395,6 +1513,9 @@ run_ndjson_primary_case
 run_ndjson_cross_case
 run_dispute_resolution_case
 run_dispute_resolution_failure_case
+run_cross_continuation_case
+run_cross_continuation_failure_case
+run_final_continuation_case
 run_measured_resolution_case
 run_unavailable_measurement_case
 run_split_claim_resolution_case

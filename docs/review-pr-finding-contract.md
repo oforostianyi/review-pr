@@ -340,7 +340,9 @@ keys remain language-independent.
   stream-level check, and missing or unknown source refs, so a failed attempt can be diagnosed from
   its log without re-running the validator.
 - A truncated stream without `complete` is a failed report even if earlier records parse. Preserve
-  those records as diagnostics; never publish them as a successful review.
+  those records as diagnostics; never publish them as a successful review. They may still seed one
+  continuation pass, described below, which republishes them only as part of a merged stream that
+  passes the full contract.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Leading
   or trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
@@ -359,6 +361,25 @@ keys remain language-independent.
 - Cross-review repair applies the same rule and additionally freezes `source_refs`, classification,
   severity, and contributing agents. The repaired stream must still cover every canonical primary
   `{agent, source_id}` input and may not introduce an unknown source ref.
+- A stream that stopped before answering every required source ref is continued rather than
+  repaired, because a bounded repair runs without tools and may not add findings, while the absent
+  records need their own repository evidence. The continuation is gated on the failure diagnostic
+  naming nothing but `stream.no_complete` and `source_refs.missing[...]`: any per-record problem,
+  unknown ref, duplicate `source_id`, or extra completion record keeps the bounded repair. A stream
+  that answered every ref and only omitted `complete` also stays with the repair, which can supply
+  that record without inventing content.
+- The continuation is a real review pass with repository access. It repeats the original phase
+  prompt and adds only bookkeeping: the ids of the records already produced, and a
+  `PENDING SOURCE REFS` block that replaces `REQUIRED SOURCE REFS` for that pass. The produced
+  records themselves are withheld, so the continuation has nothing to revise. Its terminal
+  `complete` counts the kept and the new findings together and describes the whole review.
+- A continuation may only append. The orchestrator drops the interrupted pass's own `complete`
+  record, concatenates the kept records with the continuation reply, and validates the merged
+  stream as one ordinary cross-review. It then compares the leading findings against the kept
+  records field by field, in order. A continuation that rewrites, reorders, or drops a kept
+  finding, repeats a kept `source_id`, or answers an unlisted ref is rejected, and the run falls
+  back to the ordinary whole-review retry. At most one continuation runs per attempt, and it
+  replaces the repair pass for that attempt rather than adding to it.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

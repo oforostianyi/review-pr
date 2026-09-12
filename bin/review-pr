@@ -161,6 +161,7 @@ FINAL_FINDING_CONTRACT_MODE=markdown
 DISPUTE_RESOLUTION_ENABLED=false
 EXECUTE_MEASUREMENTS_ENABLED=false
 MEASUREMENT_WORKING_DIRECTORY=""
+FINAL_PROMPT_FILE=""
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
@@ -4023,6 +4024,133 @@ describe_ndjson_validation_failure() {
     ' "$records_file" 2>/dev/null || printf 'diagnostics_unavailable'
 }
 
+# Reports whether a validation diagnostic describes a stream that ended before it
+# answered every required source ref. A bounded schema repair runs without tools
+# and may not add findings, so it cannot fix this: the absent records need fresh
+# repository evidence. Every other diagnostic, including a stream that answered
+# all refs but omitted its terminal record, stays with the schema repair.
+ndjson_failure_is_truncation() {
+    local detail=$1
+    local remainder=$detail
+    local item
+
+    [[ "$detail" == *'source_refs.missing['* ]] || return 1
+    while [[ -n "$remainder" ]]; do
+        if [[ "$remainder" == *', '* ]]; then
+            item=${remainder%%, *}
+            remainder=${remainder#*, }
+        else
+            item=$remainder
+            remainder=''
+        fi
+        case "$item" in
+            stream.no_complete) ;;
+            'source_refs.missing['*']') ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Splits a truncated draft into the part that is kept and the work that is left.
+# The agent's own terminal record is dropped, because a continued stream ends
+# with a terminal record that counts the merged findings instead. A final draft
+# that already carries resolution records is refused: its resolutions were
+# decided against an incomplete finding set, so the ordinary retry is honest.
+build_continuation_state() {
+    local phase=$1 draft_file=$2 expected_refs_file=$3 kept_file=$4 pending_refs_file=$5
+    local normalized_file
+
+    new_temp_file "${phase}-continuation-normalized"; normalized_file=$NEW_TEMP_FILE
+    normalize_primary_ndjson_stream "$draft_file" "$normalized_file" || return 1
+    [[ -s "$normalized_file" ]] || return 1
+    if [[ "$phase" == final ]] && jq -e -s 'any(.[]; type == "object" and .record == "resolution")' "$normalized_file" >/dev/null 2>&1; then
+        return 1
+    fi
+    jq -c 'select(type == "object" and .record != "complete")' "$normalized_file" >"$kept_file" 2>/dev/null || return 1
+    [[ -s "$kept_file" ]] || return 1
+    jq -s --slurpfile expected "$expected_refs_file" '
+        ([.[] | (.source_refs // [])[] | objects | {agent, source_id}] | unique_by(.agent, .source_id)) as $seen |
+        (($expected[0] // []) | map({agent, source_id}) | unique_by(.agent, .source_id)) as $wanted |
+        ($wanted - $seen)
+    ' "$kept_file" >"$pending_refs_file" 2>/dev/null || return 1
+    [[ "$(jq -r 'length' "$pending_refs_file" 2>/dev/null || printf 0)" != 0 ]] || return 1
+    return 0
+}
+
+# A continuation may only append. Every finding the truncated draft produced must
+# reappear at the head of the merged stream with the same substantive content, in
+# the same order, so a continued review cannot revise what it already decided.
+validate_continuation_prefix() {
+    local phase=$1 kept_file=$2 canonical_file=$3
+    local rejected_summary_key=''
+
+    [[ "$phase" != final ]] || rejected_summary_key='include_in_rejected_summary,'
+    jq -e -s --slurpfile canonical "$canonical_file" "
+        def content:
+            {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
+             recommendation, classification, severity, category, contributing_agents,
+             verification_limitations, ${rejected_summary_key} existing_feedback};
+        ([.[] | content]) as \$kept |
+        ([((\$canonical[0].findings) // [])[] | content][:(\$kept | length)]) == \$kept
+    " "$kept_file" >/dev/null 2>&1
+}
+
+# Joins a truncated draft's kept findings with the continuation reply. Only the
+# new part is unwrapped: the kept findings were already validated as records.
+merge_continuation_stream() {
+    local kept_file=$1 continuation_file=$2 merged_file=$3
+    local normalized_file
+
+    [[ -s "$kept_file" ]] || return 1
+    new_temp_file 'continuation-reply'; normalized_file=$NEW_TEMP_FILE
+    normalize_primary_ndjson_stream "$continuation_file" "$normalized_file" || return 1
+    [[ -s "$normalized_file" ]] || return 1
+    cat -- "$kept_file" "$normalized_file" >"$merged_file"
+}
+
+# Builds the prompt for one continuation pass. It repeats the original phase
+# prompt, because the missing records need the same repository evidence as any
+# first pass, and adds only the bookkeeping: which refs are already answered and
+# which are left. The produced records themselves are withheld so that the
+# continuation has nothing to revise.
+write_continuation_prompt() {
+    local phase=$1 prompt_file=$2 original_prompt_file=$3 kept_file=$4 pending_refs_file=$5
+    local kept_count kept_list phase_label resolution_note=''
+
+    [[ -s "$kept_file" ]] || return 1
+    [[ "$(jq -r 'length' "$pending_refs_file" 2>/dev/null || printf 0)" != 0 ]] || return 1
+    phase_label='cross-review'
+    if [[ "$phase" == final ]]; then
+        phase_label='final synthesis'
+        resolution_note='
+
+If the prompt above contains a REQUIRED RESOLUTIONS block, emit the complete set of resolution records in this pass, after the new finding records and before the complete record. A resolution may name a kept finding as its final_source_id.'
+    fi
+    kept_count=$(grep -c '' "$kept_file")
+    kept_list=$(jq -r '"- " + (.source_id // "?") + " already answers " +
+        ([((.source_refs // [])[] | objects | .agent + ":" + .source_id)] | join(", "))' "$kept_file") || return 1
+    {
+        cat -- "$original_prompt_file"
+        cat <<EOF
+
+===== BEGIN CONTINUATION OF AN INTERRUPTED ${phase_label^^} =====
+Your previous run of this same ${phase_label} ended before it answered every required source ref. The orchestrator kept the ${kept_count} finding record(s) you did produce. They are final, they are not shown to you again, and you cannot change them.
+
+These output records already exist. Do not repeat, revise, reclassify, or refer to them:
+${kept_list}
+
+The PENDING SOURCE REFS block below replaces the REQUIRED SOURCE REFS block above for this pass. Answer only those pairs, exactly one finding record each, then emit exactly one terminal complete record whose finding_count is ${kept_count} plus the number of new findings you emit. Its summary, verification_limitations, and positive_evidence must describe the whole ${phase_label}, the kept findings included.
+
+The orchestrator appends your output to the kept records and validates the merged stream as one ${phase_label}, so a record that repeats a kept source_id, or answers a pair that is not listed below, invalidates the continuation. Every new record needs its own repository evidence, exactly as in a first pass.${resolution_note}
+EOF
+        printf '\n===== BEGIN PENDING SOURCE REFS =====\n'
+        jq -c '.[] | {agent, source_id}' "$pending_refs_file"
+        printf '===== END PENDING SOURCE REFS =====\n'
+        printf '===== END CONTINUATION OF AN INTERRUPTED %s =====\n' "${phase_label^^}"
+    } >"$prompt_file"
+}
+
 process_final_ndjson_output() {
     local output_file=$1
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
@@ -4190,6 +4318,88 @@ $(cat -- "$draft_file")
 EOF
 }
 
+# One continuation pass for a final synthesis that stopped before it answered
+# every canonical cross-review ref. Same contract as the cross-review
+# continuation: a real pass with repository access that may only append, and
+# whose merged stream is validated as one ordinary final synthesis.
+attempt_final_ndjson_continuation() {
+    local output_file=$1 log_file=$2 usage_file=$3 usage_json_file=$4 started_at=$5 error_log=$6
+    local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
+    local expected_refs_file kept_file pending_file continuation_prompt continuation_output continuation_log
+    local continuation_usage continuation_usage_json combined_usage_json merged_file
+    local continuation_pid heartbeat_pid continuation_status continuation_stop_reason
+    local diagnostic_base="${error_log%.log}-continuation"
+    local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
+    local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
+    local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
+
+    new_temp_file 'final-continuation-refs'; expected_refs_file=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-kept'; kept_file=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-pending'; pending_file=$NEW_TEMP_FILE
+    if [[ -z "$FINAL_PROMPT_FILE" || ! -s "$FINAL_PROMPT_FILE" ]] \
+        || ! build_final_expected_refs "$expected_refs_file" \
+        || ! build_continuation_state final "$output_file" "$expected_refs_file" "$kept_file" "$pending_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_ineligible_unusable_draft"
+        return 1
+    fi
+    new_temp_file 'final-continuation-prompt'; continuation_prompt=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-output'; continuation_output=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-log'; continuation_log=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-usage'; continuation_usage=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-usage-json'; continuation_usage_json=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-combined'; combined_usage_json=$NEW_TEMP_FILE
+    new_temp_file 'final-continuation-merged'; merged_file=$NEW_TEMP_FILE
+    if ! write_continuation_prompt final "$continuation_prompt" "$FINAL_PROMPT_FILE" "$kept_file" "$pending_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_ineligible_unusable_draft"
+        return 1
+    fi
+    assert_new_target "$source_diagnostic"
+    cp -- "$output_file" "$source_diagnostic"
+
+    activity_log "Final ndjson-v1 output stopped before every cross-review ref was answered; continuing the same synthesis for the $(jq -r 'length' "$pending_file") unanswered ref(s)"
+    start_agent "$FINAL_SYNTHESIZER" 'final findings continuation' "$continuation_prompt" "$continuation_output" \
+        "$continuation_log" "$continuation_usage" "$continuation_usage_json"
+    continuation_pid=$STARTED_PID
+    set_dashboard_status final "$FINAL_SYNTHESIZER" RUNNING "$continuation_pid" "$started_at" 0
+    heartbeat_agent 'final findings continuation' "$FINAL_SYNTHESIZER" "$continuation_pid" "$started_at" & heartbeat_pid=$!
+    RUNNING_PIDS=("$continuation_pid" "$heartbeat_pid")
+    if wait "$continuation_pid"; then continuation_status=0; else continuation_status=$?; fi
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    RUNNING_PIDS=()
+    continuation_stop_reason=$(jq -r '.stop_reason // ""' "$continuation_usage_json" 2>/dev/null || true)
+
+    if (( continuation_status == 0 )) && [[ "$continuation_stop_reason" != length && -s "$continuation_output" ]] \
+        && merge_continuation_stream "$kept_file" "$continuation_output" "$merged_file"; then
+        FINAL_PROCESSED_RAW_FILE="" FINAL_PROCESSED_FINDINGS_FILE="" FINAL_PROCESSED_RESOLUTIONS_FILE="" FINAL_PROCESSED_DIAGNOSTICS_FILE=""
+        if process_final_ndjson_output "$merged_file" \
+            && validate_continuation_prefix final "$kept_file" "$FINAL_PROCESSED_FINDINGS_FILE"; then
+            mv -- "$merged_file" "$output_file"
+            merge_usage_summaries "$usage_json_file" "$continuation_usage_json" "$combined_usage_json"
+            mv -- "$combined_usage_json" "$usage_json_file"
+            jq -r '.reported_total_tokens // empty' "$usage_json_file" >"$usage_file"
+            [[ ! -s "$continuation_log" ]] || { printf '\n--- final synthesis continuation diagnostics ---\n' >>"$log_file"; cat -- "$continuation_log" >>"$log_file"; }
+            preserve_error_log "$log_file" "$log_diagnostic"
+            FINDING_CONTRACT_FAILURE_REASON=""
+            activity_log 'Final ndjson-v1 stream continued without changing the findings it had already produced'
+            return 0
+        fi
+        if [[ -s "$FINAL_PROCESSED_RAW_FILE" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$FINAL_PROCESSED_RAW_FILE" "$output_diagnostic"
+        elif [[ -s "$merged_file" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$merged_file" "$output_diagnostic"
+        fi
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_changed_kept_findings_or_remained_invalid"
+    elif (( continuation_status != 0 )); then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_exit_${continuation_status}"
+    elif [[ "$continuation_stop_reason" == length ]]; then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_output_token_limit"
+    else FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_empty_output"
+    fi
+    preserve_error_log "$continuation_log" "$log_diagnostic"
+    if [[ -s "$continuation_usage_json" ]]; then assert_new_target "$usage_diagnostic"; mv -- "$continuation_usage_json" "$usage_diagnostic"; fi
+    if [[ -s "$continuation_output" && ! -e "$output_diagnostic" ]]; then assert_new_target "$output_diagnostic"; mv -- "$continuation_output" "$output_diagnostic"; fi
+    return 1
+}
+
 attempt_final_ndjson_repair() {
     local output_file=$1 log_file=$2 usage_file=$3 usage_json_file=$4 started_at=$5 error_log=$6
     local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
@@ -4345,6 +4555,93 @@ $(cat -- "$baseline_file")
 $(cat -- "$draft_file")
 ===== END REJECTED NDJSON DRAFT =====
 EOF
+}
+
+# One continuation pass for a cross-review that stopped before it answered every
+# required source ref. Unlike the bounded schema repair this is a real review
+# pass with repository access, because the absent records need their own
+# evidence. It may only append: the merged stream is validated as one review and
+# the kept findings must survive it unchanged.
+attempt_cross_ndjson_continuation() {
+    local agent=$1 attempt=$2 output_file=$3 log_file=$4 usage_file=$5 usage_json_file=$6 started_at=$7
+    local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
+    local expected_refs_file kept_file pending_file continuation_prompt continuation_output continuation_log
+    local continuation_usage continuation_usage_json combined_usage_json merged_file
+    local scratch_raw scratch_findings continuation_pid heartbeat_pid continuation_status continuation_stop_reason
+    local actual_raw=${CROSS_RAW_OUTPUTS[$agent]} actual_findings=${CROSS_FINDINGS_OUTPUTS[$agent]}
+    local diagnostic_base="${ERROR_LOGS[$agent]%.log}-continuation-attempt-${attempt}"
+    local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
+    local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
+    local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
+
+    new_temp_file "cross-${agent}-continuation-refs"; expected_refs_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-kept"; kept_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-pending"; pending_file=$NEW_TEMP_FILE
+    if ! build_cross_expected_refs "$agent" "$expected_refs_file" \
+        || ! build_continuation_state cross "$output_file" "$expected_refs_file" "$kept_file" "$pending_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_ineligible_unusable_draft"
+        return 1
+    fi
+    new_temp_file "cross-${agent}-continuation-prompt"; continuation_prompt=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-output"; continuation_output=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-log"; continuation_log=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-usage"; continuation_usage=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-usage-json"; continuation_usage_json=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-combined"; combined_usage_json=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-merged"; merged_file=$NEW_TEMP_FILE
+    new_temp_file "cross-${agent}-continuation-raw"; scratch_raw=$NEW_TEMP_FILE; rm -- "$scratch_raw"
+    new_temp_file "cross-${agent}-continuation-findings"; scratch_findings=$NEW_TEMP_FILE; rm -- "$scratch_findings"
+    if ! write_continuation_prompt cross "$continuation_prompt" "${PROMPT_FILES[$agent]}" "$kept_file" "$pending_file"; then
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_ineligible_unusable_draft"
+        return 1
+    fi
+
+    activity_log "Cross-review ndjson-v1 output from ${agent} stopped before every source ref was answered; continuing the same review for the $(jq -r 'length' "$pending_file") unanswered ref(s)"
+    start_agent "$agent" "cross-review findings continuation" "$continuation_prompt" "$continuation_output" \
+        "$continuation_log" "$continuation_usage" "$continuation_usage_json" "$attempt"
+    continuation_pid=$STARTED_PID
+    set_dashboard_status cross "$agent" RUNNING "$continuation_pid" "$started_at" 0
+    heartbeat_agent "cross-review findings continuation" "$agent" "$continuation_pid" "$started_at" & heartbeat_pid=$!
+    RUNNING_PIDS+=("$heartbeat_pid")
+    if wait "$continuation_pid"; then continuation_status=0; else continuation_status=$?; fi
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    continuation_stop_reason=$(jq -r '.stop_reason // ""' "$continuation_usage_json" 2>/dev/null || true)
+
+    if (( continuation_status == 0 )) && [[ "$continuation_stop_reason" != length && -s "$continuation_output" ]] \
+        && merge_continuation_stream "$kept_file" "$continuation_output" "$merged_file"; then
+        CROSS_RAW_OUTPUTS[$agent]=$scratch_raw CROSS_FINDINGS_OUTPUTS[$agent]=$scratch_findings
+        if process_cross_ndjson_output "$merged_file" "$agent" \
+            && validate_continuation_prefix cross "$kept_file" "$scratch_findings"; then
+            CROSS_RAW_OUTPUTS[$agent]=$actual_raw CROSS_FINDINGS_OUTPUTS[$agent]=$actual_findings
+            assert_new_target "$actual_raw"; assert_new_target "$actual_findings"
+            mv -- "$scratch_raw" "$actual_raw"; mv -- "$scratch_findings" "$actual_findings"
+            assert_new_target "$source_diagnostic"; cp -- "$output_file" "$source_diagnostic"
+            mv -- "$merged_file" "$output_file"
+            merge_usage_summaries "$usage_json_file" "$continuation_usage_json" "$combined_usage_json"
+            mv -- "$combined_usage_json" "$usage_json_file"
+            jq -r '.reported_total_tokens // empty' "$usage_json_file" >"$usage_file"
+            [[ ! -s "$continuation_log" ]] || { printf '\n--- cross-review continuation diagnostics ---\n' >>"$log_file"; cat -- "$continuation_log" >>"$log_file"; }
+            preserve_error_log "$log_file" "$log_diagnostic"
+            FINDING_CONTRACT_FAILURE_REASON=""
+            activity_log "Cross-review ndjson-v1 stream continued for ${agent} without changing the findings it had already produced"
+            return 0
+        fi
+        CROSS_RAW_OUTPUTS[$agent]=$actual_raw CROSS_FINDINGS_OUTPUTS[$agent]=$actual_findings
+        if [[ -s "$scratch_raw" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$scratch_raw" "$output_diagnostic"
+        elif [[ -s "$merged_file" ]]; then
+            assert_new_target "$output_diagnostic"; mv -- "$merged_file" "$output_diagnostic"
+        fi
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_changed_kept_findings_or_remained_invalid"
+    elif (( continuation_status != 0 )); then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_exit_${continuation_status}"
+    elif [[ "$continuation_stop_reason" == length ]]; then FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_output_token_limit"
+    else FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; continuation_empty_output"
+    fi
+    preserve_error_log "$continuation_log" "$log_diagnostic"
+    if [[ -s "$continuation_usage_json" ]]; then assert_new_target "$usage_diagnostic"; mv -- "$continuation_usage_json" "$usage_diagnostic"; fi
+    if [[ -s "$continuation_output" && ! -e "$output_diagnostic" ]]; then assert_new_target "$output_diagnostic"; mv -- "$continuation_output" "$output_diagnostic"; fi
+    return 1
 }
 
 attempt_cross_ndjson_repair() {
@@ -5548,9 +5845,9 @@ run_configured_command_in_worktree() {
 
     if [[ "$phase" == "primary review" || "$phase" == "primary findings repair" ]]; then
         output_contract=$PRIMARY_FINDING_CONTRACT_MODE
-    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" ]]; then
+    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" || "$phase" == "cross-review findings continuation" ]]; then
         output_contract=$CROSS_FINDING_CONTRACT_MODE
-    elif [[ "$phase" == "final synthesis" || "$phase" == "final findings repair" ]]; then
+    elif [[ "$phase" == "final synthesis" || "$phase" == "final findings repair" || "$phase" == "final findings continuation" ]]; then
         output_contract=$FINAL_FINDING_CONTRACT_MODE
     fi
 
@@ -5822,12 +6119,12 @@ start_agent() {
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete ndjson-v1 stream with no Markdown or prose'
         fi
-    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" ]]; then
+    elif [[ "$phase" == "cross-review" || "$phase" == "cross-review findings repair" || "$phase" == "cross-review findings continuation" ]]; then
         output_contract=$CROSS_FINDING_CONTRACT_MODE
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete cross-review ndjson-v1 stream with explicit source_refs and no Markdown or prose'
         fi
-    elif [[ "$phase" == "final synthesis" || "$phase" == "final findings repair" ]]; then
+    elif [[ "$phase" == "final synthesis" || "$phase" == "final findings repair" || "$phase" == "final findings continuation" ]]; then
         output_contract=$FINAL_FINDING_CONTRACT_MODE
         if [[ "$output_contract" == ndjson-v1 ]]; then
             output_contract_description='complete final-synthesis ndjson-v1 stream with explicit cross-review source_refs and no Markdown or prose'
@@ -6545,6 +6842,7 @@ run_review_phase() {
     local exit_status
     local failure_reason
     local stop_reason
+    local cross_recovery
     local output_tokens
     local token_display
     local now
@@ -6668,15 +6966,22 @@ run_review_phase() {
             fi
             if [[ -z "$failure_reason" && "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
                 if ! process_cross_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
-                    printf 'cross-review ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
-                    if attempt_cross_ndjson_repair "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
+                    printf 'cross-review ndjson-v1 validation failed before recovery: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                    # A stream that stopped short of the required source refs is
+                    # continued; every other failure gets the bounded no-tools
+                    # schema repair. The two are mutually exclusive by construction.
+                    cross_recovery=attempt_cross_ndjson_repair
+                    if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
+                        cross_recovery=attempt_cross_ndjson_continuation
+                    fi
+                    if "$cross_recovery" "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
                         "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
                         "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
                         read_token_usage "${TEMP_USAGE_FILES[$agent]}"
                         token_display=$TOKEN_USAGE_DISPLAY
                     else
                         failure_reason="invalid cross-review ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-                        printf 'cross-review ndjson-v1 schema repair failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                        printf 'cross-review ndjson-v1 recovery failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
                     fi
                 fi
             fi
@@ -8777,6 +9082,7 @@ run_comparison_synthesis() {
 
 run_final_synthesis() {
     local error_log=$1
+    local final_recovery
     local final_prompt
     local final_output
     local final_log
@@ -8854,6 +9160,7 @@ FINAL_PROCESSED_DIAGNOSTICS_FILE=""
         )
     done
     write_final_prompt "$final_prompt" "${final_prompt_arguments[@]}"
+    FINAL_PROMPT_FILE=$final_prompt
 
     activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
     start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$final_prompt" "$final_output" "$final_log" "$final_usage" "$final_usage_json"
@@ -8902,7 +9209,13 @@ FINAL_PROCESSED_DIAGNOSTICS_FILE=""
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         if ! process_final_ndjson_output "$final_output"; then
             printf 'final ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"$final_log"
-            if attempt_final_ndjson_repair "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
+            # A stream that stopped short of the required cross-review refs is
+            # continued; every other failure gets the bounded no-tools repair.
+            final_recovery=attempt_final_ndjson_repair
+            if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
+                final_recovery=attempt_final_ndjson_continuation
+            fi
+            if "$final_recovery" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
                 final_finished_at=$(date +%s)
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY

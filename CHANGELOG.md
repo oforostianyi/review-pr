@@ -4,6 +4,16 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- A cross-review whose `ndjson-v1` stream stops before it answers every required source ref is now
+  continued instead of retried from scratch. The orchestrator keeps the records the interrupted
+  pass produced, asks the same agent for the unanswered refs alone, and validates the merged stream
+  as one review; a continuation that rewrites, reorders, or drops a kept finding is rejected and the
+  ordinary retry takes over. The continuation replaces the bounded schema repair for that attempt,
+  so an attempt still costs at most two agent invocations. Failures that a no-tools repair can fix,
+  including a stream that answered every ref and only omitted `complete`, keep using the repair.
+
 ### Fixed
 
 - A Codex answer spread over several agent messages is joined in order before validation instead

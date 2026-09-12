@@ -170,6 +170,128 @@ assert_eq 'source_refs.missing[beta:beta:F-001], source_refs.unknown[beta:beta:F
     'validation diagnostics list missing and unknown source refs'
 assert_eq '' "$(describe_ndjson_validation_failure cross "$cross_records" alpha "$cross_expected_refs")" \
     'validation diagnostics are empty for a valid stream'
+
+# A stream that stopped early is the one failure a no-tools schema repair cannot
+# fix: the missing records need repository evidence, so it is continued instead.
+assert_true 'an unanswered source ref with no terminal record is a truncated stream' \
+    ndjson_failure_is_truncation 'stream.no_complete, source_refs.missing[beta:beta:F-001,gamma:gamma:F-002]'
+assert_true 'an unanswered source ref alone is a truncated stream' \
+    ndjson_failure_is_truncation 'source_refs.missing[beta:beta:F-001]'
+assert_false 'a stream that answered every ref but omitted complete is left to schema repair' \
+    ndjson_failure_is_truncation 'stream.no_complete'
+assert_false 'a truncated stream carrying a malformed record is not continued' \
+    ndjson_failure_is_truncation 'source_refs.missing[beta:beta:F-001], finding[alpha:C-001].claim'
+assert_false 'an unknown source ref disqualifies continuation' \
+    ndjson_failure_is_truncation 'source_refs.missing[beta:beta:F-001], source_refs.unknown[beta:beta:F-009]'
+assert_false 'an empty diagnostic is not a truncated stream' \
+    ndjson_failure_is_truncation ''
+assert_false 'an unavailable diagnostic is not a truncated stream' \
+    ndjson_failure_is_truncation 'diagnostics_unavailable'
+
+# Continuing a truncated cross-review keeps every finding the agent produced and
+# asks only for the source refs it never reached.
+continuation_expected_refs="$test_root/continuation-expected-refs.json"
+printf '%s\n' '[{"agent":"beta","source_id":"beta:F-001"},{"agent":"gamma","source_id":"gamma:F-002"}]' \
+    >"$continuation_expected_refs"
+truncated_draft="$test_root/cross-truncated.ndjson"
+jq -c '.[0]' "$cross_records" >"$truncated_draft"
+continuation_kept="$test_root/continuation-kept.ndjson"
+continuation_pending="$test_root/continuation-pending.json"
+assert_true 'a truncated cross-review draft yields a continuation state' \
+    build_continuation_state cross "$truncated_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+assert_eq '1' "$(grep -c '' "$continuation_kept")" \
+    'the continuation keeps the findings the draft already produced'
+assert_eq 'gamma:gamma:F-002' "$(jq -r '.[] | .agent + ":" + .source_id' "$continuation_pending")" \
+    'the continuation asks only for the unanswered source refs'
+completed_draft="$test_root/cross-completed.ndjson"
+jq -c '.[]' "$cross_records" >"$completed_draft"
+assert_true 'a draft that stopped after its own terminal record is still continued' \
+    build_continuation_state cross "$completed_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+assert_eq '1' "$(grep -c '' "$continuation_kept")" \
+    'the superseded terminal record is dropped from the kept findings'
+findingless_draft="$test_root/cross-findingless.ndjson"
+jq -c '.[1]' "$cross_records" >"$findingless_draft"
+assert_false 'a draft without a single finding cannot be continued' \
+    build_continuation_state cross "$findingless_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+
+# A continuation may only append. The findings the draft already produced must
+# survive the merge unchanged, in their original order.
+merged_records="$test_root/cross-merged.json"
+jq -s '.[0] as $d | [$d[0],
+    ($d[0] | .source_id = "alpha:C-002" | .source_refs = [{agent: "gamma", source_id: "gamma:F-002"}] |
+        .contributing_agents = ["gamma"] | .title = "Continued cross classification"),
+    ($d[1] | .finding_count = 2)]' "$cross_records" >"$merged_records"
+merged_canonical="$test_root/cross-merged-canonical.json"
+assert_true 'a merged continuation stream validates as one cross-review' \
+    validate_cross_ndjson_records "$merged_records" "$merged_canonical" alpha "$continuation_expected_refs"
+build_continuation_state cross "$truncated_draft" "$continuation_expected_refs" \
+    "$continuation_kept" "$continuation_pending"
+assert_true 'an appended continuation preserves the kept findings' \
+    validate_continuation_prefix cross "$continuation_kept" "$merged_canonical"
+rewritten_prefix="$test_root/cross-merged-rewritten.json"
+jq '.findings[0].claim = "The continuation rewrote the kept claim."' "$merged_canonical" >"$rewritten_prefix"
+assert_false 'a continuation that rewrites a kept finding is rejected' \
+    validate_continuation_prefix cross "$continuation_kept" "$rewritten_prefix"
+reordered_prefix="$test_root/cross-merged-reordered.json"
+jq '.findings = [.findings[1], .findings[0]]' "$merged_canonical" >"$reordered_prefix"
+assert_false 'a continuation that reorders the kept findings is rejected' \
+    validate_continuation_prefix cross "$continuation_kept" "$reordered_prefix"
+dropped_prefix="$test_root/cross-merged-dropped.json"
+jq '.findings = [.findings[1]]' "$merged_canonical" >"$dropped_prefix"
+assert_false 'a continuation that drops a kept finding is rejected' \
+    validate_continuation_prefix cross "$continuation_kept" "$dropped_prefix"
+
+# The merge is mechanical: the kept findings, then whatever the continuation
+# returned, with the usual transport wrapper stripped from the new part only.
+continuation_reply="$test_root/cross-continuation-reply.ndjson"
+{
+    printf '%s\n' '```ndjson'
+    jq -c '.[1], .[2]' "$merged_records"
+    printf '%s\n' '```'
+} >"$continuation_reply"
+merged_stream="$test_root/cross-merged-stream.ndjson"
+assert_true 'a fenced continuation reply merges onto the kept findings' \
+    merge_continuation_stream "$continuation_kept" "$continuation_reply" "$merged_stream"
+assert_eq '3' "$(grep -c '' "$merged_stream")" 'the merged stream holds the kept and the continued records'
+assert_eq 'complete' "$(tail -n 1 "$merged_stream" | jq -r '.record')" \
+    'the merged stream ends with the continuation terminal record'
+assert_eq 'alpha:C-001' "$(head -n 1 "$merged_stream" | jq -r '.source_id')" \
+    'the merged stream opens with the kept finding'
+merged_stream_records="$test_root/cross-merged-stream-records.json"
+merged_stream_canonical="$test_root/cross-merged-stream-canonical.json"
+jq -s '.' "$merged_stream" >"$merged_stream_records"
+assert_true 'the merged stream satisfies the ordinary cross-review contract' \
+    validate_cross_ndjson_records "$merged_stream_records" "$merged_stream_canonical" alpha "$continuation_expected_refs"
+empty_reply="$test_root/cross-continuation-empty.ndjson"
+: >"$empty_reply"
+assert_false 'an empty continuation reply cannot be merged' \
+    merge_continuation_stream "$continuation_kept" "$empty_reply" "$test_root/cross-merged-empty.ndjson"
+
+# The continuation runs as a real review with repository access, so it repeats the
+# original phase prompt. It learns which refs are done, never what was said about
+# them: resending the produced findings would invite the agent to revise them.
+continuation_prompt="$test_root/cross-continuation-prompt.txt"
+original_prompt="$test_root/cross-original-prompt.txt"
+printf '%s\n' 'ORIGINAL CROSS-REVIEW PROMPT BODY' >"$original_prompt"
+assert_true 'a continuation prompt is written from the original phase prompt' \
+    write_continuation_prompt cross "$continuation_prompt" "$original_prompt" \
+        "$continuation_kept" "$continuation_pending"
+assert_file_contains "$continuation_prompt" 'ORIGINAL CROSS-REVIEW PROMPT BODY' \
+    'the continuation repeats the review it is finishing'
+assert_file_contains "$continuation_prompt" 'gamma:F-002' \
+    'the continuation prompt names the unanswered source ref'
+assert_file_contains "$continuation_prompt" 'alpha:C-001' \
+    'the continuation prompt names the findings already produced'
+assert_file_contains "$continuation_prompt" 'finding_count' \
+    'the continuation prompt states how the terminal record must count'
+assert_false 'the continuation prompt withholds the content of the kept findings' \
+    grep -Fq 'The changed branch can fail.' "$continuation_prompt"
+assert_false 'a continuation prompt needs at least one unanswered source ref' \
+    write_continuation_prompt cross "$test_root/cross-continuation-prompt-empty.txt" "$original_prompt" \
+        "$continuation_kept" "$test_root/continuation-pending-empty.json"
 rejected_empty_rendered="$test_root/cross-rejected-empty.md"
 assert_true 'a rejected claim without a failure scenario renders' \
     render_cross_findings_markdown "$rejected_empty_canonical" "$rejected_empty_rendered" EN
@@ -445,6 +567,46 @@ changed_final_flag="$test_root/final-changed-rejection-flag.json"
 jq '.findings[0].include_in_rejected_summary = true' "$final_canonical" >"$changed_final_flag"
 assert_false 'final repair stability rejects changes to rejection presentation decisions' \
     validate_final_repair_stability "$final_repair_baseline" "$changed_final_flag"
+
+# A final synthesis that stopped early is continued on the same terms as a
+# cross-review, with one extra rule: a draft that already decided disputes is
+# refused, because those decisions were made against an incomplete finding set.
+final_continuation_refs="$test_root/final-continuation-refs.json"
+jq '[.[0], (.[0] | .agent = "gamma" | .source_id = "gamma:C-001")]' "$final_expected_refs" \
+    >"$final_continuation_refs"
+final_truncated_draft="$test_root/final-truncated.ndjson"
+jq -c '.[0]' "$final_records" >"$final_truncated_draft"
+final_continuation_kept="$test_root/final-continuation-kept.ndjson"
+final_continuation_pending="$test_root/final-continuation-pending.json"
+assert_true 'a truncated final draft yields a continuation state' \
+    build_continuation_state final "$final_truncated_draft" "$final_continuation_refs" \
+        "$final_continuation_kept" "$final_continuation_pending"
+assert_eq 'gamma:gamma:C-001' "$(jq -r '.[] | .agent + ":" + .source_id' "$final_continuation_pending")" \
+    'the final continuation asks only for the unanswered cross-review refs'
+final_resolution_draft="$test_root/final-truncated-with-resolution.ndjson"
+{
+    cat -- "$final_truncated_draft"
+    printf '%s\n' '{"record":"resolution","schema_version":1,"dispute_id":"dispute:alpha:alpha:F-001"}'
+} >"$final_resolution_draft"
+assert_false 'a final draft that already resolved disputes is not continued' \
+    build_continuation_state final "$final_resolution_draft" "$final_continuation_refs" \
+        "$final_continuation_kept" "$final_continuation_pending"
+build_continuation_state final "$final_truncated_draft" "$final_continuation_refs" \
+    "$final_continuation_kept" "$final_continuation_pending"
+assert_true 'an appended final continuation preserves the kept findings' \
+    validate_continuation_prefix final "$final_continuation_kept" "$final_canonical"
+final_changed_prefix="$test_root/final-continuation-changed.json"
+jq '.findings[0].include_in_rejected_summary = true' "$final_canonical" >"$final_changed_prefix"
+assert_false 'a final continuation may not change a kept rejection presentation decision' \
+    validate_continuation_prefix final "$final_continuation_kept" "$final_changed_prefix"
+final_continuation_prompt="$test_root/final-continuation-prompt.txt"
+assert_true 'a final continuation prompt is written from the original phase prompt' \
+    write_continuation_prompt final "$final_continuation_prompt" "$original_prompt" \
+        "$final_continuation_kept" "$final_continuation_pending"
+assert_file_contains "$final_continuation_prompt" 'INTERRUPTED FINAL SYNTHESIS' \
+    'the final continuation prompt names its own phase'
+assert_file_contains "$final_continuation_prompt" 'REQUIRED RESOLUTIONS' \
+    'the final continuation prompt still demands the whole resolution set'
 
 FINALIZATION_LANGUAGE=EN
 FINAL_HEADER_TITLE='# Code Review: [PR #1](https://example.test/1) — Fixture'

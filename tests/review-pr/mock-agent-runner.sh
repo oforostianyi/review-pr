@@ -194,13 +194,13 @@ emit_valid_for_phase() {
             exit 65
         fi
         emit_valid_ndjson_primary
-    elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' ]]; then
+    elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' || "$phase" == 'cross-review findings continuation' ]]; then
         if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
             emit_valid_ndjson_cross
         else
             emit_valid_output
         fi
-    elif [[ "$phase" == 'final synthesis' || "$phase" == 'final findings repair' ]]; then
+    elif [[ "$phase" == 'final synthesis' || "$phase" == 'final findings repair' || "$phase" == 'final findings continuation' ]]; then
         if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
             emit_valid_ndjson_final
         else
@@ -214,16 +214,24 @@ emit_valid_for_phase() {
 emit_valid_ndjson_cross() {
     # One record per required source ref. With "reject-first" the first listed
     # ref is REJECTED and the rest CONFIRMED, which creates exactly one dispute
-    # when another cross-reviewer confirms that same primary finding.
+    # when another cross-reviewer confirms that same primary finding. A
+    # continuation prompt carries PENDING SOURCE REFS instead, and its records
+    # are numbered after the findings the interrupted pass already produced.
     local mode=${1:-confirm}
-    local refs_json source_agent
+    local refs_json source_agent pending_json kept=0
     refs_json=$(prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s '.')
+    pending_json=$(prompt_block_lines 'PENDING SOURCE REFS' | jq -s '.')
+    if [[ "$(jq 'length' <<<"$pending_json")" != 0 ]]; then
+        refs_json=$pending_json
+        kept=$(sed -n 's/.*kept the \([0-9][0-9]*\) finding record.*/\1/p' <<<"$prompt_text" | head -n 1)
+        [[ -n "$kept" ]] || kept=0
+    fi
     if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
         source_agent=alpha
         [[ "$agent" != alpha ]] || source_agent=beta
         refs_json=$(jq -nc --arg a "$source_agent" '[{agent: $a, source_id: ($a + ":F-001")}]')
     fi
-    jq -c --arg agent "$agent" --arg mode "$mode" '
+    jq -c --arg agent "$agent" --arg mode "$mode" --argjson kept "$kept" '
         to_entries
         | map(if .key == 0 and $mode == "split-first" then (., {key: .key, value: .value, split: true}) else . end)
         | to_entries[] | .value + {ordinal: .key} |
@@ -232,7 +240,7 @@ emit_valid_ndjson_cross() {
         {
         record: "finding",
         schema_version: 1,
-        source_id: ($agent + ":C-" + (("00" + ((.ordinal + 1) | tostring))[-3:])),
+        source_id: ($agent + ":C-" + (("00" + ((.ordinal + 1 + $kept) | tostring))[-3:])),
         source_refs: [.value],
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
@@ -247,10 +255,10 @@ emit_valid_ndjson_cross() {
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []}
     }' <<<"$refs_json"
-    jq -c --arg mode "$mode" '{
+    jq -c --arg mode "$mode" --argjson kept "$kept" '{
         record: "complete",
         schema_version: 1,
-        finding_count: (length + (if $mode == "split-first" then 1 else 0 end)),
+        finding_count: (length + $kept + (if $mode == "split-first" then 1 else 0 end)),
         summary: "The supplied fixture findings were classified.",
         verification_limitations: [],
         positive_evidence: []
@@ -269,11 +277,34 @@ emit_resolution_records() {
         basis: $basis, basis_source: (if $basis_source == "" then null else $basis_source end), limitations: []}'
 }
 
+# One record for the first required source ref and no terminal record: the final
+# synthesis equivalent of an agent that treats its first answer as the whole turn.
+emit_truncated_ndjson_final() {
+    prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s -c '.[0:1] | {
+        record: "finding", schema_version: 1, source_id: "FINAL-001", source_refs: .,
+        title: "Fixture changed-line defect", claim: "The fixture changed branch can fail.",
+        anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, "end": 1},
+        evidence: ["The canonical cross-review confirms the exact changed branch."],
+        failure_scenario: "The fixture request reaches the changed branch and fails.",
+        recommendation: "Correct the changed branch.", classification: "CONFIRMED", severity: "P1",
+        category: "correctness", contributing_agents: ([.[].agent] | unique),
+        verification_limitations: [], existing_feedback: {state: "new", thread_ids: []},
+        include_in_rejected_summary: false
+    }'
+}
+
 emit_valid_ndjson_final() {
     local resolution_status=${1:-resolved} resolution_method=${2:-source} command_json=${3:-null}
     local basis=${4:-general_engineering} basis_source=${5:-} classification=${6:-CONFIRMED} split=${7:-false} kind=${8:-factual}
-    local refs_json
+    local refs_json pending_json kept=0 primary_id=FINAL-001
     refs_json=$(prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s '.')
+    pending_json=$(prompt_block_lines 'PENDING SOURCE REFS' | jq -s '.')
+    if [[ "$(jq 'length' <<<"$pending_json")" != 0 ]]; then
+        refs_json=$pending_json
+        primary_id=FINAL-002
+        kept=$(sed -n 's/.*kept the \([0-9][0-9]*\) finding record.*/\1/p' <<<"$prompt_text" | head -n 1)
+        [[ -n "$kept" ]] || kept=0
+    fi
     if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
         refs_json='[{"agent":"alpha","source_id":"alpha:C-001"},{"agent":"beta","source_id":"beta:C-001"}]'
     fi
@@ -291,10 +322,10 @@ emit_valid_ndjson_final() {
         }' <<<"$refs_json"
         refs_json=$(jq -c '.[:-1]' <<<"$refs_json")
     fi
-    jq -c --arg classification "$classification" '{
+    jq -c --arg classification "$classification" --arg primary_id "$primary_id" '{
         record: "finding",
         schema_version: 1,
-        source_id: "FINAL-001",
+        source_id: $primary_id,
         source_refs: .,
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
@@ -311,10 +342,10 @@ emit_valid_ndjson_final() {
         include_in_rejected_summary: false
     }' <<<"$refs_json"
     emit_resolution_records "$resolution_status" "$resolution_method" "$command_json" "$basis" "$basis_source" "$kind"
-    jq -nc --argjson count "$(if [[ "$split" == true ]]; then printf 2; else printf 1; fi)" '{
+    jq -nc --argjson count "$(if [[ "$split" == true ]]; then printf 2; else printf 1; fi)" --argjson kept "$kept" '{
         record: "complete",
         schema_version: 1,
-        finding_count: $count,
+        finding_count: ($count + $kept),
         summary: "The canonical cross-review finding is confirmed.",
         verification_limitations: [],
         positive_evidence: []
@@ -394,6 +425,24 @@ case "$behavior" in
     cross-ndjson-rejected)
         emit_valid_ndjson_cross reject-first
         write_usage null 57
+        ;;
+    cross-ndjson-stops-early)
+        # Ends the turn after the first record, with no terminal record: the
+        # failure the real agents produce when they treat one record as a whole
+        # answer. awk, not head, so the producing jq never sees SIGPIPE.
+        emit_valid_ndjson_cross | awk 'NR == 1'
+        write_usage null 31
+        ;;
+    final-ndjson-stops-early)
+        emit_truncated_ndjson_final
+        write_usage null 29
+        ;;
+    cross-ndjson-ignores-pending)
+        # Answers the original required refs instead of the pending ones, which
+        # duplicates a kept source_id once the orchestrator merges the streams.
+        prompt_text=${prompt_text//PENDING SOURCE REFS/SUPERSEDED SOURCE REFS}
+        emit_valid_ndjson_cross
+        write_usage null 33
         ;;
     cross-ndjson-split)
         emit_valid_ndjson_cross split-first

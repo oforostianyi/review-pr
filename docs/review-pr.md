@@ -399,7 +399,7 @@ Validation enforces the principle that reviewer count never settles a fact: a fa
 
 `reporting.execute_measurements: true` (default `false`, requires `dispute_resolution: true`) makes the orchestrator run the `command` a resolution proposes when its `verification_method` is `command` or `test`. Execution is deliberately narrow: the argv array runs without a shell in the review checkout at the exact PR head; only read-only tools are allow-listed (`rg`, `grep`, `ls`, `cat`, `head`, `wc`, `test`, and `git` with `show`, `log`, `diff`, `ls-tree`, `cat-file`, `grep`, `rev-parse`, `blame`); absolute or parent-directory paths, `rg --pre`, and `git` configuration or directory overrides are refused; each command gets a ten-second portable timeout; stdout and stderr excerpts are bounded to 2000 characters and credential-like values are redacted. The result is attached to the resolution as a separate `measurement` object (`executed`, `skipped_reason`, `exit_status`, excerpts, `duration_ms`, `commit`) in `*-final-resolutions.json`, so the model's `observed` claim and the orchestrator's measurement never mix, and the final report gains a `Measured` column. Refused commands are recorded as `skipped: not_allowlisted` and never run; artifact-only `--rerun-final` skips execution with `checkout_unavailable` because it has no checkout.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
+There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. A cross-review that stopped before answering every required source ref receives a continuation pass instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with the kept findings unchanged. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
 ### Verification limitations and positive evidence
 
@@ -861,6 +861,19 @@ all substantive fields against a parsed baseline and rejects the repair on any d
 Structured cross-review has an equivalent `REVIEW_PR_PHASE=cross-review findings repair` pass. It
 also freezes classification, severity, source provenance, and contributing agents, then reruns the
 complete schema, input-coverage, and changed-line validation before publishing any artifact.
+
+A cross-review stream that stops before it answers every required source ref gets a different
+pass instead: `REVIEW_PR_PHASE=cross-review findings continuation`. It is not a repair. The agent
+keeps its tools and receives the original cross-review prompt again, followed by a continuation
+block that names the records it already produced and a `PENDING SOURCE REFS` block that replaces
+`REQUIRED SOURCE REFS` for that pass. The model answers only the listed refs and ends with one
+`complete` record counting the kept and the new findings together. The orchestrator appends the
+reply to the kept records, validates the merged stream as an ordinary cross-review, and compares
+the leading findings against the kept ones field by field. Rewriting, reordering, or dropping a
+kept finding rejects the continuation and the run falls back to the ordinary retry. The
+continuation replaces the repair pass for that attempt, so an attempt still costs at most two
+invocations, and it runs only when the failure diagnostic names nothing but `stream.no_complete`
+and `source_refs.missing[...]`.
 
 Structured final synthesis uses `REVIEW_PR_PHASE=final findings repair` for the equivalent bounded
 pass. It also freezes `include_in_rejected_summary`; primary provenance is still derived by the
