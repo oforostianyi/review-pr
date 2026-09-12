@@ -69,7 +69,11 @@ assert_file_contains "$show_output" 'alpha: label=Alpha model=mock-alpha effort=
 pi_thinking_config="$test_root/pi-thinking.json"
 pi_thinking_output="$test_root/pi-thinking-show-config.txt"
 jq '.agents.pi.enabled = true | .agents.pi.effort = "high" | .synthesizer = "pi" | .finalization.effort = "xhigh"' "$config_file" >"$pi_thinking_config"
-"$repo_root/bin/review-pr" --config "$pi_thinking_config" --show-config >"$pi_thinking_output" 2>&1 \
+# Enabling Pi makes --show-config require the pi command; an inert stand-in suffices here.
+mkdir -p -- "$test_root/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "--append-system-prompt <text>" "--thinking <level>"\n' >"$test_root/bin/pi"
+chmod 0755 "$test_root/bin/pi"
+PATH="$test_root/bin:$PATH" "$repo_root/bin/review-pr" --config "$pi_thinking_config" --show-config >"$pi_thinking_output" 2>&1 \
     || fail "a Pi thinking level must be accepted as effort: $(tail -n 2 "$pi_thinking_output")"
 assert_file_contains "$pi_thinking_output" "pi: label=Pi model=local-model effort=high" \
     'the Pi thinking level is shown as the agent effort'
