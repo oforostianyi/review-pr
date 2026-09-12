@@ -191,12 +191,15 @@ emit_valid_ndjson_cross() {
         refs_json=$(jq -nc --arg a "$source_agent" '[{agent: $a, source_id: ($a + ":F-001")}]')
     fi
     jq -c --arg agent "$agent" --arg mode "$mode" '
-        to_entries[] |
+        to_entries
+        | map(if .key == 0 and $mode == "split-first" then (., {key: .key, value: .value, split: true}) else . end)
+        | to_entries[] | .value + {ordinal: .key} |
         (.key == 0 and $mode == "reject-first") as $rejected |
+        (.split // false) as $split |
         {
         record: "finding",
         schema_version: 1,
-        source_id: ($agent + ":C-" + (("00" + ((.key + 1) | tostring))[-3:])),
+        source_id: ($agent + ":C-" + (("00" + ((.ordinal + 1) | tostring))[-3:])),
         source_refs: [.value],
         title: "Fixture changed-line defect",
         claim: "The fixture changed branch can fail.",
@@ -205,16 +208,16 @@ emit_valid_ndjson_cross() {
         failure_scenario: (if $rejected then null else "The fixture request reaches the changed branch and fails." end),
         recommendation: "Correct the changed branch.",
         classification: (if $rejected then "REJECTED" else "CONFIRMED" end),
-        severity: (if $rejected then null else "P1" end),
+        severity: (if $rejected then null elif $split then "P3" else "P1" end),
         category: "correctness",
         contributing_agents: [.value.agent],
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []}
     }' <<<"$refs_json"
-    jq -c '{
+    jq -c --arg mode "$mode" '{
         record: "complete",
         schema_version: 1,
-        finding_count: length,
+        finding_count: (length + (if $mode == "split-first" then 1 else 0 end)),
         summary: "The supplied fixture findings were classified.",
         verification_limitations: [],
         positive_evidence: []
@@ -222,24 +225,40 @@ emit_valid_ndjson_cross() {
 }
 
 emit_resolution_records() {
-    local status=${1:-resolved} method=${2:-source}
-    prompt_block_lines 'REQUIRED RESOLUTIONS' | jq -c --arg status "$status" --arg method "$method" '{
+    local status=${1:-resolved} method=${2:-source} command_json=${3:-null} basis=${4:-general_engineering} basis_source=${5:-} kind=${6:-factual}
+    prompt_block_lines 'REQUIRED RESOLUTIONS' | jq -c --arg status "$status" --arg method "$method" --argjson command "$command_json" \
+        --arg basis "$basis" --arg basis_source "$basis_source" --arg kind "$kind" '{
         record: "resolution", schema_version: 1, dispute_id, primary_ref,
         conflicting_refs: [.conflicting_refs[] | {agent, source_id}],
-        final_source_id: "FINAL-001", dispute_kind: "factual", resolution_status: $status,
-        verification_method: $method, command: null,
-        observed: (if $status == "resolved" then "The changed branch was read directly; the disputed premise holds." else "" end),
-        basis: "general_engineering", basis_source: null, limitations: []}'
+        final_source_id: "FINAL-001", dispute_kind: $kind, resolution_status: $status,
+        verification_method: $method, command: $command,
+        observed: (if $status == "resolved" then "The changed branch was read directly; the disputed premise holds." else null end),
+        basis: $basis, basis_source: (if $basis_source == "" then null else $basis_source end), limitations: []}'
 }
 
 emit_valid_ndjson_final() {
-    local resolution_status=${1:-resolved} resolution_method=${2:-source}
+    local resolution_status=${1:-resolved} resolution_method=${2:-source} command_json=${3:-null}
+    local basis=${4:-general_engineering} basis_source=${5:-} classification=${6:-CONFIRMED} split=${7:-false} kind=${8:-factual}
     local refs_json
     refs_json=$(prompt_block_lines 'REQUIRED SOURCE REFS' | jq -s '.')
     if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
         refs_json='[{"agent":"alpha","source_id":"alpha:C-001"},{"agent":"beta","source_id":"beta:C-001"}]'
     fi
-    jq -c '{
+    if [[ "$split" == true ]]; then
+        # Keep the last ref in its own final record so a dispute spans two final records.
+        jq -c '.[-1:] | {
+            record: "finding", schema_version: 1, source_id: "FINAL-002", source_refs: .,
+            title: "Fixture split topic", claim: "The split topic of the compound claim also holds.",
+            anchor: {kind: "changed-line", file: "fixture odd [name].txt", start: 1, end: 1},
+            evidence: ["The split cross-review record confirms the second topic."],
+            failure_scenario: "The fixture request reaches the second topic.", recommendation: "Correct the second topic.",
+            classification: "CONFIRMED", severity: "P3", category: "correctness",
+            contributing_agents: ([.[].agent] | unique), verification_limitations: [],
+            existing_feedback: {state: "new", thread_ids: []}, include_in_rejected_summary: false
+        }' <<<"$refs_json"
+        refs_json=$(jq -c '.[:-1]' <<<"$refs_json")
+    fi
+    jq -c --arg classification "$classification" '{
         record: "finding",
         schema_version: 1,
         source_id: "FINAL-001",
@@ -250,19 +269,19 @@ emit_valid_ndjson_final() {
         evidence: ["Both canonical cross-reviews confirm the exact changed branch."],
         failure_scenario: "The fixture request reaches the changed branch and fails.",
         recommendation: "Correct the changed branch.",
-        classification: "CONFIRMED",
-        severity: "P1",
+        classification: $classification,
+        severity: (if $classification == "CONFIRMED" then "P1" else null end),
         category: "correctness",
         contributing_agents: ([.[].agent] | unique),
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []},
         include_in_rejected_summary: false
     }' <<<"$refs_json"
-    emit_resolution_records "$resolution_status" "$resolution_method"
-    jq -nc '{
+    emit_resolution_records "$resolution_status" "$resolution_method" "$command_json" "$basis" "$basis_source" "$kind"
+    jq -nc --argjson count "$(if [[ "$split" == true ]]; then printf 2; else printf 1; fi)" '{
         record: "complete",
         schema_version: 1,
-        finding_count: 1,
+        finding_count: $count,
         summary: "The canonical cross-review finding is confirmed.",
         verification_limitations: [],
         positive_evidence: []
@@ -363,8 +382,24 @@ case "$behavior" in
         emit_valid_ndjson_cross reject-first
         write_usage null 57
         ;;
+    cross-ndjson-split)
+        emit_valid_ndjson_cross split-first
+        write_usage null 57
+        ;;
     final-resolution-uncertain)
         emit_valid_ndjson_final uncertain manual
+        write_usage null 57
+        ;;
+    final-resolution-measured)
+        emit_valid_ndjson_final resolved command '["grep","-n","fixture","fixture odd [name].txt"]' explicit_repository_rule AGENTS.md
+        write_usage null 57
+        ;;
+    final-resolution-unavailable)
+        emit_valid_ndjson_final uncertain command '["docker","compose","exec","db","mysql"]' general_engineering '' UNCERTAIN
+        write_usage null 57
+        ;;
+    final-split-refs)
+        emit_valid_ndjson_final not_applicable source null general_engineering '' CONFIRMED true severity
         write_usage null 57
         ;;
     cross-ndjson-preamble)

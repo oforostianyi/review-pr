@@ -196,6 +196,24 @@ Fields and their rules:
 - The standalone comparison, the cross-review phase, and historical Markdown or `ndjson-v1` runs
   without the flag are unchanged.
 
+### Orchestrator-executed measurements (iteration 2)
+
+`reporting.execute_measurements: true` (requires `dispute_resolution`) lets the orchestrator run the
+`command` of a `command` or `test` resolution after the final stream validated, inside the review
+checkout at the exact PR head, and attach the result as a separate `measurement` object:
+`executed`, `skipped_reason`, `exit_status`, bounded and credential-redacted `stdout_excerpt` and
+`stderr_excerpt`, `duration_ms`, and `commit`. The model's `observed` text is never rewritten and the
+resolution decision is never changed automatically; a disagreement between the two is for the reader.
+
+Policy, fixed in this iteration: argv only, no shell; allow-listed read-only tools (`rg`, `grep`,
+`ls`, `cat`, `head`, `wc`, `test`, `git` restricted to `show`, `log`, `diff`, `ls-tree`, `cat-file`,
+`grep`, `rev-parse`, `blame`); no absolute or parent-directory paths; no `rg --pre`; no `git -c`,
+`-C`, `--exec-path`, `--git-dir`, `--work-tree`, `--config-env`, `--namespace`; a ten-second timeout
+per command; excerpts capped at 2000 characters after redaction. Everything else is recorded as
+`skipped: not_allowlisted` and never executed. Artifact-only final reruns record
+`skipped: checkout_unavailable`. Schema repair does not compare measurements: they are attached after
+validation and are orchestrator output, not model content.
+
 ### Rollout for this feature
 
 1. Design (this section) and the versioned schema additions with positive and negative fixtures:
@@ -205,7 +223,8 @@ Fields and their rules:
 2. Dispute detection, `REQUIRED RESOLUTIONS` prompt block, parser and semantic validation with
    stable failure reasons, repair stability, canonical sidecar and manifest entry.
 3. Deterministic renderer and end-to-end tests with mock scenarios; the feature stays opt-in.
-4. Optional later iteration: orchestrator-executed allow-listed measurements.
+4. Orchestrator-executed allow-listed measurements behind `reporting.execute_measurements`
+   (done as iteration 2).
 
 ## Artifact flow
 

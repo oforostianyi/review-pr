@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `reporting.execute_measurements` (requires `dispute_resolution`). The orchestrator runs the
+  argv command a resolution proposes inside the review checkout at the exact PR head: only read-only
+  allow-listed tools without a shell, no absolute or parent paths, no `rg --pre`, no `git`
+  configuration or directory overrides, a ten-second timeout, bounded credential-redacted excerpts.
+  The result is attached to the resolution as a separate `measurement` object and the final report
+  gains a `Measured` column; refused commands are recorded as skipped and never run, and
+  artifact-only final reruns skip execution.
+- End-to-end fixtures for a measured resolution with an explicit `AGENTS.md` rule basis, a factual
+  dispute whose only measurement is a refused runtime tool (the covering finding stays `UNCERTAIN`),
+  and a compound claim split by a cross-reviewer into records that land in two final findings.
+
 ## [1.12.0] - 2026-09-12
 
 ### Added
