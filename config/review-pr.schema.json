@@ -132,6 +132,11 @@
             }
           }
         },
+        "dispute_resolution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit and validate opt-in resolution records for cross-review disagreements in the final ndjson-v1 stream. Requires finding_contract.final = ndjson-v1."
+        },
         "include_comparison_sections": {
           "type": "boolean",
           "default": true,

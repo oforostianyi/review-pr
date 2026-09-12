@@ -154,6 +154,7 @@ FINAL_COMPARISON_MODE=inline
 PRIMARY_FINDING_CONTRACT_MODE=markdown
 CROSS_FINDING_CONTRACT_MODE=markdown
 FINAL_FINDING_CONTRACT_MODE=markdown
+DISPUTE_RESOLUTION_ENABLED=false
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
@@ -524,7 +525,8 @@ load_config() {
         (if has("reporting") then
             (.reporting |
                 type == "object" and
-                ((keys - ["comparison_sections", "finding_contract", "include_comparison_sections"]) | length == 0) and
+                ((keys - ["comparison_sections", "dispute_resolution", "finding_contract", "include_comparison_sections"]) | length == 0) and
+                (if has("dispute_resolution") then (.dispute_resolution | type == "boolean") else true end) and
                 (if has("include_comparison_sections") then (.include_comparison_sections | type == "boolean") else true end) and
                 (if has("finding_contract") then
                     (.finding_contract |
@@ -724,6 +726,11 @@ load_config() {
             || die 'reporting.finding_contract.final=ndjson-v1 requires primary=ndjson-v1 and cross_review=ndjson-v1'
         [[ "$FINAL_COMPARISON_MODE" != inline ]] \
             || die 'Structured final synthesis requires reporting.comparison_sections.final=none or standalone'
+    fi
+    DISPUTE_RESOLUTION_ENABLED=$(jq -r '.reporting.dispute_resolution // false' "$CONFIG_FILE")
+    if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
+        [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
+            || die 'reporting.dispute_resolution=true requires reporting.finding_contract.final=ndjson-v1'
     fi
     STATUS_INTERVAL_SECONDS=$(jq -r '.status.log_interval_seconds // .status_interval_seconds // 30' "$CONFIG_FILE")
     STATUS_MODE=$(jq -r '.status.mode // "auto"' "$CONFIG_FILE")
@@ -2602,6 +2609,7 @@ show_configuration() {
     printf 'Primary finding contract: %s\n' "$PRIMARY_FINDING_CONTRACT_MODE"
     printf 'Cross-review finding contract: %s\n' "$CROSS_FINDING_CONTRACT_MODE"
     printf 'Final finding contract: %s\n' "$FINAL_FINDING_CONTRACT_MODE"
+    printf 'Dispute resolution: %s\n' "$(if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then printf enabled; else printf disabled; fi)"
     printf 'Cross-review prompt: %s%s\n' "$CROSS_PROMPT_SOURCE" \
         "$(if [[ "$CROSS_PROMPT_SOURCE" == config && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then printf ' (Markdown instructions are not sent under ndjson-v1)'; fi)"
     printf 'Final prompt: %s%s\n' "$FINAL_PROMPT_SOURCE" \

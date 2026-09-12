@@ -158,4 +158,29 @@ if "$repo_root/bin/review-pr" --config "$fallback_contract_config" --show-config
 fi
 pass 'silent finding-contract fallback configuration is rejected'
 
+dispute_config="$test_root/dispute.json"
+dispute_output="$test_root/dispute-show-config.txt"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+    .reporting.comparison_sections = {cross_review: "none", final: "none"} |
+    .reporting.dispute_resolution = true' "$config_file" >"$dispute_config"
+"$repo_root/bin/review-pr" --config "$dispute_config" --show-config >"$dispute_output"
+assert_file_contains "$dispute_output" 'Dispute resolution: enabled' \
+    'dispute resolution can be enabled on top of a structured final contract'
+assert_file_contains "$show_output" 'Dispute resolution: disabled' \
+    'dispute resolution is disabled by default'
+
+dispute_without_final="$test_root/dispute-without-final.json"
+jq '.reporting.dispute_resolution = true' "$config_file" >"$dispute_without_final"
+if "$repo_root/bin/review-pr" --config "$dispute_without_final" --show-config >/dev/null 2>&1; then
+    fail 'dispute resolution must require a structured final contract'
+fi
+pass 'dispute resolution is rejected without final=ndjson-v1'
+
+dispute_wrong_type="$test_root/dispute-wrong-type.json"
+jq '.reporting.dispute_resolution = "yes"' "$config_file" >"$dispute_wrong_type"
+if "$repo_root/bin/review-pr" --config "$dispute_wrong_type" --show-config >/dev/null 2>&1; then
+    fail 'non-boolean dispute_resolution must fail validation'
+fi
+pass 'non-boolean dispute_resolution is rejected'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
