@@ -226,6 +226,85 @@ validation and are orchestrator output, not model content.
 4. Orchestrator-executed allow-listed measurements behind `reporting.execute_measurements`
    (done as iteration 2).
 
+## Accepted diagnostics and positive-evidence design (Milestone 6)
+
+Every phase already reports `verification_limitations` (per finding and per completion record) and
+`positive_evidence` (per completion record) as free text, and the orchestrator itself knows a set of
+states that limit verification: GitHub review-thread state, check-run conclusions, changed-line map
+availability, repository-facts measurement failures, failed agent attempts, Pi guard outcomes, and
+skipped measurements. Today none of this reaches the final report: the deterministic final renderer
+drops both arrays, and orchestrator states live only in logs. The design below makes limitations
+and positive evidence a normalized, deduplicated part of the final artifacts without changing any
+`ndjson-v1` record: model records stay as they are; the orchestrator adds a typed sidecar and renders
+both sources deterministically.
+
+### Two sources, one artifact
+
+`*-final-diagnostics.json` is written by the orchestrator whenever the final contract is
+`ndjson-v1`, next to `*-final-findings.json`, and recorded in the manifest as
+`artifacts.final_diagnostics`. It has three parts:
+
+1. `orchestrator`: typed records the orchestrator measured itself. Each record is
+   `{"type", "scope", "phase", "agent", "detail", "refs"}` where `type` is one of a stable enum:
+   `github_review_threads_unavailable`, `github_review_threads_partial`, `github_check_failed`,
+   `github_check_cancelled`, `github_check_pending`, `github_check_skipped`,
+   `changed_line_map_unavailable`, `repository_facts_measurement_failed`, `agent_attempt_timeout`,
+   `agent_attempt_output_limit`, `agent_attempt_invalid_output`, `agent_attempt_failed`,
+   `pi_guard_budget_exhausted`, `pi_guard_duplicates_blocked`, `measurement_skipped`,
+   `checkout_unavailable`; `scope` is `run`, `phase`, `agent`, or `finding`; `detail` is a short
+   English string with the exact value (check name and conclusion, attempt number, reason);
+   `refs` lists affected `{agent, source_id}` or dispute ids when known. Types are the dedup key.
+2. `reviewers`: model-reported limitations aggregated from every canonical sidecar of the run
+   (primary, cross-review, final; per-finding and completion-level). Each entry is
+   `{"text", "phases", "agents", "finding_refs"}`; entries are merged when their normalized text
+   (lower-cased, whitespace-collapsed, trailing punctuation removed) is equal, keeping every
+   contributing phase and agent. All phases of a run share the configured language, so text-level
+   merging is deterministic within a run; it is not claimed across languages.
+3. `positive_evidence`: completion-level positive evidence aggregated the same way, with an
+   explicit `kind`: `verified_safe` when the text names a file or symbol that was checked, or
+   `no_issue_found` otherwise (a heuristic label, marked as such). Positive evidence never changes
+   a finding's classification or severity; it is presentation only, and the renderer caps the list
+   at twelve items, keeping the ones with the most contributing agents first.
+
+### Prompts
+
+- Primary, cross-review, and final contracts gain one rule: a failed, pending, or skipped CI check,
+  a denied or failing tool, or an unavailable file is a verification limitation, never a finding by
+  itself; a finding needs source or runtime evidence of engineering impact.
+- The final prompt gains a `KNOWN LIMITATIONS` block listing the orchestrator records collected so
+  far (one compact JSON line each), so the finalizer references them instead of rediscovering or
+  contradicting them, and lists what remains unverified in its own `verification_limitations`.
+
+### Validation
+
+- A final finding whose evidence consists only of a CI check outcome or a tool failure is rejected
+  with `diagnostic_only_finding` (deterministic check: every evidence string matches the
+  check-outcome or tool-failure patterns and no evidence names a repository path or symbol). This
+  is a post-check on the canonical final, reported through the existing granular reason format.
+- The diagnostics sidecar itself is orchestrator output and is not validated against the model.
+
+### Rendering
+
+The final Markdown gains two sections after the rejected findings and the dispute table, each under
+a language-independent marker: `<!-- review-pr:verification-limitations -->` with
+`## Verification limitations` / `## Обмеження перевірки` (orchestrator records first with a
+localized label per type and the exact detail, then reviewer limitations with the contributing
+agents in parentheses, each once), and `<!-- review-pr:positive-evidence -->` with
+`## Positive evidence` / `## Позитивні докази` (capped, with contributing agents). Empty sections
+are omitted. The standalone comparison does not repeat them. Historical Markdown runs are unchanged.
+
+### Rollout
+
+1. Design (this section), the sidecar shape, and fixtures: unavailable file reported by two agents,
+   denied tool, failed check, unavailable review threads, unverified production-data assumption,
+   one agent timed out while peers completed, duplicated positive evidence, EN and UA rendering,
+   foreign-language model text not affecting markers.
+2. Orchestrator collector (typed records from the states above), reviewer aggregation, positive
+   evidence aggregation, sidecar and manifest entry.
+3. Prompt rule and `KNOWN LIMITATIONS` block; the `diagnostic_only_finding` post-check.
+4. Renderer sections and end-to-end tests; no configuration flag, because the change adds
+   orchestrator output and rendering without altering any model contract.
+
 ## Artifact flow
 
 For each phase, the orchestrator should preserve three distinct artifacts:
