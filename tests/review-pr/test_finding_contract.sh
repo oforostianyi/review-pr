@@ -410,6 +410,85 @@ assert_file_contains "$final_rendered" '<!-- review-pr:anchor:changed-line -->' 
 assert_true 'deterministic final Markdown passes the legacy structural validator' \
     validate_final_markdown "$final_rendered"
 
+REVIEW_AGENTS=(alpha gamma)
+CROSS_FINDINGS_OUTPUTS[gamma]="$gamma_cross_canonical"
+DISPUTE_RESOLUTION_ENABLED=true
+WORK_DIR=$test_root
+REPORT_STEM=resolution-run
+FINAL_FINDING_CONTRACT_MODE=ndjson-v1
+processed_final="$test_root/processed-final.md"
+cp -- "$resolution_fixture" "$processed_final"
+assert_true 'a final stream with valid resolution records is processed' \
+    process_final_ndjson_output "$processed_final"
+assert_file_exists "$FINAL_PROCESSED_RESOLUTIONS_FILE" 'processing produces a resolutions sidecar candidate'
+assert_eq '1' "$(jq '.resolutions | length' "$FINAL_PROCESSED_RESOLUTIONS_FILE")" \
+    'the resolutions sidecar candidate holds the validated records'
+assert_eq '1' "$(jq '.finding_count' "$FINAL_PROCESSED_FINDINGS_FILE")" \
+    'resolution records are not counted as findings'
+assert_file_contains "$processed_final" '<!-- review-pr:dispute-resolutions -->' \
+    'the rendered final report carries the dispute-resolution marker'
+
+DISPUTE_RESOLUTION_ENABLED=false
+cp -- "$resolution_fixture" "$processed_final"
+assert_false 'resolution records are rejected when the feature is disabled' \
+    process_final_ndjson_output "$processed_final"
+assert_eq 'unexpected_resolution_records' "$FINDING_CONTRACT_FAILURE_REASON" \
+    'the disabled feature reports a stable reason'
+
+DISPUTE_RESOLUTION_ENABLED=true
+broken_resolution_stream="$test_root/broken-resolution.ndjson"
+jq -c 'if .record == "resolution" then .verification_method = "manual" else . end' "$resolution_fixture" >"$broken_resolution_stream"
+cp -- "$broken_resolution_stream" "$processed_final"
+assert_false 'an unmeasured factual resolution fails final processing' \
+    process_final_ndjson_output "$processed_final"
+assert_eq 'dispute_resolution_validation_failed: resolution[dispute:beta:beta:F-001].verification_method' \
+    "$FINDING_CONTRACT_FAILURE_REASON" 'final processing exposes the resolution diagnostic'
+
+resolution_baseline="$test_root/resolution-baseline.json"
+assert_true 'a stream with resolution records produces a repair baseline' \
+    build_final_repair_baseline "$resolution_fixture" "$resolution_baseline"
+assert_eq '1' "$(jq '.resolutions | length' "$resolution_baseline")" 'the repair baseline preserves resolution decisions'
+cp -- "$resolution_fixture" "$processed_final"
+process_final_ndjson_output "$processed_final"
+assert_true 'unchanged resolutions satisfy repair stability' \
+    validate_final_repair_stability "$resolution_baseline" "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"
+changed_resolutions="$test_root/changed-resolutions.json"
+jq '.resolutions[0].resolution_status = "uncertain"' "$FINAL_PROCESSED_RESOLUTIONS_FILE" >"$changed_resolutions"
+assert_false 'repair stability rejects a changed resolution decision' \
+    validate_final_repair_stability "$resolution_baseline" "$FINAL_PROCESSED_FINDINGS_FILE" "$changed_resolutions"
+assert_true 'a stream without resolution records still satisfies the two-argument stability check' \
+    validate_final_repair_stability "$final_repair_baseline" "$final_canonical"
+resolution_final_canonical_full=$FINAL_PROCESSED_FINDINGS_FILE
+resolutions_canonical_full=$FINAL_PROCESSED_RESOLUTIONS_FILE
+DISPUTE_RESOLUTION_ENABLED=false
+REVIEW_AGENTS=(alpha)
+unset 'CROSS_FINDINGS_OUTPUTS[gamma]'
+
+FINALIZATION_LANGUAGE=EN
+configure_finalization_language
+rendered_with_resolutions="$test_root/final-with-resolutions.md"
+assert_true 'the final renderer accepts a resolutions sidecar' \
+    render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$resolutions_canonical_full"
+assert_file_contains "$rendered_with_resolutions" '## Dispute resolutions' 'the English final report gets a dispute-resolution section'
+assert_file_contains "$rendered_with_resolutions" '<!-- review-pr:dispute-resolutions -->' 'the section carries a language-independent marker'
+assert_file_contains "$rendered_with_resolutions" '| `dispute:beta:beta:F-001` | factual | resolved | command |' \
+    'each resolution is one table row with kind, status, and method'
+assert_file_contains "$rendered_with_resolutions" '`rg -n changedBranch src/Changed.php`' \
+    'a recorded argv command is shown joined by spaces inside code formatting'
+FINALIZATION_LANGUAGE=UA
+configure_finalization_language
+render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$resolutions_canonical_full"
+assert_file_contains "$rendered_with_resolutions" '## Вирішення суперечок' 'the Ukrainian final report localizes the heading'
+assert_file_contains "$rendered_with_resolutions" '| `dispute:beta:beta:F-001` | factual | resolved | command |' \
+    'enum values stay language-independent in the Ukrainian table'
+FINALIZATION_LANGUAGE=EN
+configure_finalization_language
+render_final_findings_markdown "$final_canonical" "$rendered_with_resolutions"
+assert_false 'a final report without resolutions has no dispute section' \
+    grep -Fq -- 'review-pr:dispute-resolutions' "$rendered_with_resolutions"
+assert_true 'a final report with the dispute table still passes the legacy structural validator' \
+    validate_final_markdown "$test_root/processed-final.md"
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"
