@@ -660,7 +660,7 @@ mkdir -p -- "$agg_root"
 jq -n '{agent: "alpha", phase: "primary", findings: [{source_id: "A-1", verification_limitations: ["Database was not reachable."]}],
         verification_limitations: ["No staging environment was available"], positive_evidence: ["src/App/Service.php:10 validates the input before dispatch", "No issues were found in the migration order"]}' >"$agg_root/alpha.json"
 jq -n '{agent: "beta", phase: "primary", findings: [{source_id: "B-1", verification_limitations: []}],
-        verification_limitations: ["database was NOT reachable", "Docker socket access was denied"], positive_evidence: ["src/App/Service.php:10 validates the input before dispatch"]}' >"$agg_root/beta.json"
+        verification_limitations: ["database was NOT reachable", "Docker socket access was denied"], positive_evidence: ["`src/App/Service.php:10` validates the input before dispatch."]}' >"$agg_root/beta.json"
 jq -n '{agent: "alpha", phase: "cross-review", findings: [{source_id: "alpha:C-1", verification_limitations: ["The referenced upstream commit is unavailable locally"]}],
         verification_limitations: [], positive_evidence: []}' >"$agg_root/cross-alpha.json"
 jq -n '{findings: [{source_id: "FINAL-1", verification_limitations: []}], verification_limitations: ["Migrations were not executed"], positive_evidence: ["down() removes the seeded rows in dependency order"]}' >"$agg_root/final.json"
@@ -682,7 +682,7 @@ assert_eq 'final' "$(jq -r '.[] | select(.text | test("Migrations")) | .phases[0
 positive_evidence="$agg_root/positive.json"
 assert_true 'positive evidence aggregates with provenance' \
     aggregate_positive_evidence "$agg_root/final.json" "$positive_evidence"
-assert_eq '3' "$(jq 'length' "$positive_evidence")" 'duplicate positive evidence merges into one entry'
+assert_eq '3' "$(jq 'length' "$positive_evidence")" 'positive evidence differing only in backticks and trailing punctuation merges into one entry'
 assert_eq 'alpha,beta' "$(jq -r '.[0].agents | join(",")' "$positive_evidence")" 'the entry shared by two agents is ranked first'
 assert_eq 'verified_safe' "$(jq -r '.[0].kind' "$positive_evidence")" 'evidence naming a file and line is labelled verified_safe'
 assert_eq 'no_issue_found' "$(jq -r '.[] | select(.text | test("No issues")) | .kind' "$positive_evidence")" 'evidence without a file or symbol is labelled no_issue_found'
@@ -712,7 +712,7 @@ diag_sidecar="$agg_root/final-diagnostics.json"
 jq -n '{contract: "ndjson-v1", schema_version: 1, phase: "final-synthesis",
         orchestrator: [{type: "github_check_failed", scope: "run", phase: null, agent: null, detail: "phpunit: failure", refs: []},
                        {type: "agent_attempt_timeout", scope: "agent", phase: "cross-review", agent: "beta", detail: "beta attempt 1/2 (timeout after 5s)", refs: []}],
-        reviewers: [{text: "Could not run the test suite", phases: ["primary"], agents: ["alpha", "beta"], finding_refs: ["alpha:F-1"]}],
+        reviewers: [{text: "Could not run the test suite", phases: ["primary"], agents: ["alpha", "beta"], finding_refs: [{agent: "alpha", source_id: "F-1"}]}],
         positive_evidence: [{text: "src/File.php:10 guards the null path", kind: "verified_safe", phases: ["primary"], agents: ["alpha"]}]}' >"$diag_sidecar"
 diag_rendered="$agg_root/final-with-diagnostics.md"
 assert_true 'the final renderer accepts a diagnostics sidecar' \
@@ -721,7 +721,7 @@ assert_file_contains "$diag_rendered" '<!-- review-pr:verification-limitations -
 assert_file_contains "$diag_rendered" '## Verification limitations' 'the limitations section has the English heading'
 assert_file_contains "$diag_rendered" '**CI check failed:** phpunit: failure' 'an orchestrator record renders its label and detail'
 assert_file_contains "$diag_rendered" '(cross-review, beta)' 'an agent-scoped record names its phase and agent'
-assert_file_contains "$diag_rendered" 'Could not run the test suite (alpha, beta)' 'a merged reviewer limitation lists its agents'
+assert_file_contains "$diag_rendered" 'Could not run the test suite (alpha, beta) — `alpha:F-1`' 'a merged reviewer limitation lists its agents and finding refs'
 assert_file_contains "$diag_rendered" '<!-- review-pr:positive-evidence -->' 'the positive-evidence section carries its marker'
 assert_file_contains "$diag_rendered" '## Positive evidence' 'the positive-evidence section has the English heading'
 assert_file_contains "$diag_rendered" 'src/File.php:10 guards the null path (alpha)' 'positive evidence lists its agents'

@@ -3677,7 +3677,7 @@ collect_reviewer_records() {
 aggregate_reviewer_limitations() {
     local final_canonical=$1 output_file=$2
     collect_reviewer_records verification_limitations "$final_canonical" | jq -s '
-        def norm: ascii_downcase | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
+        def norm: ascii_downcase | gsub("`"; "") | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
         [.[] | select(.text | type == "string" and length > 0)]
         | group_by(.text | norm)
         | map({
@@ -3693,7 +3693,7 @@ aggregate_reviewer_limitations() {
 aggregate_positive_evidence() {
     local final_canonical=$1 output_file=$2
     collect_reviewer_records positive_evidence "$final_canonical" | jq -s '
-        def norm: ascii_downcase | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
+        def norm: ascii_downcase | gsub("`"; "") | gsub("\\s+"; " ") | gsub("^ | $"; "") | gsub("[.;,]+$"; "");
         def kind: if test("[A-Za-z0-9_./-]+\\.[A-Za-z]{1,5}(:[0-9]+)?|::|\\(\\)") then "verified_safe" else "no_issue_found" end;
         [.[] | select(.text | type == "string" and length > 0)]
         | group_by(.text | norm)
@@ -3806,10 +3806,11 @@ render_final_findings_markdown() {
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
                     def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
-                    def finding_refs: (.finding_refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
+                    def ref_text: if type == "object" then ((.agent // "") + ":" + (.source_id // "")) else tostring end;
+                    def finding_refs: (.finding_refs // []) | if length == 0 then "" else " — " + (map("`" + ref_text + "`") | join(", ")) end;
                     ([(.orchestrator // [])[] | "- **" + type_label + ":** " + (.detail | cell) + provenance + refs] +
                      [(.reviewers // [])[] | "- " + (.text | cell) + agents + finding_refs]) | join("\n")
-                ' "$diagnostics_file"
+                ' "$diagnostics_file" || return 1
             fi
             if (( $(jq '(.positive_evidence // []) | length' "$diagnostics_file") > 0 )); then
                 printf '\n%s\n\n%s\n\n' '<!-- review-pr:positive-evidence -->' "$FINAL_POSITIVE_EVIDENCE_HEADING"
@@ -3817,7 +3818,7 @@ render_final_findings_markdown() {
                     def cell: tostring | gsub("[\\r\\n]+"; " ");
                     def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     [.positive_evidence[] | "- " + (.text | cell) + agents] | join("\n")
-                ' "$diagnostics_file"
+                ' "$diagnostics_file" || return 1
             fi
         fi
     } >"$output_file"
