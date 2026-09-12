@@ -3806,7 +3806,7 @@ render_final_findings_markdown() {
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
                     def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
-                    def ref_text: if type == "object" then ((.agent // "") + ":" + (.source_id // "")) else tostring end;
+                    def ref_text: if type == "object" then (if (.agent // "") == "" then (.source_id // "") else .agent + ":" + (.source_id // "") end) else tostring end;
                     def finding_refs: (.finding_refs // []) | if length == 0 then "" else " — " + (map("`" + ref_text + "`") | join(", ")) end;
                     ([(.orchestrator // [])[] | "- **" + type_label + ":** " + (.detail | cell) + provenance + refs] +
                      [(.reviewers // [])[] | "- " + (.text | cell) + agents + finding_refs]) | join("\n")
