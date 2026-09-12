@@ -990,6 +990,80 @@ run_split_claim_resolution_case() {
     assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" 'the split-claim run completes'
 }
 
+run_diagnostics_case() {
+    local case_dir="$suite_root/diagnostics"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem sidecar final_report
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture diagnostics.'
+    export REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE=true
+    export REVIEW_PR_FAKE_CHECK_RUNS_JSON='{"check_runs":[{"name":"phpunit","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"}]}'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    jq '.execution.retry.max_attempts = 2' "$config" >"$config.tmp" && mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'fail-once\n' >"$scenarios/beta-primary-review"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        REVIEW_PR_MOCK_PRIMARY_LIMITATION='Could not run the fixture test suite.' \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "diagnostics pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    unset REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE REVIEW_PR_FAKE_CHECK_RUNS_JSON
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    sidecar="$work_dir/${stem}-final-diagnostics.json"
+    final_report="${work_dir%/work}/${stem}-final.md"
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'a run with a failed check, unavailable threads, and a retried agent still completes'
+    assert_eq 'agent_attempt_failed,github_check_failed,github_review_threads_unavailable' \
+        "$(jq -r '[.orchestrator[].type] | unique | join(",")' "$sidecar")" \
+        'the diagnostics sidecar records exactly the orchestrator-measured limitations'
+    assert_eq 'phpunit: failure' "$(jq -r '.orchestrator[] | select(.type == "github_check_failed") | .detail' "$sidecar")" \
+        'a failed check records its name and conclusion'
+    assert_eq 'beta' "$(jq -r '.orchestrator[] | select(.type == "agent_attempt_failed") | .agent' "$sidecar")" \
+        'a failed attempt names its agent'
+    assert_eq '1' "$(jq '.reviewers | length' "$sidecar")" 'the same limitation from three primaries merges into one entry'
+    assert_eq 'alpha,beta,gamma' "$(jq -r '.reviewers[0].agents | join(",")' "$sidecar")" 'the merged limitation keeps every contributing agent'
+    assert_eq 'primary' "$(jq -r '.reviewers[0].phases | join(",")' "$sidecar")" 'the merged limitation keeps its phase'
+    assert_eq 'alpha,beta,gamma' "$(jq -r '.positive_evidence[0].agents | join(",")' "$sidecar")" 'shared positive evidence merges with its agents'
+    assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" '"type":"github_check_failed"' \
+        'the finalizer sees the failed check in KNOWN LIMITATIONS'
+    assert_file_contains "$final_report" '<!-- review-pr:verification-limitations -->' 'the final report renders the limitations section'
+    assert_file_contains "$final_report" '**CI check failed:** phpunit: failure' 'the final report shows the failed check'
+    assert_file_contains "$final_report" 'Could not run the fixture test suite. (alpha, beta, gamma)' 'the final report shows the merged reviewer limitation'
+    assert_file_contains "$final_report" '<!-- review-pr:positive-evidence -->' 'the final report renders the positive-evidence section'
+    assert_file_contains "$final_report" 'The fixture remains intentionally small. (alpha, beta, gamma)' 'the final report shows merged positive evidence'
+}
+
+run_diagnostic_only_finding_case() {
+    local case_dir="$suite_root/diagnostic-only-finding"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture diagnostic-only finding.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'final-diagnostic-only\n' >"$scenarios/alpha-final-synthesis"
+    printf 'final-diagnostic-only\n' >"$scenarios/alpha-final-findings-repair"
+
+    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'a final finding whose only evidence is a check outcome must fail final synthesis'
+    fi
+    pass 'a final finding whose only evidence is a check outcome fails final synthesis'
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_contains "$case_dir/stderr.log" 'diagnostic_only_finding: finding[FINAL-001]' 'the failure names the diagnostic-only finding'
+    assert_file_not_exists "$work_dir/${stem}-final-diagnostics.json" 'no diagnostics sidecar is published for an invalid final'
+    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" 'no final report is published for an invalid final'
+}
+
 run_ndjson_cross_resume_case() {
     local case_dir="$suite_root/ndjson-cross-resume"
     local reviews="$case_dir/reviews"
@@ -1315,6 +1389,8 @@ run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case
 run_ndjson_unsafe_final_repair_case
+run_diagnostics_case
+run_diagnostic_only_finding_case
 run_resume_case
 run_comparison_failure_case
 run_facts_collection_failure_case

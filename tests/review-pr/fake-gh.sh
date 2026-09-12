@@ -49,7 +49,7 @@ case "${1:-} ${2:-}" in
     'api --paginate')
         endpoint=${*: -1}
         case "$endpoint" in
-            *'/check-runs?'*) printf '%s\n' '{"check_runs":[]}' ;;
+            *'/check-runs?'*) printf '%s\n' "${REVIEW_PR_FAKE_CHECK_RUNS_JSON:-{\"check_runs\":[]\}}" ;;
             *'/pulls/'*'/comments?'*)
                 printf '%s\n' "${REVIEW_PR_FAKE_REVIEW_COMMENTS_JSON:-[]}" ;;
             *) printf '%s\n' '[]' ;;

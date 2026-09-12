@@ -4,6 +4,26 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Final diagnostics sidecar `work/*-final-diagnostics.json` (manifest `artifacts.final_diagnostics`),
+  written whenever the final contract is `ndjson-v1`: typed `orchestrator` records of what the
+  orchestrator itself measured as limiting the review (review-thread state, check-run outcomes,
+  changed-line map and repository-facts availability, failed agent attempts, Pi guard outcomes,
+  skipped measurements, artifact-only reruns), `reviewers` limitations merged across every canonical
+  sidecar of the run by normalized text with their phases, agents, and finding refs, and capped
+  `positive_evidence` with a heuristic `verified_safe`/`no_issue_found` label. No model record
+  changes and no flag is needed.
+- The final report renders the sidecar as two marker-delimited, localized sections,
+  `Verification limitations` and `Positive evidence`; empty sections are omitted.
+- The final prompt lists the orchestrator records in a `KNOWN LIMITATIONS` block, and the primary,
+  cross-review, and final contracts state that a failed, pending, or skipped CI check, a denied or
+  failing tool, or an unavailable file is a verification limitation, never a finding by itself.
+- Final processing rejects a `CONFIRMED` finding whose only evidence is such an outcome with
+  `diagnostic_only_finding: finding[<id>]`.
+- Pi usage JSON carries `pi_guard` counters (`executed`, `duplicates_blocked`, `budget_blocked`,
+  `terminated`) when a guard log exists.
+
 ### Fixed
 
 - The primary and cross-review `ndjson-v1` contracts now state the basis policy for rule-based

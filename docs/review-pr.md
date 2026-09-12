@@ -370,6 +370,39 @@ Validation enforces the principle that reviewer count never settles a fact: a fa
 
 There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. A structurally recoverable response first receives one dedicated field-stable repair pass. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
+### Verification limitations and positive evidence
+
+Whenever `finding_contract.final` is `ndjson-v1`, the orchestrator also publishes
+`work/*-final-diagnostics.json` (recorded in the manifest as `artifacts.final_diagnostics`; the
+`--rerun-final` stem is `*-diagnostics.json`). It has three parts, none of which changes a model
+record:
+
+- `orchestrator`: typed records of what the orchestrator itself measured as limiting the review:
+  review-thread state (`github_review_threads_unavailable`/`_partial`), check-run outcomes
+  (`github_check_failed`/`_cancelled`/`_pending`/`_skipped` with the check name and conclusion),
+  `changed_line_map_unavailable`, `repository_facts_measurement_failed`, failed agent attempts
+  (`agent_attempt_timeout`/`_output_limit`/`_invalid_output`/`_failed` with the attempt text), Pi
+  guard outcomes (`pi_guard_budget_exhausted`, `pi_guard_duplicates_blocked`), `measurement_skipped`
+  with its reason, and `checkout_unavailable` for artifact-only reruns. `type` plus `detail` is the
+  deduplication key.
+- `reviewers`: model-reported `verification_limitations` from every canonical sidecar of the run,
+  merged when their normalized text (lower-cased, whitespace collapsed, trailing punctuation
+  removed) is equal, with the contributing `phases`, `agents`, and `finding_refs`.
+- `positive_evidence`: completion-level positive evidence merged the same way, labelled
+  `verified_safe` when the text names a file or symbol and `no_issue_found` otherwise (a heuristic
+  label), capped at twelve entries with the most widely shared first.
+
+The final prompt receives the orchestrator records as a `KNOWN LIMITATIONS` block (one compact JSON
+line each, or `none`), and all three contracts state that a failed, pending, or skipped CI check, a
+denied or failing tool, or an unavailable file is a verification limitation, never a finding by
+itself. A `CONFIRMED` final finding whose every evidence item only reports such an outcome without
+naming a file, line, or symbol fails with `diagnostic_only_finding: finding[<id>]`. The final report
+renders two sections under language-independent markers, `<!-- review-pr:verification-limitations -->`
+(`## Verification limitations` / `## Обмеження перевірки`: orchestrator records with a localized
+label and the exact detail, then reviewer limitations with their agents) and
+`<!-- review-pr:positive-evidence -->` (`## Positive evidence` / `## Позитивні докази`); empty
+sections are omitted and the standalone comparison does not repeat them.
+
 ### Real-agent contract test
 
 Use the conformance command before opting a new CLI or model into `ndjson-v1`:

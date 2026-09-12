@@ -305,6 +305,14 @@ are omitted. The standalone comparison does not repeat them. Historical Markdown
 4. Renderer sections and end-to-end tests; no configuration flag, because the change adds
    orchestrator output and rendering without altering any model contract.
 
+Status (2026-09-12): steps 2 to 4 are implemented and covered by unit and end-to-end tests
+(failed check, unavailable review threads, a retried agent attempt, one limitation shared by three
+primaries, shared positive evidence, EN and UA rendering, and the `diagnostic_only_finding`
+rejection). The `diagnostic_only_finding` check is deliberately two-factor: an evidence item counts
+as diagnostic only when it names a check, pipeline, workflow, job, build, tool, or permission and a
+failed, pending, skipped, denied, or unavailable state, and no item names a path, line, or symbol;
+`UNCERTAIN` claims may still cite a check failure as their reason.
+
 ## Artifact flow
 
 For each phase, the orchestrator should preserve three distinct artifacts:

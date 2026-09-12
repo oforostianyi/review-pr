@@ -168,14 +168,39 @@ emit_valid_ndjson_primary() {
         verification_limitations: [],
         existing_feedback: {state: "new", thread_ids: []}
     }'
-    jq -nc '{
+    jq -nc --arg limitation "${REVIEW_PR_MOCK_PRIMARY_LIMITATION:-}" '{
         record: "complete",
         schema_version: 1,
         finding_count: 1,
         summary: "One actionable fixture finding.",
-        verification_limitations: [],
+        verification_limitations: (if $limitation == "" then [] else [$limitation] end),
         positive_evidence: ["The fixture remains intentionally small."]
     }'
+}
+
+# Emits the structured or Markdown output the current phase and contract expect.
+emit_valid_for_phase() {
+    if [[ "$phase" == 'primary review' || "$phase" == 'primary findings repair' ]]; then
+        if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" != ndjson-v1 ]]; then
+            printf 'structured primary mock received the wrong output contract: %s\n' "${REVIEW_PR_OUTPUT_CONTRACT:-unset}" >&2
+            exit 65
+        fi
+        emit_valid_ndjson_primary
+    elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' ]]; then
+        if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
+            emit_valid_ndjson_cross
+        else
+            emit_valid_output
+        fi
+    elif [[ "$phase" == 'final synthesis' || "$phase" == 'final findings repair' ]]; then
+        if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
+            emit_valid_ndjson_final
+        else
+            emit_valid_output
+        fi
+    else
+        emit_valid_output
+    fi
 }
 
 emit_valid_ndjson_cross() {
@@ -350,27 +375,7 @@ case "$behavior" in
         ;;
     valid-ndjson)
         sleep "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}"
-        if [[ "$phase" == 'primary review' || "$phase" == 'primary findings repair' ]]; then
-            if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" != ndjson-v1 ]]; then
-                printf 'structured primary mock received the wrong output contract: %s\n' "${REVIEW_PR_OUTPUT_CONTRACT:-unset}" >&2
-                exit 65
-            fi
-            emit_valid_ndjson_primary
-        elif [[ "$phase" == 'cross-review' || "$phase" == 'cross-review findings repair' ]]; then
-            if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
-                emit_valid_ndjson_cross
-            else
-                emit_valid_output
-            fi
-        elif [[ "$phase" == 'final synthesis' || "$phase" == 'final findings repair' ]]; then
-            if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
-                emit_valid_ndjson_final
-            else
-                emit_valid_output
-            fi
-        else
-            emit_valid_output
-        fi
+        emit_valid_for_phase
         write_usage null 55
         ;;
     ndjson-preamble)
@@ -402,6 +407,10 @@ case "$behavior" in
         emit_valid_ndjson_final not_applicable source null general_engineering '' CONFIRMED true severity
         write_usage null 57
         ;;
+    final-diagnostic-only)
+        emit_valid_ndjson_final | jq -c 'if .record == "finding" then .evidence = ["CI check phpunit failed", "Pipeline status: pending"] else . end'
+        write_usage null 57
+        ;;
     cross-ndjson-preamble)
         printf '%s\n' 'Here is the requested structured cross-review:'
         emit_valid_ndjson_cross
@@ -430,7 +439,11 @@ case "$behavior" in
             write_usage null 7
             exit 17
         fi
-        emit_valid_output
+        if [[ "${REVIEW_PR_OUTPUT_CONTRACT:-}" == ndjson-v1 ]]; then
+            emit_valid_for_phase
+        else
+            emit_valid_output
+        fi
         write_usage null 41
         ;;
     empty)
