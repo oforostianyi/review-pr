@@ -11,6 +11,12 @@ All notable changes to `review-pr` are documented in this file. The project foll
   `stream.no_complete` and missing source refs although every record had been produced. The raw
   Codex event stream is now preserved as `*-events.jsonl` next to the other failure diagnostics,
   as it already was for Pi.
+- The Pi tool-guard extension is located from the script directory captured at startup. When
+  `review-pr` was started through a relative path, the lookup ran after the orchestrator had
+  changed into the review checkout and failed with "review-pr-pi-guard.js was not found", which
+  aborted a resume before its first agent finished.
+- Cleanup terminates the whole process tree of every running agent subshell, so an orchestrator
+  that exits early no longer leaves `codex`, `claude`, or `pi` processes running and spending quota.
 
 ## [1.15.0] - 2026-09-12
 

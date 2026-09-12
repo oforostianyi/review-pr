@@ -395,14 +395,18 @@ run_interrupt_case() {
         fail 'terminated pipeline unexpectedly exited successfully'
     fi
     pass 'SIGTERM interrupts the pipeline with a non-zero status'
-    # Give terminated fixture agents a moment to exit before later cases and
-    # the suite cleanup touch the same temporary tree.
+    # Termination must take the agent processes down with the orchestrator, not
+    # leave them running (and spending quota) until they finish on their own.
     attempts=0
     while pgrep -f "REVIEW_PR_MOCK_SCENARIO_DIR=${scenarios}" >/dev/null 2>&1 || pgrep -f "$case_dir/" >/dev/null 2>&1; do
         attempts=$((attempts + 1))
         (( attempts <= 100 )) || break
         sleep 0.05
     done
+    if pgrep -f "REVIEW_PR_MOCK_SCENARIO_DIR=${scenarios}" >/dev/null 2>&1; then
+        fail 'terminated pipeline left its agent processes running'
+    fi
+    pass 'termination also stops the agent processes the pipeline started'
 
     canonical_primary=$(find "$reviews" -type f -name '*-alpha.md' -print | sed -n '1p')
     [[ -z "$canonical_primary" ]] || fail 'interrupted runner published a partial canonical report'

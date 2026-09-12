@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly REVIEW_PR_VERSION="1.15.0"
+REVIEW_PR_SCRIPT_DIR=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || REVIEW_PR_SCRIPT_DIR=""
 
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     printf 'review-pr requires Bash 5.1 or newer; found %s.\n' "$BASH_VERSION" >&2
@@ -324,6 +325,18 @@ die() {
     exit 1
 }
 
+# Terminates a background subshell together with the agent process it started:
+# killing only the subshell would leave the CLI running and spending quota.
+terminate_process_tree() {
+    local pid=$1
+    local child
+
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        terminate_process_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
 cleanup() {
     local exit_status=$?
     local pid
@@ -341,7 +354,7 @@ cleanup() {
     fi
 
     for pid in "${RUNNING_PIDS[@]}"; do
-        kill "$pid" 2>/dev/null || true
+        terminate_process_tree "$pid"
     done
     for pid in "${RUNNING_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
@@ -5634,7 +5647,11 @@ run_configured_command_in_worktree() {
 pi_guard_extension_path() {
     local script_dir candidate
 
-    script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    # Resolve from the directory captured at startup: the orchestrator changes
+    # into the review checkout before agents start, so a relative script path
+    # would otherwise be resolved against the wrong directory.
+    script_dir=${REVIEW_PR_SCRIPT_DIR:-}
+    [[ -n "$script_dir" ]] || script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
     for candidate in "${script_dir}/review-pr-pi-guard.js" "${script_dir}/../runners/review-pr-pi-guard.js"; do
         if [[ -f "$candidate" ]]; then
             (cd -P -- "$(dirname -- "$candidate")" && printf '%s/%s\n' "$(pwd -P)" "${candidate##*/}")

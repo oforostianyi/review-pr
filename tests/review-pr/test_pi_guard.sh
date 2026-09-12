@@ -106,4 +106,11 @@ unlimited_result=$(run_guard 0 "$unlimited_log" "$budget_script")
 assert_eq '16' "$(jq '[.results[] | select(. == null)] | length' <<<"$unlimited_result")" \
     'a zero budget disables the budget but keeps the guard loaded'
 
+# The orchestrator changes into the review checkout before agents start, so the
+# extension must resolve from the script location captured at startup even
+# when the script was invoked through a relative path.
+relative_resolution=$(cd "$repo_root" && bash -c 'export REVIEW_PR_LIBRARY_MODE=true && source bin/review-pr -- && cd / && pi_guard_extension_path')
+assert_eq "$repo_root/runners/review-pr-pi-guard.js" "$relative_resolution" \
+    'the guard extension resolves after a directory change when the script path was relative'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
