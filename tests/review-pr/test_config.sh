@@ -66,6 +66,22 @@ assert_file_contains "$show_output" 'pi: label=Pi model=local-model effort='"'"'
 assert_file_contains "$show_output" 'alpha: label=Alpha model=mock-alpha effort='"'"''"'"' timeout=45m\ 00s max_tool_calls=unlimited' \
     'agents without a tool-call budget report it as unlimited'
 
+pi_thinking_config="$test_root/pi-thinking.json"
+pi_thinking_output="$test_root/pi-thinking-show-config.txt"
+jq '.agents.pi.enabled = true | .agents.pi.effort = "high" | .synthesizer = "pi" | .finalization.effort = "xhigh"' "$config_file" >"$pi_thinking_config"
+"$repo_root/bin/review-pr" --config "$pi_thinking_config" --show-config >"$pi_thinking_output" 2>&1 \
+    || fail "a Pi thinking level must be accepted as effort: $(tail -n 2 "$pi_thinking_output")"
+assert_file_contains "$pi_thinking_output" "pi: label=Pi model=local-model effort=high" \
+    'the Pi thinking level is shown as the agent effort'
+assert_file_contains "$pi_thinking_output" 'Final effort: xhigh (finalization)' \
+    'the finalization thinking level overrides the Pi agent level'
+invalid_pi_thinking_config="$test_root/invalid-pi-thinking.json"
+jq '.agents.pi.effort = "extreme"' "$config_file" >"$invalid_pi_thinking_config"
+if "$repo_root/bin/review-pr" --config "$invalid_pi_thinking_config" --show-config >/dev/null 2>&1; then
+    fail 'an unknown Pi thinking level must fail validation'
+fi
+pass 'an unknown Pi thinking level is rejected'
+
 invalid_budget_agent_config="$test_root/invalid-budget-agent.json"
 jq '.agents.alpha.max_tool_calls = 400' "$config_file" >"$invalid_budget_agent_config"
 if "$repo_root/bin/review-pr" --config "$invalid_budget_agent_config" --show-config >/dev/null 2>&1; then

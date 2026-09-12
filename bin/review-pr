@@ -467,6 +467,8 @@ load_config() {
             . == "" or IN("low", "medium", "high", "xhigh", "max");
         def valid_codex_effort:
             . == "" or IN("none", "low", "medium", "high", "xhigh", "max");
+        def valid_pi_thinking:
+            . == "" or IN("off", "minimal", "low", "medium", "high", "xhigh", "max");
         def valid_language:
             . == "EN" or . == "UA";
         def valid_language_override:
@@ -649,7 +651,7 @@ load_config() {
         )) and
         (if .agents.claude? then (.agents.claude.effort // "" | valid_claude_effort) else true end) and
         (if .agents.codex? then (.agents.codex.effort // "" | valid_codex_effort) else true end) and
-        (if .agents.pi? then (.agents.pi.effort // "" == "") else true end) and
+        (if .agents.pi? then (.agents.pi.effort // "" | valid_pi_thinking) else true end) and
         (all(.agents | to_entries[]; .key == "pi" or ((.value | has("max_tool_calls")) | not))) and
         (. as $config |
             [$config.reviewers[] | select(. as $agent |
@@ -658,7 +660,7 @@ load_config() {
             ($config.agents[$config.synthesizer] | if type == "object" and has("enabled") then .enabled else true end) == true) and
         (if .synthesizer == "claude" then (.finalization.effort // "" | valid_claude_effort)
          elif .synthesizer == "codex" then (.finalization.effort // "" | valid_codex_effort)
-         elif .synthesizer == "pi" then (.finalization.effort // "" == "")
+         elif .synthesizer == "pi" then (.finalization.effort // "" | valid_pi_thinking)
          else true end)
     '
 
@@ -1197,6 +1199,20 @@ Give a prioritized numbered list derived only from findings this cross-review co
 agent_label() {
     local agent=$1
     printf '%s\n' "${AGENT_LABELS[$agent]:-$agent}"
+}
+
+# Prints the CLI arguments that carry a configured effort to a built-in agent,
+# one per line: Claude --effort, Codex a reasoning override, Pi --thinking.
+agent_effort_arguments() {
+    local agent=$1
+    local effort=$2
+
+    [[ -n "$effort" ]] || return 0
+    case "$agent" in
+        claude) printf '%s\n' --effort "$effort" ;;
+        codex) printf '%s\n' -c "model_reasoning_effort=\"${effort}\"" ;;
+        pi) printf '%s\n' --thinking "$effort" ;;
+    esac
 }
 
 dashboard_agent_label() {
@@ -5786,18 +5802,7 @@ start_agent() {
         model_arguments=(--model "$model")
     fi
 
-    case "$agent" in
-        claude)
-            if [[ -n "$effort" ]]; then
-                effort_arguments=(--effort "$effort")
-            fi
-            ;;
-        codex)
-            if [[ -n "$effort" ]]; then
-                effort_arguments=(-c "model_reasoning_effort=\"${effort}\"")
-            fi
-            ;;
-    esac
+    mapfile -t effort_arguments < <(agent_effort_arguments "$agent" "$effort")
 
     if [[ -n "$runner" ]]; then
         write_unavailable_usage_summary "$usage_json_file" "$agent" "$phase" "$model" "$effort"
@@ -5940,6 +5945,7 @@ start_agent() {
                     "${pi_system_prompt_arguments[@]}" \
                     "${pi_tool_arguments[@]}" \
                     "${model_arguments[@]}" \
+                    "${effort_arguments[@]}" \
                     -p \
                     "@${pi_payload_file}" \
                     "$pi_tail_control" >"$response_file" 2>"$log_file"; then

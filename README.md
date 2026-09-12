@@ -136,7 +136,7 @@ See the [official Codex CLI documentation](https://learn.chatgpt.com/docs/codex/
 
 ### Pi
 
-Pi is optional. If you enable it, leave its model/provider empty in `review-pr` when you want Pi to use its own configured default. Install the current Pi CLI only when `pi` is absent:
+Pi is optional. If you enable it, leave its model/provider empty in `review-pr` when you want Pi to use its own configured default. `agents.pi.effort` (and `finalization.effort` when Pi synthesizes) maps to Pi's `--thinking` level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; leave it empty to keep the model default. Install the current Pi CLI only when `pi` is absent:
 
 ```bash
 command -v pi >/dev/null 2>&1 || curl -fsSL https://pi.dev/install.sh | sh

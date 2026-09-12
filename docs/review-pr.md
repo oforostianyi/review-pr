@@ -235,7 +235,7 @@ rule mechanically, and the configured timeout remains the final wall-clock bound
 
 - Claude receives `--effort`. Supported configuration values are `low`, `medium`, `high`, `xhigh`, and `max`; its default is determined by Claude Code when the field is empty or omitted.
 - Codex receives `-c model_reasoning_effort="…"`. Supported configuration values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; model availability determines which values the selected model accepts.
-- Pi has no effort setting in this orchestrator because it must retain the current default of its configured provider/model.
+- Pi receives `--thinking`. Supported configuration values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; an empty value keeps the current default of the configured provider/model. A bounded level matters for reasoning models behind a local server: a finalizer that spends most of its output budget thinking can hit the output token limit before it prints the contract.
 
 The exact model still decides whether an effort is available. For example, Claude Haiku 4.5 rejects effort, and older Claude models may support only a subset. Leave the field empty for the CLI default, or set `finalization.effort` to `""` to explicitly disable inherited agent effort for final synthesis.
 
@@ -332,7 +332,7 @@ Troubleshooting:
 }
 ```
 
-When `finalization.model` is empty or omitted, the synthesizer uses its normal agent model; if that is empty too, it uses the CLI default. Omit `finalization.effort` to inherit the synthesizer agent's effort. Include `"effort": ""` to disable an inherited effort, as in the Haiku example above, or set a supported non-empty value to override it. For Pi, an empty model continues to omit `--model` and uses its configured current default.
+When `finalization.model` is empty or omitted, the synthesizer uses its normal agent model; if that is empty too, it uses the CLI default. Omit `finalization.effort` to inherit the synthesizer agent's effort. Include `"effort": ""` to disable an inherited effort, as in the Haiku example above, or set a supported non-empty value to override it. For Pi, an empty model continues to omit `--model` and uses its configured current default, and a non-empty effort is passed as `--thinking`.
 
 ## Review language
 

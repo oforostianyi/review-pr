@@ -216,7 +216,7 @@
             {
               "properties": {
                 "effort": {
-                  "const": ""
+                  "$ref": "#/$defs/piThinking"
                 }
               }
             }
@@ -390,7 +390,7 @@
           "finalization": {
             "properties": {
               "effort": {
-                "const": ""
+                "$ref": "#/$defs/piThinking"
               }
             }
           }
@@ -520,6 +520,19 @@
         "",
         "EN",
         "UA"
+      ]
+    },
+    "piThinking": {
+      "description": "Pi thinking level passed as --thinking; empty keeps the model's current default.",
+      "enum": [
+        "",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
       ]
     },
     "codexEffort": {

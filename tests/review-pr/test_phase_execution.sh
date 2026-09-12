@@ -218,4 +218,10 @@ assert_eq 'Alpha (final-model high)' "$(dashboard_agent_label alpha final)" \
     'the final phase shows the configured finalization model'
 FINALIZATION_MODEL=''
 
+assert_eq '--effort high' "$(agent_effort_arguments claude high | paste -sd ' ' -)" 'Claude receives its effort as --effort'
+assert_eq '-c model_reasoning_effort="medium"' "$(agent_effort_arguments codex medium | paste -sd ' ' -)" 'Codex receives its effort as a reasoning override'
+assert_eq '--thinking xhigh' "$(agent_effort_arguments pi xhigh | paste -sd ' ' -)" 'Pi receives its effort as a thinking level'
+assert_eq '' "$(agent_effort_arguments pi '' | paste -sd ' ' -)" 'an empty Pi effort adds no thinking flag'
+assert_eq '' "$(agent_effort_arguments custom high | paste -sd ' ' -)" 'other agents receive no effort flag'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
