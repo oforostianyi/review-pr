@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-09-12
+
 ### Added
 
 - Final diagnostics sidecar `work/*-final-diagnostics.json` (manifest `artifacts.final_diagnostics`),
