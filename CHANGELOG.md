@@ -4,6 +4,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- Run manifests record the measured review-thread state as `review_threads: {status, reason}`, and a
+  resumed run or an artifact-only `--rerun-final` restores it from the source manifest (or, for older
+  runs, from the GitHub context snapshot) instead of reporting `github_review_threads_unavailable:
+  not_fetched` in the final diagnostics.
+
 ## [1.14.0] - 2026-09-12
 
 ### Added

@@ -78,4 +78,26 @@ assert_eq partial "$PR_REVIEW_THREADS_STATUS" \
 assert_eq nested_comment_pagination_incomplete "$PR_REVIEW_THREADS_REASON" \
     'nested pagination limitation is machine-stable'
 
+REPORT_STEM=fixture-complete
+REVIEW_PR_FAKE_REVIEW_THREADS_JSON='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"THREAD-DONE","isResolved":true,"isOutdated":false,"path":"src/One.php","line":10,"originalLine":null,"comments":{"totalCount":1,"nodes":[{"fullDatabaseId":"301"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+fetch_github_review_threads
+assert_eq complete "$PR_REVIEW_THREADS_STATUS" 'a fully paginated thread set is complete'
+write_github_context_snapshot
+source_manifest="$test_root/source-manifest.json"
+jq -n '{artifacts: {github_context: "fixture-complete-github-context.md"}}' >"$source_manifest"
+PR_REVIEW_THREADS_STATUS=unavailable
+PR_REVIEW_THREADS_REASON=not_fetched
+load_review_thread_state_from_source "$source_manifest" "$PR_CONTEXT_FILE"
+assert_eq complete "$PR_REVIEW_THREADS_STATUS" \
+    'a source run without a recorded thread state restores it from the context snapshot'
+assert_eq '' "$PR_REVIEW_THREADS_REASON" 'a complete snapshot restores an empty limitation reason'
+jq -n '{review_threads: {status: "partial", reason: "thread_pagination_incomplete"}}' >"$source_manifest"
+load_review_thread_state_from_source "$source_manifest" "$PR_CONTEXT_FILE"
+assert_eq partial "$PR_REVIEW_THREADS_STATUS" 'a recorded thread state in the manifest takes precedence over the snapshot'
+assert_eq thread_pagination_incomplete "$PR_REVIEW_THREADS_REASON" 'the recorded limitation reason is restored'
+jq -n '{}' >"$source_manifest"
+load_review_thread_state_from_source "$source_manifest" "$test_root/missing-context.md"
+assert_eq unavailable "$PR_REVIEW_THREADS_STATUS" 'no recorded state and no snapshot stays unavailable'
+assert_eq source_state_unknown "$PR_REVIEW_THREADS_REASON" 'the missing source state has a stable reason'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

@@ -796,6 +796,7 @@ run_ndjson_cross_case() {
         'the diagnostics sidecar carries the three parts'
     assert_eq "${stem}-final-diagnostics.json" "$(jq -r '.artifacts.final_diagnostics' "$manifest")" \
         'the manifest records the diagnostics sidecar'
+    assert_eq complete "$(jq -r '.review_threads.status' "$manifest")" 'the manifest records the measured review-thread state'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
         'structured final usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \
@@ -816,6 +817,10 @@ run_ndjson_cross_case() {
         'structured final rerun preserves its own raw NDJSON'
     assert_file_exists "$work_dir/$(jq -r '.final_findings' "$rerun_manifest")" \
         'structured final rerun publishes its own canonical sidecar'
+    assert_eq complete "$(jq -r '.review_threads.status' "$rerun_manifest")" \
+        'structured final rerun inherits the source run review-thread state'
+    assert_eq 'false' "$(jq '[.orchestrator[].type] | index("github_review_threads_unavailable") != null' "$work_dir/$(jq -r '.final_diagnostics' "$rerun_manifest")")" \
+        'an artifact-only rerun does not report the inherited thread state as unavailable'
 }
 
 write_three_agent_config() {

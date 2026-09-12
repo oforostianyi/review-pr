@@ -6904,6 +6904,8 @@ create_full_manifest() {
         --argjson cross_findings "$cross_findings_json" \
         --argjson cross_review_usage "$cross_usage_json" \
         --arg github_context "${PR_CONTEXT_FILE##*/}" \
+        --arg threads_status "$PR_REVIEW_THREADS_STATUS" \
+        --arg threads_reason "$PR_REVIEW_THREADS_REASON" \
         --arg repository_facts_json "${REPOSITORY_FACTS_JSON_FILE##*/}" \
         --arg repository_facts_markdown "${REPOSITORY_FACTS_MARKDOWN_FILE##*/}" \
         --arg changed_lines "${CHANGED_LINE_MAP_FILE##*/}" \
@@ -6977,6 +6979,7 @@ create_full_manifest() {
                     final: $final_comparison_mode
                 }
             },
+            review_threads: {status: $threads_status, reason: (if $threads_reason == "" then null else $threads_reason end)},
             artifacts: {
                 github_context: $github_context,
                 repository_facts: {
@@ -7479,6 +7482,12 @@ load_artifact_source_run() {
         [[ -z "$configured_file" ]] || AGENT_LABELS[$manifest_agent]=$configured_file
     done
 
+    configured_file=$(jq -r '.artifacts.github_context // ""' "$SOURCE_MANIFEST")
+    if [[ -n "$configured_file" && "$configured_file" == "${configured_file##*/}" ]]; then
+        load_review_thread_state_from_source "$SOURCE_MANIFEST" "${WORK_DIR}/${configured_file}"
+    else
+        load_review_thread_state_from_source "$SOURCE_MANIFEST" ""
+    fi
     PR_CONTEXT_FILE=""
 }
 
@@ -7545,6 +7554,33 @@ run_artifact_only_final_rerun() {
     log "Final artifact-only re-synthesis complete"
     printf '%s\n' "$FINAL_REPORT"
     [[ -z "$COMPARISON_REPORT" ]] || printf '%s\n' "$COMPARISON_REPORT"
+}
+
+# Restores the review-thread availability measured by the source run, so a
+# resumed run or an artifact-only final rerun reports the state that was
+# actually fetched instead of "not fetched". Newer manifests record it under
+# review_threads; older runs are read from the GitHub context snapshot.
+load_review_thread_state_from_source() {
+    local manifest=$1
+    local context_file=$2
+    local status='' reason=''
+
+    status=$(jq -r '.review_threads.status // ""' "$manifest")
+    reason=$(jq -r '.review_threads.reason // ""' "$manifest")
+    if [[ -z "$status" && -n "$context_file" && -s "$context_file" ]]; then
+        status=$(sed -n 's/^- Availability: `\([a-z_]*\)`$/\1/p' "$context_file" | sed -n '1p')
+        reason=$(sed -n 's/^- Limitation: `\([a-z_]*\)`$/\1/p' "$context_file" | sed -n '1p')
+    fi
+    case "$status" in
+        complete|partial|unavailable)
+            PR_REVIEW_THREADS_STATUS=$status
+            PR_REVIEW_THREADS_REASON=$reason
+            ;;
+        *)
+            PR_REVIEW_THREADS_STATUS=unavailable
+            PR_REVIEW_THREADS_REASON=source_state_unknown
+            ;;
+    esac
 }
 
 load_resume_run() {
@@ -7676,6 +7712,7 @@ load_resume_run() {
     [[ "$configured_file" == "${REPORT_STEM}-github-context.md" ]] || die "Selected run has an unexpected GitHub context artifact"
     PR_CONTEXT_FILE="${WORK_DIR}/${configured_file}"
     [[ -f "$PR_CONTEXT_FILE" && -s "$PR_CONTEXT_FILE" && ! -L "$PR_CONTEXT_FILE" ]] || die "Selected run is missing its GitHub context snapshot"
+    load_review_thread_state_from_source "$SOURCE_MANIFEST" "$PR_CONTEXT_FILE"
     load_repository_facts_from_manifest "$SOURCE_MANIFEST"
     load_changed_line_map_from_manifest "$SOURCE_MANIFEST"
     phase_status=$(jq -r '.status.pipeline // ""' "$SOURCE_MANIFEST")
@@ -7863,6 +7900,8 @@ create_rerun_manifest() {
         --arg cross_comparison_mode "$CROSS_COMPARISON_MODE" \
         --arg final_comparison_mode "$FINAL_COMPARISON_MODE" \
         --arg github_context "${PR_CONTEXT_FILE##*/}" \
+        --arg threads_status "$PR_REVIEW_THREADS_STATUS" \
+        --arg threads_reason "$PR_REVIEW_THREADS_REASON" \
         --arg output "${FINAL_REPORT##*/}" \
         --arg final_raw "${FINAL_RAW_OUTPUT##*/}" \
         --arg final_findings "${FINAL_FINDINGS_OUTPUT##*/}" \
@@ -7925,6 +7964,7 @@ create_rerun_manifest() {
                 }
             },
             github_context: (if $github_context == "" then null else $github_context end),
+            review_threads: {status: $threads_status, reason: (if $threads_reason == "" then null else $threads_reason end)},
             inputs: {
                 cross_review: $cross_review,
                 cross_review_findings: (if $final_finding_contract == "ndjson-v1" then $cross_review_findings else null end),
