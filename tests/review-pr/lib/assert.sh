@@ -80,8 +80,12 @@ assert_file_contains() {
 
 portable_mktemp_dir() {
     local prefix=${1:-review-pr-test}
+    local directory
 
-    mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX"
+    # Return the canonical path: macOS resolves $TMPDIR through /private and the
+    # orchestrator canonicalizes the paths it records, so tests compare like with like.
+    directory=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
+    (cd -P -- "$directory" && pwd -P)
 }
 
 # Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
