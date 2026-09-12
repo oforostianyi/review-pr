@@ -652,6 +652,10 @@ run_ndjson_primary_case() {
         'structured primary prompt maps plausible skill findings onto records instead of dropping them'
     assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'refuted candidates are not emitted' \
         'structured primary prompt maps the skill report sections onto the record contract'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'an explicit repository rule with its path' \
+        'structured primary prompt requires rule-based findings to name their basis in evidence'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'inferred convention' \
+        'structured primary prompt distinguishes inferred conventions from explicit rules'
     assert_false 'structured primary prompt no longer restricts pr-level anchors to PR-wide omissions' \
         grep -Fq -- 'Use pr-level only for a genuine PR-wide omission' "$capture/primary-review-alpha-attempt-1.prompt"
     assert_file_contains "$alpha_cross_prompt" 'Fixture changed-line defect' \
@@ -777,6 +781,8 @@ run_ndjson_cross_case() {
         grep -Fq -- 'Start with exactly this table' "$alpha_prompt"
     assert_file_contains "$alpha_prompt" 'the caller through which it is reachable belong in evidence' \
         'structured cross-review maps the skill cross-review columns onto record fields'
+    assert_file_contains "$alpha_prompt" 'inferred convention' \
+        'structured cross-review states the explicit-rule versus inferred-convention basis policy'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
         'structured final usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \

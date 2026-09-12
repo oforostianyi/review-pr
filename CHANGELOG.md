@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The primary and cross-review `ndjson-v1` contracts now state the basis policy for rule-based
+  findings: evidence must name an explicit repository rule with its path, a configured skill rule by
+  name, or an inferred convention verified against sibling files; general style preferences without
+  engineering impact are not findings, and an inferred convention alone cannot carry `P0`/`P1`.
+  Previously only the final contract carried this rule.
+
 ## [1.13.0] - 2026-09-12
 
 ### Added
