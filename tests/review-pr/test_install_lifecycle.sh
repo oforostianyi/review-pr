@@ -41,6 +41,12 @@ stage_package "$package_root"
 fake_bin="$test_root/bin"
 mkdir -p -- "$fake_bin"
 ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+# The default configuration enables the hosted Claude and Codex commands;
+# --show-config only checks that they resolve, so inert stand-ins suffice.
+for hosted_command in claude codex; do
+    printf '#!/bin/sh\nexit 0\n' >"$fake_bin/$hosted_command"
+    chmod 0755 "$fake_bin/$hosted_command"
+done
 
 # An isolated HOME with a prefix containing a space, so the launcher and the
 # installer are exercised with a path that needs quoting everywhere.
@@ -195,5 +201,72 @@ assert_file_exists "$reviews_dir/example-repository/123-final.md" '--purge-confi
 assert_file_exists "$review_repo/uncommitted.txt" '--purge-config never touches the review checkout'
 assert_false 'the purge uninstall removes the package from its prefix' test -e "$purge_prefix/libexec/review-pr"
 assert_file_exists "$config_dir/config.json" 'purging one configuration directory leaves another installation configuration alone'
+
+# Upgrade from an older package: the previous version is installed first, its
+# configuration is turned into the legacy single-repository form with personal
+# customizations, and the current package installs over it.
+old_package="$test_root/old-package"
+stage_package "$old_package"
+printf '%s\n' '1.13.0' >"$old_package/VERSION"
+replace_first_literal "readonly REVIEW_PR_VERSION=\"${package_version}\"" 'readonly REVIEW_PR_VERSION="1.13.0"' \
+    <"$repo_root/bin/review-pr" >"$old_package/bin/review-pr"
+chmod 0755 "$old_package/bin/review-pr"
+upgrade_home="$test_root/upgrade-home"
+upgrade_prefix="$upgrade_home/.local"
+upgrade_config_dir="$upgrade_home/.config/review-pr"
+upgrade_checkout="$test_root/upgrade checkout"
+mkdir -p -- "$upgrade_home"
+make_review_checkout "$upgrade_checkout"
+HOME=$upgrade_home PATH="$fake_bin:$PATH" sh "$old_package/install.sh" \
+    --repo "$upgrade_checkout" --github-repository example/repository --reviews-dir "$reviews_dir" \
+    >"$test_root/old-install.txt" 2>&1 || fail "old package install failed: $(cat "$test_root/old-install.txt")"
+assert_eq 'review-pr 1.13.0' "$(HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --version)" \
+    'the older package installs into the default prefix and reports its own version'
+assert_eq '1.13.0' "$(cat "$upgrade_prefix/share/review-pr/VERSION")" 'the older package records its version in shared data'
+jq --arg checkout "$upgrade_checkout" --arg runner "$test_dir/mock-agent-runner.sh" '
+    del(.repositories) | del(.default_repository) |
+    .review_repository = $checkout |
+    .agents.personal = {"label": "Personal agent", enabled: true, model: "personal-model", effort: "", command: [$runner]} |
+    .reviewers = ["claude", "personal"] |
+    .language = "UA" |
+    .prompts.final = ["A private prompt that must survive upgrades."] |
+    .profiles["personal-profile"] = {skills: {claude: "my-private-skill"}}' \
+    "$upgrade_config_dir/config.json" >"$test_root/legacy-config.json"
+cp -- "$test_root/legacy-config.json" "$upgrade_config_dir/config.json"
+mkdir -p -- "$upgrade_config_dir/skills/claude/my-private-skill"
+printf '%s\n' 'private skill contents' >"$upgrade_config_dir/skills/claude/my-private-skill/SKILL.md"
+
+HOME=$upgrade_home PATH="$fake_bin:$PATH" sh "$package_root/install.sh" \
+    --repo "$upgrade_checkout" --github-repository example/repository \
+    >"$test_root/upgrade-install.txt" 2>&1 || fail "upgrade install failed: $(cat "$test_root/upgrade-install.txt")"
+assert_eq "review-pr ${package_version}" "$(HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --version)" \
+    'the upgraded launcher runs the new implementation'
+assert_eq "$package_version" "$(cat "$upgrade_prefix/share/review-pr/VERSION")" 'the upgrade replaces the shared VERSION file'
+upgrade_backup=$(find "$upgrade_config_dir/backups" -type f -name 'config-*.json' -print | sed -n '1p')
+assert_file_exists "$upgrade_backup" 'the upgrade backs up the legacy configuration first'
+assert_true 'the upgrade backup is byte-for-byte the legacy configuration' \
+    cmp -s "$test_root/legacy-config.json" "$upgrade_backup"
+assert_eq 'null' "$(jq -c '.review_repository' "$upgrade_config_dir/config.json")" \
+    'the deprecated review_repository field is migrated away'
+assert_eq 'repository' "$(jq -r '.default_repository' "$upgrade_config_dir/config.json")" \
+    'the legacy single repository becomes the default alias'
+assert_eq "$upgrade_checkout" "$(jq -r '.repositories.repository.checkout' "$upgrade_config_dir/config.json")" \
+    'the migrated repository keeps the legacy checkout'
+assert_eq 'Personal agent' "$(jq -r '.agents.personal["label"]' "$upgrade_config_dir/config.json")" \
+    'the upgrade preserves a personal agent'
+assert_eq 'claude,personal' "$(jq -r '.reviewers | join(",")' "$upgrade_config_dir/config.json")" \
+    'the upgrade preserves the reviewer list'
+assert_eq 'UA' "$(jq -r '.language' "$upgrade_config_dir/config.json")" 'the upgrade preserves the review language'
+assert_eq 'A private prompt that must survive upgrades.' "$(jq -r '.prompts.final[0]' "$upgrade_config_dir/config.json")" \
+    'the upgrade preserves personal prompts'
+assert_eq 'my-private-skill' "$(jq -r '.profiles["personal-profile"].skills.claude' "$upgrade_config_dir/config.json")" \
+    'the upgrade preserves personal profiles'
+assert_file_contains "$upgrade_config_dir/skills/claude/my-private-skill/SKILL.md" 'private skill contents' \
+    'the upgrade preserves portable skills'
+HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --show-config \
+    >"$test_root/upgrade-show-config.txt" 2>"$test_root/upgrade-show-config.err" \
+    || fail "--show-config failed after the upgrade: $(cat "$test_root/upgrade-show-config.err")"
+assert_file_contains "$test_root/upgrade-show-config.txt" "review-pr version: ${package_version}" \
+    'the migrated configuration is accepted by the new version'
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
