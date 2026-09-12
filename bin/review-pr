@@ -3207,6 +3207,45 @@ build_final_expected_refs() {
     ' "${input_files[@]}" >"$output_file"
 }
 
+build_final_disputes() {
+    local output_file=$1
+    local agent
+    local -a input_files=()
+
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        [[ -s "${CROSS_FINDINGS_OUTPUTS[$agent]:-}" ]] || return 1
+        input_files+=("${CROSS_FINDINGS_OUTPUTS[$agent]}")
+    done
+    (( ${#input_files[@]} > 0 )) || return 1
+    # A dispute is a primary finding whose cross-review records disagree in
+    # classification, or agree on CONFIRMED with different severities. The
+    # id is derived from the primary ref so it is stable across attempts.
+    jq -s '
+        [ .[] as $report |
+          $report.findings[] as $finding |
+          $finding.source_refs[] |
+          {
+            primary: {agent: .agent, source_id: .source_id},
+            cross: {agent: $report.agent, source_id: $finding.source_id,
+                    classification: $finding.classification, severity: $finding.severity}
+          }
+        ]
+        | group_by(.primary.agent, .primary.source_id)
+        | map(
+            (map(.cross) | sort_by(.agent, .source_id)) as $refs |
+            ($refs | map(.classification) | unique) as $classes |
+            ($refs | map(.severity) | unique) as $severities |
+            if ($classes | length) > 1 then
+                {dispute_id: ("dispute:" + .[0].primary.agent + ":" + .[0].primary.source_id),
+                 primary_ref: .[0].primary, kind_hint: "factual", conflicting_refs: $refs}
+            elif $classes == ["CONFIRMED"] and ($severities | length) > 1 then
+                {dispute_id: ("dispute:" + .[0].primary.agent + ":" + .[0].primary.source_id),
+                 primary_ref: .[0].primary, kind_hint: "severity", conflicting_refs: $refs}
+            else empty end)
+        | sort_by(.dispute_id)
+    ' "${input_files[@]}" >"$output_file"
+}
+
 validate_final_ndjson_records() {
     local records_file=$1
     local canonical_file=$2

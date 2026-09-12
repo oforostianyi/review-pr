@@ -196,6 +196,38 @@ assert_true 'final synthesis derives cross-review inputs and transitive primary 
 assert_eq 'beta:beta:F-001' "$(jq -r '.[0].primary_refs[0] | .agent + ":" + .source_id' "$final_expected_refs")" \
     'final expected refs retain canonical primary provenance'
 
+gamma_cross_canonical="$test_root/cross-gamma-canonical.json"
+jq '.agent = "gamma" | .findings[0].source_id = "gamma:C-001" | .findings[0].classification = "REJECTED" | .findings[0].severity = null' \
+    "$cross_canonical" >"$gamma_cross_canonical"
+REVIEW_AGENTS=(alpha gamma)
+CROSS_FINDINGS_OUTPUTS[gamma]="$gamma_cross_canonical"
+disputes_file="$test_root/disputes.json"
+assert_true 'dispute detection reads every canonical cross-review sidecar' \
+    build_final_disputes "$disputes_file"
+assert_eq '1' "$(jq 'length' "$disputes_file")" \
+    'a primary ref classified CONFIRMED and REJECTED by different cross-reviewers is one dispute'
+assert_eq 'dispute:beta:beta:F-001' "$(jq -r '.[0].dispute_id' "$disputes_file")" \
+    'dispute ids derive from the primary ref'
+assert_eq 'factual' "$(jq -r '.[0].kind_hint' "$disputes_file")" \
+    'differing classifications hint at a factual dispute'
+assert_eq 'alpha:alpha:C-001,gamma:gamma:C-001' \
+    "$(jq -r '[.[0].conflicting_refs[] | .agent + ":" + .source_id] | join(",")' "$disputes_file")" \
+    'conflicting refs list every cross-review record of the disputed primary ref in stable order'
+
+severity_cross_canonical="$test_root/cross-gamma-severity.json"
+jq '.findings[0].classification = "CONFIRMED" | .findings[0].severity = "P3"' "$gamma_cross_canonical" >"$severity_cross_canonical"
+CROSS_FINDINGS_OUTPUTS[gamma]="$severity_cross_canonical"
+assert_true 'dispute detection handles severity-only disagreement' build_final_disputes "$disputes_file"
+assert_eq 'severity' "$(jq -r '.[0].kind_hint' "$disputes_file")" \
+    'agreeing CONFIRMED classifications with different severities hint at a severity dispute'
+
+CROSS_FINDINGS_OUTPUTS[gamma]="$cross_canonical"
+assert_true 'dispute detection runs on agreeing cross-reviews' build_final_disputes "$disputes_file"
+assert_eq '0' "$(jq 'length' "$disputes_file")" 'agreeing cross-reviews produce no dispute'
+
+unset 'CROSS_FINDINGS_OUTPUTS[gamma]'
+REVIEW_AGENTS=(alpha)
+
 final_records="$test_root/final-records.json"
 final_canonical="$test_root/final-canonical.json"
 jq -n '{
