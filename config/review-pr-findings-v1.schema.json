@@ -321,7 +321,7 @@
           "description": "Declarative argv array of the measurement. Recorded, never evaluated as a shell string."
         },
         "observed": {
-          "type": "string"
+          "type": ["string", "null"]
         },
         "basis": {
           "enum": ["explicit_repository_rule", "skill_rule", "inferred_convention", "general_engineering"]

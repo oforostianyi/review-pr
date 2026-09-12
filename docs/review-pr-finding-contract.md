@@ -169,7 +169,8 @@ Fields and their rules:
   iteration may execute an allow-listed subset in the detached checkout and replace `observed` with
   the captured result. `command` is required when `verification_method` is `command` or `test`.
 - `observed`: what the measurement or source read showed, in the final language, bounded in length.
-  Required when `resolution_status` is `resolved`.
+  Required non-empty when `resolution_status` is `resolved`; `null` or empty otherwise, when nothing
+  was observed.
 - `basis`: `explicit_repository_rule`, `skill_rule`, `inferred_convention`, or `general_engineering`.
   `basis_source` is required for `explicit_repository_rule` (a repository path, optionally
   `path:line`) and for `skill_rule` (the configured skill name, never an absolute private path);

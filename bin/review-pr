@@ -3391,8 +3391,8 @@ readonly RESOLUTION_JQ_DEFS='
            elif $r.resolution_status == "resolved" and $r.dispute_kind != "severity" and $r.verification_method == "manual" then "verification_method" else empty end),
           (if ($r.command | argv_or_null | not) then "command"
            elif ($r.verification_method | IN("command", "test")) and $r.command == null then "command" else empty end),
-          (if ($r.observed | type == "string") | not then "observed"
-           elif $r.resolution_status == "resolved" and ($r.observed | length) == 0 then "observed" else empty end),
+          (if $r.resolution_status == "resolved" then (if ($r.observed | type == "string" and length > 0) | not then "observed" else empty end)
+           else (if ($r.observed == null or ($r.observed | type == "string")) | not then "observed" else empty end) end),
           (if ($r.basis | IN("explicit_repository_rule", "skill_rule", "inferred_convention", "general_engineering")) | not then "basis" else empty end),
           (if ($r.basis | IN("explicit_repository_rule", "skill_rule")) then (if ($r.basis_source | type == "string" and length > 0) | not then "basis_source" else empty end)
            else (if $r.basis_source != null then "basis_source" else empty end) end),
@@ -4555,7 +4555,7 @@ readonly FINAL_RESOLUTION_CONTRACT_BLOCK='Dispute resolutions: when the prompt c
 - resolution_status is resolved, uncertain, or not_applicable; not_applicable is allowed only for a severity dispute.
 - verification_method is source, command, test, repository_rule, runtime, or manual. A factual or mixed dispute is resolved only by a method other than manual, and its covering finding may be CONFIRMED only when the dispute is resolved. When the fact could not be measured, set resolution_status to uncertain and classify the covering finding UNCERTAIN: the number of reviewers never settles a fact.
 - command is null or an argv array of non-empty strings describing the measurement (no shell string). It is required when verification_method is command or test. The orchestrator records it and does not execute it.
-- observed states what the measurement or source read showed; required when resolution_status is resolved.
+- observed states what the measurement or source read showed; required non-empty when resolution_status is resolved, and null or empty otherwise when nothing was observed.
 - basis is explicit_repository_rule, skill_rule, inferred_convention, or general_engineering. basis_source is a repository path (optionally path:line) for explicit_repository_rule, the configured skill name for skill_rule, and null otherwise. A finding whose only basis is inferred_convention cannot carry P0 or P1.
 - limitations is a string array of what remains unverified.'
 

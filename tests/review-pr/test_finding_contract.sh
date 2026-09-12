@@ -260,6 +260,9 @@ assert_eq '1' "$(jq '.disputes | length' "$resolution_canonical")" 'the resoluti
 assert_eq '' "$(describe_resolution_validation_failure "$resolution_records" "$resolution_final_canonical" "$disputes_file")" \
     'a valid resolution set has no diagnostics'
 
+uncertain_final_for_null="$test_root/resolution-final-uncertain-for-null.json"
+jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$resolution_final_canonical" >"$uncertain_final_for_null"
+
 check_invalid_resolution() {
     local label=$1 filter=$2 expected_detail=$3
     local candidate="$test_root/resolution-${label}.json"
@@ -291,9 +294,15 @@ assert_eq 'resolution[dispute:beta:beta:F-001].final_source_id' \
     "$(describe_resolution_validation_failure "$resolution_records" "$unrelated_final" "$disputes_file")" \
     'the diagnostic names the unlinked final record'
 
+null_observed_uncertain="$test_root/resolution-null-observed.json"
+jq '.[0].resolution_status = "uncertain" | .[0].observed = null | .[0].command = null | .[0].verification_method = "source"' "$resolution_records" >"$null_observed_uncertain"
+assert_true 'an unresolved resolution may leave observed null' \
+    validate_final_resolutions "$null_observed_uncertain" "$uncertain_final_for_null" "$disputes_file" "$test_root/resolution-null-observed-canonical.json"
 check_invalid_resolution manual-factual '.[0].verification_method = "manual"' \
     'resolution[dispute:beta:beta:F-001].verification_method'
 check_invalid_resolution command-without-observed '.[0].observed = ""' \
+    'resolution[dispute:beta:beta:F-001].observed'
+check_invalid_resolution resolved-without-observed '.[0].observed = null' \
     'resolution[dispute:beta:beta:F-001].observed'
 check_invalid_resolution unknown-dispute '.[0].dispute_id = "dispute:beta:beta:F-999"' \
     'resolutions.missing[dispute:beta:beta:F-001], resolutions.unknown[dispute:beta:beta:F-999]'
