@@ -783,6 +783,19 @@ run_ndjson_cross_case() {
         'structured cross-review maps the skill cross-review columns onto record fields'
     assert_file_contains "$alpha_prompt" 'inferred convention' \
         'structured cross-review states the explicit-rule versus inferred-convention basis policy'
+    assert_file_contains "$final_prompt" '===== BEGIN KNOWN LIMITATIONS =====' \
+        'structured final synthesis receives the orchestrator-known limitations'
+    assert_file_contains "$final_prompt" 'is a verification limitation, never a finding by itself' \
+        'structured final synthesis is told that check and tool failures are limitations'
+    assert_file_contains "$alpha_prompt" 'is a verification limitation, never a finding by itself' \
+        'structured cross-review is told that check and tool failures are limitations'
+    assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'is a verification limitation, never a finding by itself' \
+        'structured primary review is told that check and tool failures are limitations'
+    assert_file_exists "$work_dir/${stem}-final-diagnostics.json" 'a structured final run publishes the diagnostics sidecar'
+    assert_eq 'orchestrator,positive_evidence,reviewers' "$(jq -r '[.orchestrator, .positive_evidence, .reviewers] | length as $n | ["orchestrator","positive_evidence","reviewers"] | join(",")' "$work_dir/${stem}-final-diagnostics.json")" \
+        'the diagnostics sidecar carries the three parts'
+    assert_eq "${stem}-final-diagnostics.json" "$(jq -r '.artifacts.final_diagnostics' "$manifest")" \
+        'the manifest records the diagnostics sidecar'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-final-usage.json")" \
         'structured final usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \

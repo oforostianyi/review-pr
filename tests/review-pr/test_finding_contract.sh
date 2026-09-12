@@ -673,6 +673,18 @@ assert_eq '12' "$(jq 'length' "$positive_evidence")" 'positive evidence is cappe
 REVIEW_AGENTS=(alpha)
 unset 'PRIMARY_FINDINGS_OUTPUTS[beta]'
 
+known_prompt="$agg_root/known-limitations-prompt.md"
+printf 'Prompt body\n' >"$known_prompt"
+printf '%s\n' '[{"type":"github_check_failed","scope":"run","phase":null,"agent":null,"detail":"phpunit: failure","refs":[]}]' >"$agg_root/known.json"
+append_known_limitations_to_prompt "$known_prompt" "$agg_root/known.json"
+assert_file_contains "$known_prompt" '===== BEGIN KNOWN LIMITATIONS =====' 'the final prompt gets a known-limitations block'
+assert_file_contains "$known_prompt" '"type":"github_check_failed"' 'each orchestrator record is one compact JSON line'
+assert_file_contains "$known_prompt" 'never a finding by itself' 'the block restates that limitations are not findings'
+printf '[]\n' >"$agg_root/known.json"
+printf 'Prompt body\n' >"$known_prompt"
+append_known_limitations_to_prompt "$known_prompt" "$agg_root/known.json"
+assert_file_contains "$known_prompt" 'none' 'an empty record list is stated explicitly'
+
 REPORT_STEM=fixture-ua
 PRIMARY_REVIEW_LANGUAGE=UA
 ua_input="$test_root/primary-ua.ndjson"

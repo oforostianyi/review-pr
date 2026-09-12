@@ -187,6 +187,7 @@ FINAL_USAGE_OUTPUT=""
 FINAL_RAW_OUTPUT=""
 FINAL_FINDINGS_OUTPUT=""
 FINAL_RESOLUTIONS_OUTPUT=""
+FINAL_DIAGNOSTICS_OUTPUT=""
 FINAL_PROCESSED_RAW_FILE=""
 FINAL_PROCESSED_FINDINGS_FILE=""
 FINAL_INPUT_DESCRIPTION=""
@@ -3913,11 +3914,12 @@ describe_ndjson_validation_failure() {
 process_final_ndjson_output() {
     local output_file=$1
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
-    local resolutions_file disputes_file resolutions_canonical_file
+    local resolutions_file disputes_file resolutions_canonical_file diagnostics_file
     local line_number=0
 
     FINDING_CONTRACT_FAILURE_REASON=""
     FINAL_PROCESSED_RESOLUTIONS_FILE=""
+    FINAL_PROCESSED_DIAGNOSTICS_FILE=""
     new_temp_file 'final-resolution-records'; resolutions_file=$NEW_TEMP_FILE
     new_temp_file 'final-disputes'; disputes_file=$NEW_TEMP_FILE
     new_temp_file 'final-resolutions-canonical'; resolutions_canonical_file=$NEW_TEMP_FILE
@@ -3961,7 +3963,10 @@ process_final_ndjson_output() {
         attach_measurements "$resolutions_canonical_file"
         FINAL_PROCESSED_RESOLUTIONS_FILE=$resolutions_canonical_file
     fi
-    if ! render_final_findings_markdown "$canonical_file" "$rendered_file" "$FINAL_PROCESSED_RESOLUTIONS_FILE" || [[ ! -s "$rendered_file" ]]; then FINDING_CONTRACT_FAILURE_REASON=markdown_render_failed; return 1; fi
+    new_temp_file 'final-diagnostics'; diagnostics_file=$NEW_TEMP_FILE
+    write_final_diagnostics "$canonical_file" "$diagnostics_file"
+    FINAL_PROCESSED_DIAGNOSTICS_FILE=$diagnostics_file
+    if ! render_final_findings_markdown "$canonical_file" "$rendered_file" "$FINAL_PROCESSED_RESOLUTIONS_FILE" "$FINAL_PROCESSED_DIAGNOSTICS_FILE" || [[ ! -s "$rendered_file" ]]; then FINDING_CONTRACT_FAILURE_REASON=markdown_render_failed; return 1; fi
 
     FINAL_PROCESSED_RAW_FILE=$raw_file
     FINAL_PROCESSED_FINDINGS_FILE=$canonical_file
@@ -4106,7 +4111,7 @@ attempt_final_ndjson_repair() {
     repair_stop_reason=$(jq -r '.stop_reason // ""' "$repair_usage_json" 2>/dev/null || true)
 
     if (( repair_status == 0 )) && [[ "$repair_stop_reason" != length && -s "$repair_output" ]]; then
-        FINAL_PROCESSED_RAW_FILE="" FINAL_PROCESSED_FINDINGS_FILE="" FINAL_PROCESSED_RESOLUTIONS_FILE=""
+        FINAL_PROCESSED_RAW_FILE="" FINAL_PROCESSED_FINDINGS_FILE="" FINAL_PROCESSED_RESOLUTIONS_FILE="" FINAL_PROCESSED_DIAGNOSTICS_FILE=""
         if process_final_ndjson_output "$repair_output" \
             && validate_final_repair_stability "$baseline_file" "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"; then
             mv -- "$repair_output" "$output_file"
@@ -4624,6 +4629,8 @@ Every issue must be one atomic finding record with exactly these keys: record, s
 
 - Rule-based findings must name their basis in evidence: an explicit repository rule with its path (for example a root AGENTS.md line), a configured review skill rule by skill name, or an inferred convention that you verified against sibling files. A general style preference without a concrete engineering impact is not a finding, and a finding that rests only on an inferred convention takes at most P2.
 
+- A failed, pending, or skipped CI check, a denied or failing tool, or an unavailable file is a verification limitation, never a finding by itself. Record it in verification_limitations; a finding needs source or runtime evidence of a concrete engineering impact.
+
 Map the review skill's report onto this contract instead of emitting its Markdown sections: every finding, undisclosed behaviour change, or affected consumer or flow becomes one finding record; a plausible finding that could not be fully verified is still a record whose unverified part is stated in its verification_limitations, never silently dropped; a consumer, caller, or flow that was traced and verified safe becomes one positive_evidence entry naming the file and symbol; refuted candidates are not emitted; the verdict and the flows replayed belong in summary; a suggested fix belongs in recommendation; I/O or query measurements belong in evidence.
 
 Finish with exactly one final record and no records after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count must equal the number of preceding finding records. All reader-facing string values must use ${PRIMARY_REVIEW_LANGUAGE_NAME}. Even when there are no findings, return the complete record with finding_count 0.
@@ -4728,6 +4735,7 @@ Classify every supplied primary source finding. Each output finding has the stan
 - A confirmed changed-line anchor must use the supplied exact RIGHT-side changed-line map. Anchor an affected consumer, caller, or flow to the changed line that exposes it; use pr-level only when no changed line causes the finding (test coverage, migration, documentation), naming the file and symbol in evidence.
 - Record the skill's cross-review details inside the record: whether the issue is new or pre-existing and the caller through which it is reachable belong in evidence, and a changed severity must be explained in evidence.
 - When confirming a rule- or convention-based claim, state its basis in evidence: an explicit repository rule with its path, a configured skill rule by name, or an inferred convention verified against sibling files. Reject a general style opinion without engineering impact, and do not confirm P0 or P1 on an inferred convention alone.
+- A failed, pending, or skipped CI check, a denied or failing tool, or an unavailable file is a verification limitation, never a finding by itself. Record it in verification_limitations; a finding needs source or runtime evidence of a concrete engineering impact.
 
 Finish with exactly one complete record and nothing after it: {"record":"complete","schema_version":1,"finding_count":N,"summary":"...","verification_limitations":[],"positive_evidence":[]}. finding_count counts output finding records, not source refs.
 EOF
@@ -4852,6 +4860,42 @@ append_required_resolutions_to_prompt() {
     } >>"$prompt_file"
 }
 
+append_known_limitations_to_prompt() {
+    local prompt_file=$1
+    local records_file=$2
+
+    {
+        printf '\n===== BEGIN KNOWN LIMITATIONS =====\n'
+        printf '%s\n' 'The orchestrator measured these verification limits itself. A failed, pending, or skipped CI check, a denied or failing tool, or an unavailable file is a verification limitation, never a finding by itself; reference these records instead of rediscovering or contradicting them, and list what remains unverified in your own verification_limitations. When the list is "none", nothing was measured as limiting.'
+        if [[ "$(jq 'length' "$records_file")" == 0 ]]; then
+            printf 'none\n'
+        else
+            jq -c '.[]' "$records_file"
+        fi
+        printf '===== END KNOWN LIMITATIONS =====\n'
+    } >>"$prompt_file"
+}
+
+write_final_diagnostics() {
+    local final_canonical=$1 output_file=$2
+    local orchestrator_file reviewers_file positive_file
+
+    new_temp_file 'final-diagnostics-orchestrator'; orchestrator_file=$NEW_TEMP_FILE
+    new_temp_file 'final-diagnostics-reviewers'; reviewers_file=$NEW_TEMP_FILE
+    new_temp_file 'final-diagnostics-positive'; positive_file=$NEW_TEMP_FILE
+    collect_orchestrator_diagnostics "$orchestrator_file"
+    aggregate_reviewer_limitations "$final_canonical" "$reviewers_file"
+    aggregate_positive_evidence "$final_canonical" "$positive_file"
+    jq -n --slurpfile orchestrator "$orchestrator_file" --slurpfile reviewers "$reviewers_file" --slurpfile positive "$positive_file" '{
+        contract: "ndjson-v1",
+        schema_version: 1,
+        phase: "final-synthesis",
+        orchestrator: $orchestrator[0],
+        reviewers: $reviewers[0],
+        positive_evidence: $positive[0]
+    }' >"$output_file"
+}
+
 write_final_prompt() {
     local prompt_file=$1
     shift
@@ -4878,6 +4922,7 @@ Classify every supplied canonical cross-review finding. Each output finding has 
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN. CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.
 - include_in_rejected_summary is a boolean. Set it true only for a REJECTED claim important enough to explain in the human report; otherwise false.
+- A failed, pending, or skipped CI check, a denied or failing tool, or an unavailable file is a verification limitation, never a finding by itself. Record it in verification_limitations; a finding needs source or runtime evidence of a concrete engineering impact.
 - evidence is a non-empty string array. verification_limitations is a string array. Use the standard anchor and existing_feedback shapes from the supplied records. A changed-line anchor must use the exact supplied RIGHT-side changed-line map; anchor an affected consumer, caller, or flow to the changed line that exposes it, and use pr-level only when no changed line causes the finding (test coverage, migration, documentation), naming the file and symbol in evidence.
 - failure_scenario must be a non-empty string for CONFIRMED. For REJECTED and UNCERTAIN it may be null or an empty string when no failure scenario applies.
 - All reader-facing string values must use ${FINAL_LANGUAGE_NAME} (${FINALIZATION_LANGUAGE}). Fixed enum values, IDs, agent keys, and paths remain unchanged.
@@ -4999,6 +5044,9 @@ EOF
             build_final_disputes "$NEW_TEMP_FILE" || die "Cannot detect cross-review disputes for final synthesis"
             append_required_resolutions_to_prompt "$prompt_file" "$NEW_TEMP_FILE"
         fi
+        new_temp_file 'known-limitations'
+        collect_orchestrator_diagnostics "$NEW_TEMP_FILE"
+        append_known_limitations_to_prompt "$prompt_file" "$NEW_TEMP_FILE"
     fi
     while [[ "$FINAL_FINDING_CONTRACT_MODE" != ndjson-v1 && $# -ge 2 ]]; do
         label=$1
@@ -6793,6 +6841,7 @@ create_full_manifest() {
         --arg final_raw "${FINAL_RAW_OUTPUT##*/}" \
         --arg final_findings "${FINAL_FINDINGS_OUTPUT##*/}" \
         --arg final_resolutions "${FINAL_RESOLUTIONS_OUTPUT##*/}" \
+        --arg final_diagnostics "${FINAL_DIAGNOSTICS_OUTPUT##*/}" \
         --argjson dispute_resolution "$DISPUTE_RESOLUTION_ENABLED" \
         --arg final_usage "${FINAL_USAGE_OUTPUT##*/}" \
         '{
@@ -6874,6 +6923,7 @@ create_full_manifest() {
                 final_raw: (if $final_finding_contract == "ndjson-v1" then $final_raw else null end),
                 final_findings: (if $final_finding_contract == "ndjson-v1" then $final_findings else null end),
                 final_resolutions: (if $final_finding_contract == "ndjson-v1" and $dispute_resolution then $final_resolutions else null end),
+                final_diagnostics: (if $final_finding_contract == "ndjson-v1" then $final_diagnostics else null end),
                 final_anchor_validation: $anchor_validation,
                 comparison: (if $comparison == "" then null else $comparison end),
                 usage: {
@@ -7377,6 +7427,7 @@ run_artifact_only_final_rerun() {
         FINAL_RAW_OUTPUT="${WORK_DIR}/${rerun_stem}-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${rerun_stem}-findings.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${rerun_stem}-resolutions.json"
+        FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${rerun_stem}-diagnostics.json"
     fi
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
         COMPARISON_REPORT="${REPORT_DIR}/${rerun_stem}-comparison.md"
@@ -7745,6 +7796,7 @@ create_rerun_manifest() {
         --arg final_raw "${FINAL_RAW_OUTPUT##*/}" \
         --arg final_findings "${FINAL_FINDINGS_OUTPUT##*/}" \
         --arg final_resolutions "${FINAL_RESOLUTIONS_OUTPUT##*/}" \
+        --arg final_diagnostics "${FINAL_DIAGNOSTICS_OUTPUT##*/}" \
         --argjson dispute_resolution "$DISPUTE_RESOLUTION_ENABLED" \
         --arg usage "${FINAL_USAGE_OUTPUT##*/}" \
         --arg comparison "${COMPARISON_REPORT##*/}" \
@@ -7815,6 +7867,7 @@ create_rerun_manifest() {
             final_raw: (if $final_finding_contract == "ndjson-v1" then $final_raw else null end),
             final_findings: (if $final_finding_contract == "ndjson-v1" then $final_findings else null end),
             final_resolutions: (if $final_finding_contract == "ndjson-v1" and $dispute_resolution then $final_resolutions else null end),
+            final_diagnostics: (if $final_finding_contract == "ndjson-v1" then $final_diagnostics else null end),
             anchor_validation: $anchor_validation,
             usage: $usage,
             comparison: {
@@ -8611,6 +8664,7 @@ run_final_synthesis() {
     FINAL_PROCESSED_RAW_FILE=""
     FINAL_PROCESSED_FINDINGS_FILE=""
 FINAL_PROCESSED_RESOLUTIONS_FILE=""
+FINAL_PROCESSED_DIAGNOSTICS_FILE=""
 
     new_temp_file "final-prompt"
     final_prompt=$NEW_TEMP_FILE
@@ -8838,6 +8892,12 @@ FINAL_PROCESSED_RESOLUTIONS_FILE=""
             assert_new_target "$FINAL_RESOLUTIONS_OUTPUT"
             mv -- "$FINAL_PROCESSED_RESOLUTIONS_FILE" "$FINAL_RESOLUTIONS_OUTPUT"
             FINAL_PROCESSED_RESOLUTIONS_FILE=""
+        fi
+        if [[ -n "$FINAL_PROCESSED_DIAGNOSTICS_FILE" ]]; then
+            [[ -s "$FINAL_PROCESSED_DIAGNOSTICS_FILE" ]] || die 'Final diagnostics sidecar disappeared before publication'
+            assert_new_target "$FINAL_DIAGNOSTICS_OUTPUT"
+            mv -- "$FINAL_PROCESSED_DIAGNOSTICS_FILE" "$FINAL_DIAGNOSTICS_OUTPUT"
+            FINAL_PROCESSED_DIAGNOSTICS_FILE=""
         fi
     fi
     assert_new_target "$FINAL_REPORT"
@@ -9316,6 +9376,7 @@ if [[ "$RESUME_RUN" == true ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
+        FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-diagnostics.json"
         MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO
     fi
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
@@ -9450,6 +9511,7 @@ if [[ "$RERUN_FINAL" == true ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${rerun_stem}-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${rerun_stem}-findings.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${rerun_stem}-resolutions.json"
+        FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${rerun_stem}-diagnostics.json"
     fi
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
         COMPARISON_REPORT="${REPORT_DIR}/${rerun_stem}-comparison.md"
@@ -9526,6 +9588,7 @@ if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
     FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
     FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
     FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
+    FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-diagnostics.json"
     MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO
 fi
 if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
