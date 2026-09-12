@@ -82,8 +82,38 @@ jobs:
       - name: Test suite
         run: bash tests/review-pr/run.sh
 
+  minimum-jq:
+    # README promises jq 1.6 or newer; the distribution jq on the runners is
+    # newer, so this leg pins the documented minimum.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ''
+      GH_PROMPT_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq 1.6
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/jq16"
+          curl -fsSL -o "$HOME/jq16/jq" https://github.com/jqlang/jq/releases/download/jq-1.6/jq-linux64
+          expected=af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44
+          actual=$(sha256sum "$HOME/jq16/jq" | cut -d' ' -f1)
+          [ "$actual" = "$expected" ] || { printf 'jq 1.6 checksum mismatch: %s\n' "$actual" >&2; exit 1; }
+          chmod 0755 "$HOME/jq16/jq"
+          printf '%s\n' "$HOME/jq16" >>"$GITHUB_PATH"
+
+      - name: Tool versions
+        run: |
+          jq --version
+          bash --version | head -n 1
+
+      - name: Test suite with jq 1.6
+        run: bash tests/review-pr/run.sh
+
   package:
-    needs: test
+    needs: [test, minimum-jq]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -31,8 +31,8 @@ Run `shellcheck` over the same shell sources when it is installed.
 
 The same checks run in GitHub Actions (`.github/workflows/ci.yml`) on every push and pull request:
 syntax check, `shellcheck -S warning`, the private-data audit, and the full suite on `ubuntu-latest`,
-followed by a package build whose checksum and contents are verified and uploaded as a workflow
-artifact. `macos-latest` (Homebrew Bash 5, jq, shellcheck) joins the matrix for pushes to `main`
+plus a second Linux leg pinned to jq 1.6 (the documented minimum), followed by a package build
+whose checksum and contents are verified and uploaded as a workflow artifact. `macos-latest` (Homebrew Bash 5, jq, shellcheck) joins the matrix for pushes to `main`
 and manual runs, because macOS minutes are billed at a multiple of Linux minutes on private
 repositories. Superseded runs of the same branch are cancelled. No agent CLI or credential is
 required: the suite uses the fake GitHub CLI and mock runners.

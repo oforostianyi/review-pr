@@ -3785,7 +3785,7 @@ render_final_findings_markdown() {
                 jq -r --arg language "$FINALIZATION_LANGUAGE" '
                     def cell: tostring | gsub("[\\r\\n]+"; " ");
                     def type_label:
-                        if $language == "UA" then
+                        (if $language == "UA" then
                             {github_review_threads_unavailable: "Гілки обговорення недоступні", github_review_threads_partial: "Гілки обговорення завантажені частково",
                              github_check_failed: "Перевірка CI не пройшла", github_check_cancelled: "Перевірку CI скасовано", github_check_pending: "Перевірка CI не завершена", github_check_skipped: "Перевірку CI пропущено",
                              changed_line_map_unavailable: "Карта змінених рядків недоступна", repository_facts_measurement_failed: "Факти репозиторію не виміряні",
@@ -3799,7 +3799,7 @@ render_final_findings_markdown() {
                              agent_attempt_timeout: "Agent attempt timed out", agent_attempt_output_limit: "Agent attempt hit the output limit", agent_attempt_invalid_output: "Agent attempt produced invalid output", agent_attempt_failed: "Agent attempt failed",
                              pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked",
                              measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable"}
-                        end as $labels | ($labels[.type] // .type);
+                        end) as $labels | ($labels[.type] // .type);
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
                     def agents: (.agents // []) | if length == 0 then "" else " (" + join(", ") + ")" end;
