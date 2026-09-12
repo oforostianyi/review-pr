@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-09-12
+
 ### Added
 
 - Opt-in `reporting.execute_measurements` (requires `dispute_resolution`). The orchestrator runs the
