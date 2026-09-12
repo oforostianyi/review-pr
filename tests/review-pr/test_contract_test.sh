@@ -41,6 +41,10 @@ REVIEW_PR_MOCK_BEHAVIOR=contract-valid \
     "$repo_root/bin/review-pr" --config "$config_file" contract-test \
         --agent alpha --phase all --output "$all_output" >"$test_root/all.stdout" 2>"$test_root/all.stderr"
 
+if [[ ! -s "$all_output/summary.json" ]]; then
+    printf 'contract-test produced no summary; stderr follows:\n' >&2
+    cat -- "$test_root/all.stderr" >&2
+fi
 assert_eq true "$(jq -r '.passed' "$all_output/summary.json")" \
     'contract test passes all three structured phases'
 assert_eq 3 "$(jq -r '.results | length' "$all_output/summary.json")" \
