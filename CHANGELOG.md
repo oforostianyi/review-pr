@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-12
+
 ### Added
 
 - Opt-in `reporting.dispute_resolution` for structured final synthesis. The orchestrator detects
