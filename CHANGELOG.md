@@ -4,6 +4,12 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions workflow `.github/workflows/ci.yml`: syntax check, `shellcheck`, private-data audit,
+  and the full test suite on Linux (macOS for `main` and manual runs), then a package build with
+  checksum and content verification uploaded as an artifact.
+
 ### Fixed
 
 - Run manifests record the measured review-thread state as `review_threads: {status, reason}`, and a

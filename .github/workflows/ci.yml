@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    # macOS runners are billed at a multiple of Linux minutes on private
+    # repositories, so they run only for the default branch and manual runs.
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.select.outputs.os }}
+    steps:
+      - id: select
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            printf 'os=["ubuntu-latest","macos-latest"]\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'os=["ubuntu-latest"]\n' >>"$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.os) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # The suite never contacts GitHub, but a stray gh call must fail fast
+      # instead of prompting for authentication.
+      GH_TOKEN: ''
+      GH_PROMPT_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bash 5, jq, and shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update >/dev/null
+          brew install bash jq shellcheck coreutils
+          printf '%s\n' "$(brew --prefix)/bin" >>"$GITHUB_PATH"
+
+      - name: Install shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y --no-install-recommends shellcheck jq >/dev/null
+
+      - name: Tool versions
+        run: |
+          bash --version | head -n 1
+          jq --version
+          shellcheck --version | sed -n '2p'
+          git --version
+          node --version
+
+      - name: Require Bash 5.1 or newer
+        run: |
+          bash -c '(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )) || { printf "Bash 5.1+ required, found %s\n" "$BASH_VERSION" >&2; exit 1; }'
+
+      - name: Syntax check
+        run: bash -n bin/review-pr runners/review-pr-agy install.sh uninstall.sh packaging/*.sh tests/review-pr/*.sh tests/review-pr/lib/*.sh
+
+      - name: shellcheck
+        run: shellcheck -S warning bin/review-pr runners/review-pr-agy install.sh uninstall.sh packaging/*.sh tests/review-pr/*.sh tests/review-pr/lib/*.sh
+
+      - name: Private-data audit
+        run: bash packaging/private-data-audit.sh
+
+      - name: Test suite
+        run: bash tests/review-pr/run.sh
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        run: bash packaging/build-package.sh
+
+      - name: Verify checksum and contents
+        run: |
+          set -euo pipefail
+          version=$(sed -n '1p' VERSION)
+          cd dist
+          sha256sum -c "review-pr-${version}.tar.gz.sha256"
+          tar -tzf "review-pr-${version}.tar.gz" >contents.txt
+          for required in bin/review-pr install.sh uninstall.sh runners/review-pr-pi-guard.js config/review-pr.schema.json config/review-pr-findings-v1.schema.json VERSION CHANGELOG.md; do
+            grep -Fxq "review-pr-${version}/${required}" contents.txt || { printf 'package is missing %s\n' "$required" >&2; exit 1; }
+          done
+          if grep -E '/(config\.json|\.remember/|dist/|tests/|\.claude/|\.github/)' contents.txt; then
+            printf 'package contains files that must not ship\n' >&2
+            exit 1
+          fi
+          printf 'package review-pr-%s: %s entries\n' "$version" "$(wc -l <contents.txt)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-pr-package
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 14
