@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-09-13
+
 ### Added
 
 - Final synthesis now honours `execution.retry.max_attempts` like the other phases, so a failed
