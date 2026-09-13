@@ -678,7 +678,7 @@ run_ndjson_cross_case() {
     local checkout
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
-    local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest
+    local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -745,6 +745,17 @@ run_ndjson_cross_case() {
         grep -Fq -- '"source_id": "alpha:F-001"' "$alpha_prompt"
     assert_file_contains "$alpha_prompt" 'BEGIN RIGHT-SIDE CHANGED-LINE MAP' \
         'structured cross-review receives the authoritative changed-line map'
+    # The terminal record's arrays hold plain strings. Saying so is what keeps a
+    # reviewer from encoding "the file and the symbol" as an object, which the
+    # validator rejects and the bounded repair may not rewrite.
+    for contract_prompt in primary-review-alpha cross-review-alpha final-synthesis-alpha; do
+        assert_file_contains "$capture/${contract_prompt}-attempt-1.prompt" \
+            'verification_limitations and positive_evidence are arrays of strings' \
+            "the ${contract_prompt%%-*} contract states the terminal record's array element type"
+        assert_file_contains "$capture/${contract_prompt}-attempt-1.prompt" \
+            'names the file and the symbol inside that string' \
+            "the ${contract_prompt%%-*} contract shows how one positive_evidence string carries a file and a symbol"
+    done
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-cross-beta-usage.json")" \
         'structured cross-review usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-cross-beta-error-schema-repair-attempt-1-source-raw.ndjson" \

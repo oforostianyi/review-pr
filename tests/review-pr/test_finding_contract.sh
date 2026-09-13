@@ -66,6 +66,20 @@ broken_record="$test_root/broken-record.ndjson"
 assert_false 'an unparseable JSON-looking record is ineligible for repair' \
     build_primary_repair_baseline "$broken_record" "$test_root/broken-baseline.json"
 
+# A reviewer that encodes "the file and the symbol" as an object instead of a
+# string produces a stream the bounded repair may not rewrite, because the fix
+# would change content. The validator must name the offending field.
+structured_positive="$test_root/structured-positive-evidence.ndjson"
+jq -c 'if .record == "complete" then .positive_evidence = [{file: "src/Changed.php", symbol: "Changed::run()", note: "traced and unaffected"}] else . end' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$structured_positive"
+structured_positive_records="$test_root/structured-positive-records.json"
+jq -s '.' "$structured_positive" >"$structured_positive_records"
+assert_false 'objects inside positive_evidence are rejected' \
+    validate_primary_ndjson_records "$structured_positive_records" "$test_root/structured-positive-canonical.json" codex
+assert_eq 'complete.positive_evidence' \
+    "$(describe_ndjson_validation_failure primary "$structured_positive_records" codex '')" \
+    'the diagnostic names the terminal record field that carried objects'
+
 unknown_record="$test_root/unknown-record.ndjson"
 printf '%s\n' '{"record":"unknown","schema_version":1}' >"$unknown_record"
 assert_false 'an unknown record type is ineligible for repair' \

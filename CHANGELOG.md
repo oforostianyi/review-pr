@@ -4,6 +4,18 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The three `ndjson-v1` contracts now state that the terminal `complete` record's
+  `verification_limitations` and `positive_evidence` are arrays of plain strings, and show how one
+  positive-evidence string carries a file and a symbol. The primary contract asked for an entry
+  "naming the file and symbol" without giving the element type, and a reviewer answered with
+  `{"file":...,"symbol":...,"note":...}` objects; validation rejected the stream, the bounded repair
+  could not rewrite it because that would change content, and the whole review failed after two
+  attempts. The same contracts now also spell out that `title`, `claim`, `recommendation`, and
+  `category` are non-empty strings, and the cross-review contract lists those shapes instead of
+  referring to shapes it never shows.
+
 ## [1.16.0] - 2026-09-13
 
 ### Added

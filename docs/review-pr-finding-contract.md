@@ -229,7 +229,11 @@ validation and are orchestrator output, not model content.
 ## Accepted diagnostics and positive-evidence design (Milestone 6)
 
 Every phase already reports `verification_limitations` (per finding and per completion record) and
-`positive_evidence` (per completion record) as free text, and the orchestrator itself knows a set of
+`positive_evidence` (per completion record) as free text. Free text means one plain string per entry:
+an entry that names a file and a symbol carries both inside that string, never as an object. The three
+phase contracts state this explicitly, because a reviewer told only to name "the file and the symbol"
+will otherwise encode them as fields, which the validator rejects and the bounded repair may not
+rewrite. As free text, and the orchestrator itself knows a set of
 states that limit verification: GitHub review-thread state, check-run conclusions, changed-line map
 availability, repository-facts measurement failures, failed agent attempts, Pi guard outcomes, and
 skipped measurements. Today none of this reaches the final report: the deterministic final renderer
