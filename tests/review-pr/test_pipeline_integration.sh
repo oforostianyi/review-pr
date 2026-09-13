@@ -992,6 +992,70 @@ run_final_continuation_case() {
         'a continued final synthesis still publishes the report'
 }
 
+run_final_retry_case() {
+    local case_dir="$suite_root/final-retry"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" events="$case_dir/events.tsv" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture final retry.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.execution.retry = {max_attempts: 2, delay_seconds: 0}' "$config" >"$config.tmp"
+    mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'final-invalid-once\n' >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_EVENT_LOG="$events" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "final retry pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a final synthesis that produced an off-contract answer is retried'
+    assert_eq '2' "$(grep -c '^start.*final-synthesis' "$events")" \
+        'the synthesizer ran exactly twice'
+    assert_file_exists "${work_dir%/work}/${stem}-final.md" 'the retried final synthesis publishes its report'
+    assert_file_exists "$work_dir/${stem}-final-error-attempt-1-invalid.md" \
+        'the rejected first answer is preserved under its own attempt number'
+    assert_file_exists "$work_dir/${stem}-final-error-attempt-1-usage.json" \
+        'the failed attempt keeps its own usage record'
+    assert_false 'the successful attempt leaves no failure artifacts' \
+        bash -c 'ls "$1"/*-final-error-attempt-2-* >/dev/null 2>&1' _ "$work_dir"
+}
+
+run_final_no_retry_case() {
+    local case_dir="$suite_root/final-no-retry"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" events="$case_dir/events.tsv"
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture final without a turn.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.execution.retry = {max_attempts: 2, delay_seconds: 0}' "$config" >"$config.tmp"
+    mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'final-never-starts\n' >"$scenarios/alpha-final-synthesis"
+
+    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_EVENT_LOG="$events" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
+        fail 'a final synthesis that never got a turn must not publish a report'
+    fi
+    assert_eq '1' "$(grep -c '^start.*final-synthesis' "$events")" \
+        'a synthesizer that produced nothing is not run again'
+    assert_false 'the run does not announce a retry it did not make' \
+        grep -Fq 'queued for retry' "$case_dir/stderr.log"
+}
+
 run_dispute_resolution_failure_case() {
     local case_dir="$suite_root/dispute-resolution-failure"
     local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
@@ -1516,6 +1580,8 @@ run_dispute_resolution_failure_case
 run_cross_continuation_case
 run_cross_continuation_failure_case
 run_final_continuation_case
+run_final_retry_case
+run_final_no_retry_case
 run_measured_resolution_case
 run_unavailable_measurement_case
 run_split_claim_resolution_case

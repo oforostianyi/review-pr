@@ -6,6 +6,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- Final synthesis now honours `execution.retry.max_attempts` like the other phases, so a failed
+  synthesis no longer ends the run while every primary and cross-review report is already finished.
+  An attempt is repeated only when the synthesizer produced something: the decision reads the
+  attempt's own output and usage record instead of matching each CLI's error text, so an attempt
+  that never got a turn, from a usage limit, an authentication failure, or a timeout, ends the run
+  as before. An attempt stopped by the output token limit is not repeated either, because an
+  identical request meets the same ceiling. Failed attempts keep attempt-scoped diagnostics.
 - A cross-review whose `ndjson-v1` stream stops before it answers every required source ref is now
   continued instead of retried from scratch. The orchestrator keeps the records the interrupted
   pass produced, asks the same agent for the unanswered refs alone, and validates the merged stream

@@ -433,6 +433,23 @@ case "$behavior" in
         emit_valid_ndjson_cross | awk 'NR == 1'
         write_usage null 31
         ;;
+    final-invalid-once)
+        # Attempt one answers off-contract but does produce output and tokens,
+        # which is the shape the orchestrator is allowed to repeat.
+        if (( attempt == 1 )); then
+            printf 'This response does not follow the requested schema.\n'
+            write_usage null 12
+        else
+            emit_valid_for_phase
+            write_usage null 55
+        fi
+        ;;
+    final-never-starts)
+        # Nothing on stdout and no usage record at all: the shape of an agent
+        # that never got a turn, for instance because of a usage limit.
+        printf 'mock runner could not start\n' >&2
+        exit 23
+        ;;
     final-ndjson-stops-early)
         emit_truncated_ndjson_final
         write_usage null 29

@@ -162,6 +162,7 @@ DISPUTE_RESOLUTION_ENABLED=false
 EXECUTE_MEASUREMENTS_ENABLED=false
 MEASUREMENT_WORKING_DIRECTORY=""
 FINAL_PROMPT_FILE=""
+FINAL_ATTEMPT_RETRYABLE=false
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
@@ -9080,10 +9081,33 @@ run_comparison_synthesis() {
     activity_log "Completed standalone comparison after $(format_duration "$((comparison_finished_at - comparison_started_at))") [tokens: ${comparison_token_display}]: ${COMPARISON_REPORT}"
 }
 
-run_final_synthesis() {
-    local error_log=$1
+# Reports whether a failed final-synthesis attempt is worth repeating. The test
+# is whether the agent produced anything at all: an attempt that never got a
+# turn, because of a usage limit, an authentication error, or any other startup
+# failure, records neither output nor tokens, and repeating it would only spend
+# wall-clock time. This reads the artifacts rather than matching each CLI's
+# error text, which differs per agent and changes between releases. An attempt
+# stopped by the output token limit is never repeated: an identical request
+# meets the same ceiling.
+final_attempt_is_retryable() {
+    local output_file=$1 usage_json_file=$2 stop_reason=$3
+    local output_tokens
+
+    [[ "$stop_reason" != length ]] || return 1
+    [[ ! -s "$output_file" ]] || return 0
+    output_tokens=$(jq -r '.output_tokens // 0' "$usage_json_file" 2>/dev/null || printf 0)
+    [[ "$output_tokens" =~ ^[0-9]+$ ]] || return 1
+    (( output_tokens > 0 ))
+}
+
+# One final-synthesis attempt: run the synthesizer, recover what is recoverable,
+# validate, and publish. Diagnostics are attempt-scoped so a later attempt never
+# overwrites what an earlier one preserved.
+run_final_synthesis_attempt() {
+    local run_error_log=$1
+    local attempt=$2
+    local error_log
     local final_recovery
-    local final_prompt
     local final_output
     local final_log
     local final_usage
@@ -9113,57 +9137,28 @@ run_final_synthesis() {
     local original_semantic_checksum
     local repaired_semantic_checksum
     local diagnostic_temp
-    local agent
-    local -a final_prompt_arguments=()
 
+    if (( RETRY_MAX_ATTEMPTS > 1 )); then
+        error_log="${run_error_log%.log}-attempt-${attempt}.log"
+    else
+        error_log=$run_error_log
+    fi
     FINAL_PROCESSED_RAW_FILE=""
     FINAL_PROCESSED_FINDINGS_FILE=""
-FINAL_PROCESSED_RESOLUTIONS_FILE=""
-FINAL_PROCESSED_DIAGNOSTICS_FILE=""
-
-    new_temp_file "final-prompt"
-    final_prompt=$NEW_TEMP_FILE
-    new_temp_file "final-output"
+    FINAL_PROCESSED_RESOLUTIONS_FILE=""
+    FINAL_PROCESSED_DIAGNOSTICS_FILE=""
+    FINAL_ATTEMPT_RETRYABLE=false
+    new_temp_file "final-output-attempt-${attempt}"
     final_output=$NEW_TEMP_FILE
-    new_temp_file "final-log"
+    new_temp_file "final-log-attempt-${attempt}"
     final_log=$NEW_TEMP_FILE
-    new_temp_file "final-usage"
+    new_temp_file "final-usage-attempt-${attempt}"
     final_usage=$NEW_TEMP_FILE
-    new_temp_file "final-usage-json"
+    new_temp_file "final-usage-json-attempt-${attempt}"
     final_usage_json=$NEW_TEMP_FILE
 
-    if [[ "$RERUN_FINAL" == true ]]; then
-        FINAL_INPUT_DESCRIPTION="Synthesize only the ${#REVIEW_AGENTS[@]} supplied cross-reviews. This final rerun intentionally excludes primary reports and must not attempt another review from scratch."
-        if [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" && -n "$CHANGED_LINE_MAP_FILE" ]]; then
-            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, the repository-facts snapshot, and the exact changed-line map are the complete input for this run.'
-        elif [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" ]]; then
-            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, and the repository-facts snapshot are the complete input for this historical run; no changed-line map was recorded, so inline-anchor verification remains unavailable.'
-        elif [[ -n "$CHANGED_LINE_MAP_FILE" ]]; then
-            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, and the exact changed-line map are the complete input for this historical run; broader repository facts were not recorded.'
-        else
-            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews and their embedded code evidence are the complete input for this historical run; repository facts and a changed-line map were not recorded, so related premises and inline-anchor verification remain unknown.'
-        fi
-    else
-        FINAL_INPUT_DESCRIPTION="Synthesize the ${#REVIEW_AGENTS[@]} primary reviews and ${#REVIEW_AGENTS[@]} cross-reviews supplied below."
-        FINAL_SOURCE_POLICY_INSTRUCTION='Inspect the actual checked-out PR/source whenever necessary; source code is the source of truth.'
-        for agent in "${REVIEW_AGENTS[@]}"; do
-            final_prompt_arguments+=(
-                "Primary $(agent_label "$agent")"
-                "${PRIMARY_OUTPUTS[$agent]}"
-            )
-        done
-    fi
-    for agent in "${REVIEW_AGENTS[@]}"; do
-        final_prompt_arguments+=(
-            "Cross-review $(agent_label "$agent")"
-            "${CROSS_OUTPUTS[$agent]}"
-        )
-    done
-    write_final_prompt "$final_prompt" "${final_prompt_arguments[@]}"
-    FINAL_PROMPT_FILE=$final_prompt
-
     activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
-    start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$final_prompt" "$final_output" "$final_log" "$final_usage" "$final_usage_json"
+    start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
     final_pid=$STARTED_PID
     final_started_at=$(date +%s)
     set_dashboard_status final "$FINAL_SYNTHESIZER" RUNNING "$final_pid" "$final_started_at" 0
@@ -9183,6 +9178,11 @@ FINAL_PROCESSED_DIAGNOSTICS_FILE=""
     final_token_display=$TOKEN_USAGE_DISPLAY
     final_stop_reason=$(jq -r '.stop_reason // ""' "$final_usage_json" 2>/dev/null || true)
     final_output_tokens=$(jq -r '.output_tokens // "unknown"' "$final_usage_json" 2>/dev/null || printf unknown)
+    # Decided here, while the attempt's own output is still in place: every
+    # failure branch below may move it into the diagnostics.
+    if final_attempt_is_retryable "$final_output" "$final_usage_json" "$final_stop_reason"; then
+        FINAL_ATTEMPT_RETRYABLE=true
+    fi
 
     if (( final_status != 0 )); then
         set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$final_finished_at" "$final_token_display"
@@ -9369,6 +9369,65 @@ FINAL_PROCESSED_DIAGNOSTICS_FILE=""
     persist_usage_summary "$final_usage_json" "$FINAL_USAGE_OUTPUT"
     set_dashboard_status final "$FINAL_SYNTHESIZER" COMPLETE "$final_pid" "$final_started_at" "$final_finished_at" "$final_token_display"
     activity_log "Completed final synthesis after $(format_duration "$((final_finished_at - final_started_at))") [tokens: ${final_token_display}]: ${FINAL_REPORT}"
+}
+
+run_final_synthesis() {
+    local final_attempt
+    local error_log=$1
+    local final_prompt
+    local agent
+    local -a final_prompt_arguments=()
+
+    new_temp_file "final-prompt"
+    final_prompt=$NEW_TEMP_FILE
+
+    if [[ "$RERUN_FINAL" == true ]]; then
+        FINAL_INPUT_DESCRIPTION="Synthesize only the ${#REVIEW_AGENTS[@]} supplied cross-reviews. This final rerun intentionally excludes primary reports and must not attempt another review from scratch."
+        if [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" && -n "$CHANGED_LINE_MAP_FILE" ]]; then
+            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, the repository-facts snapshot, and the exact changed-line map are the complete input for this run.'
+        elif [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" ]]; then
+            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, and the repository-facts snapshot are the complete input for this historical run; no changed-line map was recorded, so inline-anchor verification remains unavailable.'
+        elif [[ -n "$CHANGED_LINE_MAP_FILE" ]]; then
+            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, and the exact changed-line map are the complete input for this historical run; broader repository facts were not recorded.'
+        else
+            FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews and their embedded code evidence are the complete input for this historical run; repository facts and a changed-line map were not recorded, so related premises and inline-anchor verification remain unknown.'
+        fi
+    else
+        FINAL_INPUT_DESCRIPTION="Synthesize the ${#REVIEW_AGENTS[@]} primary reviews and ${#REVIEW_AGENTS[@]} cross-reviews supplied below."
+        FINAL_SOURCE_POLICY_INSTRUCTION='Inspect the actual checked-out PR/source whenever necessary; source code is the source of truth.'
+        for agent in "${REVIEW_AGENTS[@]}"; do
+            final_prompt_arguments+=(
+                "Primary $(agent_label "$agent")"
+                "${PRIMARY_OUTPUTS[$agent]}"
+            )
+        done
+    fi
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        final_prompt_arguments+=(
+            "Cross-review $(agent_label "$agent")"
+            "${CROSS_OUTPUTS[$agent]}"
+        )
+    done
+    write_final_prompt "$final_prompt" "${final_prompt_arguments[@]}"
+    FINAL_PROMPT_FILE=$final_prompt
+
+    for (( final_attempt = 1; final_attempt <= RETRY_MAX_ATTEMPTS; final_attempt++ )); do
+        if run_final_synthesis_attempt "$error_log" "$final_attempt"; then
+            return 0
+        fi
+        # Repeat only an attempt that produced something. One that never got a
+        # turn would fail the same way, and one stopped by the output token
+        # limit would meet the same ceiling.
+        if (( final_attempt >= RETRY_MAX_ATTEMPTS )) || [[ "$FINAL_ATTEMPT_RETRYABLE" != true ]]; then
+            return 1
+        fi
+        set_dashboard_status final "$FINAL_SYNTHESIZER" RETRYING "" 0 0 "-"
+        activity_log "Failed final synthesis attempt ${final_attempt}/${RETRY_MAX_ATTEMPTS}: ${FINAL_FAILURE_REASON}; queued for retry"
+        if (( RETRY_DELAY_SECONDS > 0 )); then
+            sleep "$RETRY_DELAY_SECONDS"
+        fi
+    done
+    return 1
 }
 
 write_contract_test_prompt() {

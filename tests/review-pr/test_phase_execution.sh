@@ -224,4 +224,30 @@ assert_eq '--thinking xhigh' "$(agent_effort_arguments pi xhigh | paste -sd ' ' 
 assert_eq '' "$(agent_effort_arguments pi '' | paste -sd ' ' -)" 'an empty Pi effort adds no thinking flag'
 assert_eq '' "$(agent_effort_arguments custom high | paste -sd ' ' -)" 'other agents receive no effort flag'
 
+# A failed final synthesis is retried only when the agent actually produced
+# something. An attempt that never got a turn, because of a usage limit or any
+# other startup failure, records no tokens and no output; repeating it would
+# only spend wall-clock time. An attempt stopped by the output token limit is
+# not repeated either, because an identical request meets the same ceiling.
+retry_case="$suite_root/final-retry"
+mkdir -p -- "$retry_case"
+printf '%s\n' '{"record":"finding"}' >"$retry_case/produced.ndjson"
+: >"$retry_case/empty.ndjson"
+jq -n '{input_tokens: 168072, output_tokens: 4504, stop_reason: null}' >"$retry_case/usage-productive.json"
+jq -n '{input_tokens: null, output_tokens: null, stop_reason: null}' >"$retry_case/usage-null.json"
+jq -n '{input_tokens: 12, output_tokens: 0, stop_reason: null}' >"$retry_case/usage-zero.json"
+
+assert_true 'a final attempt that wrote output is retried' \
+    final_attempt_is_retryable "$retry_case/produced.ndjson" "$retry_case/usage-productive.json" ''
+assert_true 'a final attempt that reported output tokens is retried even with no file' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-productive.json" ''
+assert_false 'a final attempt that never got a turn is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-null.json" ''
+assert_false 'a final attempt with zero output tokens and no file is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-zero.json" ''
+assert_false 'a final attempt without any usage record is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/missing-usage.json" ''
+assert_false 'a final attempt stopped by the output token limit is not retried' \
+    final_attempt_is_retryable "$retry_case/produced.ndjson" "$retry_case/usage-productive.json" length
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
