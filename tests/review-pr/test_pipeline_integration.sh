@@ -396,9 +396,12 @@ run_interrupt_case() {
         >"$case_dir/output.txt" 2>"$case_dir/stderr.log" &
     pid=$!
 
+    # The orchestrator fetches, reads GitHub context, collects repository facts and
+    # builds the changed-line map before its first agent starts. Five seconds is
+    # enough on an idle machine and not enough while the rest of the suite runs.
     while ! grep -q '^start' "$events"; do
         attempts=$((attempts + 1))
-        if (( attempts > 100 )); then
+        if (( attempts > 1200 )); then
             kill -TERM "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             fail 'interrupted-run fixture did not start an agent'
