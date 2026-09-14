@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-09-14
+
 ### Fixed
 
 - The three `ndjson-v1` contracts now state that the terminal `complete` record's

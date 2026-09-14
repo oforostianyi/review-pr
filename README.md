@@ -1,6 +1,6 @@
 # review-pr
 
-`review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.16.0`.
+`review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.16.1`.
 
 The public core is repository- and language-agnostic. Repository-specific profiles, prompts, and
 review skills belong in user configuration or separately distributed team overlays.
@@ -220,10 +220,10 @@ The configured path must be absolute.
 Extract the archive and run its POSIX installer:
 
 ```bash
-shasum -a 256 -c review-pr-1.16.0.tar.gz.sha256  # macOS
-# or: sha256sum -c review-pr-1.16.0.tar.gz.sha256 # Linux
-tar -xzf review-pr-1.16.0.tar.gz
-cd review-pr-1.16.0
+shasum -a 256 -c review-pr-1.16.1.tar.gz.sha256  # macOS
+# or: sha256sum -c review-pr-1.16.1.tar.gz.sha256 # Linux
+tar -xzf review-pr-1.16.1.tar.gz
+cd review-pr-1.16.1
 ./install.sh --repo "$HOME/Work/Review" --reviews-dir "$HOME/review-pr"
 ```
 
