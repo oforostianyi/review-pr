@@ -335,16 +335,17 @@ export_review_findings() {
         || die "Final findings artifact is unreadable: ${selected}"
 
     run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${selected##*/}" | tail -n 1)
-    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg include "$include" '
+    # jq 1.6 parses "include" as the module keyword, so the scope travels as $scope.
+    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg scope "$include" '
         def placement: if .anchor.kind == "pr-level" then 1 else 0 end;
-        (if $include == "confirmed" then ["CONFIRMED"]
-         elif $include == "uncertain" then ["CONFIRMED", "UNCERTAIN"]
+        (if $scope == "confirmed" then ["CONFIRMED"]
+         elif $scope == "uncertain" then ["CONFIRMED", "UNCERTAIN"]
          else ["CONFIRMED", "UNCERTAIN", "REJECTED"] end) as $wanted |
         {
             schema_version: 1,
             pr_number: $pr_number,
             run: $run,
-            include: $include,
+            "include": $scope,
             findings: ([.findings[]
                 | select(.classification as $classification | $wanted | index($classification))
                 | {
