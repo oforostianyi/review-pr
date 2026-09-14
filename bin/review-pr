@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly REVIEW_PR_VERSION="1.16.1"
+readonly REVIEW_PR_VERSION="1.17.0"
 REVIEW_PR_SCRIPT_DIR=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || REVIEW_PR_SCRIPT_DIR=""
 
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then

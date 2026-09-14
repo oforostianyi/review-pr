@@ -4,26 +4,7 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
-### Fixed
-
-- `install.sh` now writes each file beside its destination and renames it into place instead of
-  rewriting it where it stands. A review that is running reads its own script incrementally, so an
-  in-place rewrite feeds the live process new bytes at offsets computed for the old ones, which is
-  how an installer can corrupt a review already in flight. A rename leaves that process on the inode
-  it opened.
-
-### Changed
-
-- Reviewers now receive the annotations a check run produced, not only its conclusion. A red
-  `phpstan` or `phpunit` told a reviewer nothing beyond the fact that it was red, so the contracts
-  made it a verification limitation; the annotations carry the file, the line, and the message, which
-  a reviewer can use as evidence. At most 20 annotations per check and 60 per run are attached, each
-  message trimmed to 200 characters, and a failure to read them never fails the review.
-- The check state is read again before the final synthesis. Checks still running when the reviewers
-  started often settle during the review, and the finalizer reasoned about the opening snapshot: on a
-  real run `phpstan` and `phpunit` were both still `in_progress` and were reported to it as pending.
-  The snapshot the reviewers saw is preserved as published; only the finalizer's view is refreshed,
-  and an artifact-only rerun does not read GitHub at all.
+## [1.17.0] - 2026-09-15
 
 ### Added
 
@@ -41,6 +22,16 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Changed
 
+- Reviewers now receive the annotations a check run produced, not only its conclusion. A red
+  `phpstan` or `phpunit` told a reviewer nothing beyond the fact that it was red, so the contracts
+  made it a verification limitation; the annotations carry the file, the line, and the message, which
+  a reviewer can use as evidence. At most 20 annotations per check and 60 per run are attached, each
+  message trimmed to 200 characters, and a failure to read them never fails the review.
+- The check state is read again before the final synthesis. Checks still running when the reviewers
+  started often settle during the review, and the finalizer reasoned about the opening snapshot: on a
+  real run `phpstan` and `phpunit` were both still `in_progress` and were reported to it as pending.
+  The snapshot the reviewers saw is preserved as published; only the finalizer's view is refreshed,
+  and an artifact-only rerun does not read GitHub at all.
 - A run's working files now live in `work/<timestamp>/` instead of directly in `work/`, so repeated
   runs of the same pull request stay separable. File names are unchanged, and the final and
   comparison reports still sit at the top of the review directory. Runs made before this keep their
@@ -49,6 +40,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- `install.sh` now writes each file beside its destination and renames it into place instead of
+  rewriting it where it stands. A review that is running reads its own script incrementally, so an
+  in-place rewrite feeds the live process new bytes at offsets computed for the old ones, which is
+  how an installer can corrupt a review already in flight. A rename leaves that process on the inode
+  it opened.
 - Every canonical record supplied to a reviewer now carries `record_ref`, the exact
   `{"agent":…,"source_id":…}` object to copy when citing it. A final synthesis failed on PR 28958
   because it cited two Pi cross-review records under the Claude agent key: the record's own id and
