@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- Reviewers now receive the annotations a check run produced, not only its conclusion. A red
+  `phpstan` or `phpunit` told a reviewer nothing beyond the fact that it was red, so the contracts
+  made it a verification limitation; the annotations carry the file, the line, and the message, which
+  a reviewer can use as evidence. At most 20 annotations per check and 60 per run are attached, each
+  message trimmed to 200 characters, and a failure to read them never fails the review.
+- The check state is read again before the final synthesis. Checks still running when the reviewers
+  started often settle during the review, and the finalizer reasoned about the opening snapshot: on a
+  real run `phpstan` and `phpunit` were both still `in_progress` and were reported to it as pending.
+  The snapshot the reviewers saw is preserved as published; only the finalizer's view is refreshed,
+  and an artifact-only rerun does not read GitHub at all.
+
 ### Added
 
 - A structured run now publishes its actionable findings as

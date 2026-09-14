@@ -1263,7 +1263,11 @@ run_diagnostics_case() {
     export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
     export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture diagnostics.'
     export REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE=true
-    export REVIEW_PR_FAKE_CHECK_RUNS_JSON='{"check_runs":[{"name":"phpunit","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"}]}'
+    export REVIEW_PR_FAKE_CHECK_RUNS_JSON='{"check_runs":[{"id":11,"name":"phpunit","status":"completed","conclusion":"failure","output":{"annotations_count":2}},{"name":"lint","status":"completed","conclusion":"success"},{"name":"phpstan","status":"in_progress","conclusion":null}]}'
+    # The second read settles the check that was still running at the start.
+    export REVIEW_PR_FAKE_CHECK_RUNS_REFRESH_JSON='{"check_runs":[{"id":11,"name":"phpunit","status":"completed","conclusion":"failure","output":{"annotations_count":2}},{"name":"lint","status":"completed","conclusion":"success"},{"name":"phpstan","status":"completed","conclusion":"success"}]}'
+    export REVIEW_PR_FAKE_CHECK_RUNS_STATE="$case_dir/check-runs-read"
+    export REVIEW_PR_FAKE_CHECK_ANNOTATIONS_JSON='[{"annotation_level":"failure","path":"src/Changed.php","start_line":10,"end_line":10,"message":"Failed asserting that null matches expected 1."},{"annotation_level":"warning","path":"src/Changed.php","start_line":12,"end_line":12,"message":"This changed line is not covered by any test."}]'
     unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
     write_three_agent_config "$config" "$checkout" "$reviews"
     jq '.execution.retry.max_attempts = 2' "$config" >"$config.tmp" && mv -- "$config.tmp" "$config"
@@ -1274,7 +1278,8 @@ run_diagnostics_case() {
         REVIEW_PR_MOCK_PRIMARY_LIMITATION='Could not run the fixture test suite.' \
         "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
         || fail "diagnostics pipeline failed: $(tail -3 "$case_dir/stderr.log")"
-    unset REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE REVIEW_PR_FAKE_CHECK_RUNS_JSON
+    unset REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE REVIEW_PR_FAKE_CHECK_RUNS_JSON \
+        REVIEW_PR_FAKE_CHECK_RUNS_REFRESH_JSON REVIEW_PR_FAKE_CHECK_RUNS_STATE REVIEW_PR_FAKE_CHECK_ANNOTATIONS_JSON
     manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     sidecar="$work_dir/${stem}-final-diagnostics.json"
     final_report="$(report_root_of "$work_dir")/${stem}-final.md"
@@ -1292,6 +1297,17 @@ run_diagnostics_case() {
     assert_eq 'alpha,beta,gamma' "$(jq -r '.positive_evidence[0].agents | join(",")' "$sidecar")" 'shared positive evidence merges with its agents'
     assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" '"type":"github_check_failed"' \
         'the finalizer sees the failed check in KNOWN LIMITATIONS'
+    # A check's annotations say which line failed, which a bare conclusion cannot.
+    assert_file_contains "$work_dir/${stem}-github-context.md" 'Failed asserting that null matches expected 1.' \
+        'reviewers receive the annotations a failing check produced'
+    assert_file_contains "$work_dir/${stem}-github-context.md" 'src/Changed.php:10' \
+        'an annotation carries the exact file and line it points at'
+    # The snapshot keeps what was true when the reviewers read it.
+    assert_file_contains "$work_dir/${stem}-github-context.md" 'Conclusion: `pending`' \
+        'the snapshot reviewers received records the check that was still running'
+    # The finalizer reads the settled state instead of the opening snapshot.
+    assert_false 'a check that finished during the run is not reported to the finalizer as pending' \
+        grep -Fq '"type":"github_check_pending"' "$capture/final-synthesis-alpha-attempt-1.prompt"
     assert_file_contains "$final_report" '<!-- review-pr:verification-limitations -->' 'the final report renders the limitations section'
     assert_file_contains "$final_report" '**CI check failed:** phpunit: failure' 'the final report shows the failed check'
     assert_file_contains "$final_report" 'Could not run the fixture test suite. (alpha, beta, gamma)' 'the final report shows the merged reviewer limitation'

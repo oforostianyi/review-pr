@@ -333,6 +333,14 @@ review-pr --rerun-final repository#123 --run 20260901-154503-CEST
 
 Manifest-backed final reruns are artifact-only: metadata comes from the source manifest, and its preserved cross-review reports plus repository-facts snapshot are supplied to the finalizer. The current PR head may have changed. No fetch, checkout, branch switch, GitHub request, or current-source inspection is performed. The legacy `--force --run` compatibility path is the exception because pre-manifest artifacts lack reliable recorded metadata.
 
+## CI checks as review evidence
+
+Every reviewer receives the check runs GitHub reports for the exact PR head, with each check's status and conclusion, plus the annotations it produced. Annotations carry a level, a file, a line, and a message, so a red `phpstan` or a coverage gap becomes usable evidence instead of a bare conclusion. At most 20 annotations per check and 60 per run are attached, each message trimmed to 200 characters; failing to read them never fails the review.
+
+A failed, pending, or skipped check is never a finding by itself, in any phase. It is recorded as a verification limitation, because a review states what the code does, not what a pipeline reported.
+
+Checks that are still running when the reviewers start often settle before the synthesis, so the check state is read again just before the final phase. The snapshot the reviewers received stays published as it was; only the finalizer sees the settled state. An artifact-only rerun never reads GitHub.
+
 ## Authoritative repository facts
 
 Every new full run measures shared repository facts before agents start and stores

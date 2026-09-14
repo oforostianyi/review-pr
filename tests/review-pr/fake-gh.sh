@@ -49,7 +49,16 @@ case "${1:-} ${2:-}" in
     'api --paginate')
         endpoint=${*: -1}
         case "$endpoint" in
-            *'/check-runs?'*) printf '%s\n' "${REVIEW_PR_FAKE_CHECK_RUNS_JSON:-{\"check_runs\":[]\}}" ;;
+            *'/check-runs?'*)
+                # A refresh payload, when configured, answers every call after the
+                # first one, so a test can prove the state was read again later.
+                if [[ -n "${REVIEW_PR_FAKE_CHECK_RUNS_REFRESH_JSON:-}" && -n "${REVIEW_PR_FAKE_CHECK_RUNS_STATE:-}" && -e "$REVIEW_PR_FAKE_CHECK_RUNS_STATE" ]]; then
+                    printf '%s\n' "$REVIEW_PR_FAKE_CHECK_RUNS_REFRESH_JSON"
+                else
+                    [[ -z "${REVIEW_PR_FAKE_CHECK_RUNS_STATE:-}" ]] || : >"$REVIEW_PR_FAKE_CHECK_RUNS_STATE"
+                    printf '%s\n' "${REVIEW_PR_FAKE_CHECK_RUNS_JSON:-{\"check_runs\":[]\}}"
+                fi
+                ;;
             *'/pulls/'*'/comments?'*)
                 printf '%s\n' "${REVIEW_PR_FAKE_REVIEW_COMMENTS_JSON:-[]}" ;;
             *) printf '%s\n' '[]' ;;
@@ -74,6 +83,9 @@ case "${1:-} ${2:-}" in
                     base: {ref: "main", repo: {full_name: "example/repository"}},
                     head: {ref: "fixture/dependency", sha: $sha, repo: {full_name: "example/repository"}}
                 }'
+                ;;
+            */check-runs/*/annotations)
+                printf '%s\n' "${REVIEW_PR_FAKE_CHECK_ANNOTATIONS_JSON:-[]}"
                 ;;
             repos/example/repository/commits/*)
                 jq -n --arg sha "$reference_sha" '{sha: $sha, html_url: ("https://example.test/example/repository/commit/" + $sha)}'

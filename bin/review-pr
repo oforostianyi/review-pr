@@ -1525,6 +1525,55 @@ prepend_agent_report_header() {
     mv -- "$normalized_output" "$output_file"
 }
 
+# A check's conclusion says whether it passed; its annotations say which line
+# failed and why. Attach them so a reviewer can use a red check as evidence
+# instead of recording it as something it could not verify. Bounded on purpose:
+# an annotated coverage run can emit hundreds.
+readonly CHECK_ANNOTATIONS_PER_CHECK=20
+readonly CHECK_ANNOTATIONS_TOTAL=60
+readonly CHECK_ANNOTATION_MESSAGE_LIMIT=200
+
+attach_check_run_annotations() {
+    local id count fetched collected='{}' total=0 remaining
+
+    while IFS=$'\t' read -r id count; do
+        [[ -n "$id" && "$id" != null ]] || continue
+        (( total < CHECK_ANNOTATIONS_TOTAL )) || break
+        remaining=$(( CHECK_ANNOTATIONS_TOTAL - total ))
+        (( remaining <= CHECK_ANNOTATIONS_PER_CHECK )) || remaining=$CHECK_ANNOTATIONS_PER_CHECK
+        # A missing or malformed annotation list is not worth failing a review over.
+        fetched=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs/${id}/annotations" 2>/dev/null) || continue
+        fetched=$(jq -c --argjson limit "$remaining" --argjson message_limit "$CHECK_ANNOTATION_MESSAGE_LIMIT" '
+            [.[]? | {
+                level: (.annotation_level // "notice"),
+                path: (.path // ""),
+                start_line: .start_line,
+                message: ((.message // "") | gsub("\\s+"; " ") | if length > $message_limit then .[0:$message_limit] + "…" else . end)
+            }][0:$limit]' <<<"$fetched" 2>/dev/null) || continue
+        [[ -n "$fetched" && "$fetched" != '[]' ]] || continue
+        collected=$(jq -c --arg id "$id" --argjson list "$fetched" '. + {($id): $list}' <<<"$collected") || continue
+        total=$(( total + $(jq 'length' <<<"$fetched") ))
+    done < <(jq -r '.[] | select((.output.annotations_count // 0) > 0) | "\(.id // "")\t\(.output.annotations_count)"' <<<"$PR_CHECK_RUNS_JSON" 2>/dev/null)
+
+    [[ "$collected" != '{}' ]] || return 0
+    PR_CHECK_RUNS_JSON=$(jq -c --argjson collected "$collected" \
+        '[.[] | . + {annotations: ($collected[(.id // "" | tostring)] // [])}]' <<<"$PR_CHECK_RUNS_JSON") || true
+}
+
+# Reads the check state again. Checks that were still running when the reviewers
+# started often settle before the synthesis, and the finalizer should reason
+# about the outcome rather than about a snapshot taken at the start. A failure
+# here keeps the snapshot it already has.
+refresh_github_check_runs() {
+    local pages refreshed
+
+    pages=$(gh api --paginate --method GET "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" 2>/dev/null) || return 0
+    refreshed=$(jq -c -s '[.[] | .check_runs[]?]' <<<"$pages" 2>/dev/null) || return 0
+    [[ -n "$refreshed" ]] || return 0
+    PR_CHECK_RUNS_JSON=$refreshed
+    attach_check_run_annotations
+}
+
 fetch_github_review_threads() {
     local owner=${GITHUB_REPOSITORY%%/*}
     local repository_name=${GITHUB_REPOSITORY#*/}
@@ -1640,6 +1689,7 @@ fetch_github_pr_context() {
     if ! PR_CHECK_RUNS_JSON=$(jq -c -s '[.[] | .check_runs[]?]' <<<"$check_runs_pages"); then
         die "GitHub CLI returned invalid check runs for PR #${PR_NUMBER}"
     fi
+    attach_check_run_annotations
 
     if ! commit_status_pages=$(gh api --paginate --method GET "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100"); then
         die "GitHub CLI failed to read commit statuses for PR #${PR_NUMBER}"
@@ -1746,7 +1796,13 @@ write_github_context_snapshot() {
                 "### " + (.name // "Unnamed check") +
                 "\n\n- Status: `" + (.status // "unknown") + "`" +
                 "\n- Conclusion: `" + (.conclusion // "pending") + "`" +
-                "\n- Details: " + (.details_url // .html_url // "unavailable") + "\n"
+                "\n- Details: " + (.details_url // .html_url // "unavailable") + "\n" +
+                (if ((.annotations // []) | length) > 0
+                 then "\nAnnotations:\n\n" + ((.annotations // []) | map(
+                        "- `" + .level + "` " +
+                        (if .path == "" then "(no file)" else .path + (if .start_line == null then "" else ":" + (.start_line | tostring) end) end) +
+                        " — " + .message) | join("\n")) + "\n"
+                 else "" end)
             end
         ' <<<"$PR_CHECK_RUNS_JSON"
 
@@ -9536,6 +9592,9 @@ run_final_synthesis() {
             "${CROSS_OUTPUTS[$agent]}"
         )
     done
+    if [[ "$RERUN_FINAL" != true ]]; then
+        refresh_github_check_runs
+    fi
     write_final_prompt "$final_prompt" "${final_prompt_arguments[@]}"
     FINAL_PROMPT_FILE=$final_prompt
 
