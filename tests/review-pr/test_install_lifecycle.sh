@@ -270,4 +270,27 @@ HOME=$upgrade_home PATH="$fake_bin:$PATH" "$upgrade_prefix/bin/review-pr" --show
 assert_file_contains "$test_root/upgrade-show-config.txt" "review-pr version: ${package_version}" \
     'the migrated configuration is accepted by the new version'
 
+# A running review reads its own script incrementally, so an installer that
+# rewrites the file in place feeds the live process new bytes at old offsets.
+# Replacing the path instead leaves the running copy on its original inode.
+atomic_prefix="$test_root/atomic/.local"
+sh "$package_root/install.sh" --repo "$review_repo" --github-repository example/repository \
+    --prefix "$atomic_prefix" --config-dir "$test_root/atomic/config" >/dev/null
+first_inode=$(stat -c '%i' "$atomic_prefix/libexec/review-pr/review-pr" 2>/dev/null \
+    || stat -f '%i' "$atomic_prefix/libexec/review-pr/review-pr")
+first_launcher_inode=$(stat -c '%i' "$atomic_prefix/bin/review-pr" 2>/dev/null \
+    || stat -f '%i' "$atomic_prefix/bin/review-pr")
+sh "$package_root/install.sh" --repo "$review_repo" --github-repository example/repository \
+    --prefix "$atomic_prefix" --config-dir "$test_root/atomic/config" >/dev/null
+second_inode=$(stat -c '%i' "$atomic_prefix/libexec/review-pr/review-pr" 2>/dev/null \
+    || stat -f '%i' "$atomic_prefix/libexec/review-pr/review-pr")
+second_launcher_inode=$(stat -c '%i' "$atomic_prefix/bin/review-pr" 2>/dev/null \
+    || stat -f '%i' "$atomic_prefix/bin/review-pr")
+assert_false 'reinstalling replaces the implementation instead of rewriting it in place' \
+    test "$first_inode" = "$second_inode"
+assert_false 'reinstalling replaces the launcher instead of rewriting it in place' \
+    test "$first_launcher_inode" = "$second_launcher_inode"
+assert_true 'the replaced implementation is still executable' \
+    test -x "$atomic_prefix/libexec/review-pr/review-pr"
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

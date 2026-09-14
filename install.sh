@@ -64,6 +64,21 @@ github_repository=""
 reviews_dir=${REVIEW_PR_OUTPUT_DIR:-${HOME}/review-pr}
 reviews_dir_configured=false
 
+# Installs one file by writing it beside its destination and renaming it into
+# place. A review that is running right now reads its own script incrementally,
+# so rewriting the file in place would feed the live process new bytes at offsets
+# computed for the old ones. A rename leaves that process on its original inode.
+install_file() {
+    install_source=$1
+    install_target=$2
+    install_mode=$3
+    install_temp="${install_target}.new.$$"
+
+    cp "$install_source" "$install_temp" || fail "could not stage ${install_target}"
+    chmod "$install_mode" "$install_temp" || fail "could not set permissions on ${install_target}"
+    mv -f "$install_temp" "$install_target" || fail "could not install ${install_target}"
+}
+
 backup_existing_config() {
     backup_dir=${config_dir}/backups
     timestamp=$(date +%Y%m%d-%H%M%S)
@@ -201,26 +216,22 @@ if [ -e "$config_file" ]; then
 fi
 
 mkdir -p "${prefix}/bin" "${prefix}/libexec/review-pr" "${prefix}/share/review-pr" "${prefix}/share/doc/review-pr" "${config_dir}/skills" "$config_dir"
-cp "${script_dir}/bin/review-pr" "${prefix}/libexec/review-pr/review-pr"
-chmod 0755 "${prefix}/libexec/review-pr/review-pr"
-cp "${script_dir}/runners/review-pr-agy" "${prefix}/libexec/review-pr/review-pr-agy"
-chmod 0755 "${prefix}/libexec/review-pr/review-pr-agy"
-cp "${script_dir}/runners/review-pr-pi-guard.js" "${prefix}/libexec/review-pr/review-pr-pi-guard.js"
-chmod 0644 "${prefix}/libexec/review-pr/review-pr-pi-guard.js"
+install_file "${script_dir}/bin/review-pr" "${prefix}/libexec/review-pr/review-pr" 0755
+install_file "${script_dir}/runners/review-pr-agy" "${prefix}/libexec/review-pr/review-pr-agy" 0755
+install_file "${script_dir}/runners/review-pr-pi-guard.js" "${prefix}/libexec/review-pr/review-pr-pi-guard.js" 0644
 printf '%s\n' "$config_file" >"${prefix}/libexec/review-pr/config-path"
 chmod 0644 "${prefix}/libexec/review-pr/config-path"
-cp "${script_dir}/review-pr-launcher" "${prefix}/bin/review-pr"
-chmod 0755 "${prefix}/bin/review-pr"
-cp "${script_dir}/config/review-pr.example.json" "${prefix}/share/review-pr/review-pr.example.json"
-cp "${script_dir}/config/review-pr.schema.json" "${prefix}/share/review-pr/review-pr.schema.json"
-cp "${script_dir}/config/review-pr-findings-v1.schema.json" "${prefix}/share/review-pr/review-pr-findings-v1.schema.json"
-cp "${script_dir}/VERSION" "${prefix}/share/review-pr/VERSION"
-cp "${script_dir}/README.md" "${prefix}/share/doc/review-pr/README.md"
-cp "${script_dir}/docs/review-pr.md" "${prefix}/share/doc/review-pr/reference.md"
-cp "${script_dir}/docs/review-pr-finding-contract.md" "${prefix}/share/doc/review-pr/review-pr-finding-contract.md"
-cp "${script_dir}/CHANGELOG.md" "${prefix}/share/doc/review-pr/CHANGELOG.md"
-cp "${script_dir}/config/review-pr.schema.json" "${config_dir}/review-pr.schema.json"
-cp "${script_dir}/config/review-pr-findings-v1.schema.json" "${config_dir}/review-pr-findings-v1.schema.json"
+install_file "${script_dir}/review-pr-launcher" "${prefix}/bin/review-pr" 0755
+install_file "${script_dir}/config/review-pr.example.json" "${prefix}/share/review-pr/review-pr.example.json" 0644
+install_file "${script_dir}/config/review-pr.schema.json" "${prefix}/share/review-pr/review-pr.schema.json" 0644
+install_file "${script_dir}/config/review-pr-findings-v1.schema.json" "${prefix}/share/review-pr/review-pr-findings-v1.schema.json" 0644
+install_file "${script_dir}/VERSION" "${prefix}/share/review-pr/VERSION" 0644
+install_file "${script_dir}/README.md" "${prefix}/share/doc/review-pr/README.md" 0644
+install_file "${script_dir}/docs/review-pr.md" "${prefix}/share/doc/review-pr/reference.md" 0644
+install_file "${script_dir}/docs/review-pr-finding-contract.md" "${prefix}/share/doc/review-pr/review-pr-finding-contract.md" 0644
+install_file "${script_dir}/CHANGELOG.md" "${prefix}/share/doc/review-pr/CHANGELOG.md" 0644
+install_file "${script_dir}/config/review-pr.schema.json" "${config_dir}/review-pr.schema.json" 0644
+install_file "${script_dir}/config/review-pr-findings-v1.schema.json" "${config_dir}/review-pr-findings-v1.schema.json" 0644
 install_portable_skills "${script_dir}/skills"
 
 if [ -f "$config_file" ]; then

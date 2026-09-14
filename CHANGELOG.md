@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` now writes each file beside its destination and renames it into place instead of
+  rewriting it where it stands. A review that is running reads its own script incrementally, so an
+  in-place rewrite feeds the live process new bytes at offsets computed for the old ones, which is
+  how an installer can corrupt a review already in flight. A rename leaves that process on the inode
+  it opened.
+
 ### Changed
 
 - Reviewers now receive the annotations a check run produced, not only its conclusion. A red

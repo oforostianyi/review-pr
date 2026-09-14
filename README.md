@@ -471,7 +471,7 @@ Confirmed findings are exported by default. `--include uncertain` adds the claim
 
 ## Upgrade
 
-Extract a newer archive and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended.
+Extract a newer archive and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended. Each file is renamed into place rather than rewritten where it stands, so a review already running keeps reading the build it started with instead of a half-replaced script.
 
 Use `review-pr --version` to identify the installed release. See `CHANGELOG.md` in the release archive for release notes and compatibility-impacting changes.
 
