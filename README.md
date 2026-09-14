@@ -445,6 +445,20 @@ review-pr https://github.com/YOUR-ORG/YOUR-REPOSITORY/pull/123
 
 The command fetches and detaches the dedicated checkout at the exact PR head. It refuses tracked changes and never operates on another checkout.
 
+## Hand a finished review to a fixing agent
+
+The final report is written for a human. An agent that will do the fixing needs the actionable part, not the prose, so `findings` prints it as JSON:
+
+```bash
+review-pr findings 123
+review-pr findings --include uncertain 123
+review-pr findings --run 20260914-120000-CEST 123
+```
+
+It reads only the canonical final sidecar a structured run already published, so it needs no agent CLI, no network, and no Git work, and it writes nothing. Each entry carries the id, classification, severity, category, exact anchor, title, claim, failure scenario, recommendation, and the verification limitations that qualify it.
+
+Confirmed findings are exported by default. `--include uncertain` adds the claims that could not be settled, and `--include all` adds refuted ones too; an agent should act on the confirmed set and reproduce an uncertain claim before touching anything. Findings with no natural changed-line anchor, such as a missing test or migration, keep an empty anchor and are listed after the anchored ones instead of being dropped. Without `--run`, the freshest final synthesis for that pull request is used, including one produced by `--rerun-final`. A run without `reporting.finding_contract.final = ndjson-v1` publishes no such sidecar and is refused with that reason.
+
 ## Upgrade
 
 Extract a newer archive and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended.

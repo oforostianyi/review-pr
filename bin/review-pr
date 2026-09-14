@@ -162,6 +162,8 @@ DISPUTE_RESOLUTION_ENABLED=false
 EXECUTE_MEASUREMENTS_ENABLED=false
 MEASUREMENT_WORKING_DIRECTORY=""
 FINAL_PROMPT_FILE=""
+FINDINGS_MODE=false
+FINDINGS_INCLUDE=confirmed
 FINAL_ATTEMPT_RETRYABLE=false
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
@@ -295,8 +297,70 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] --rerun-final [--force] [--run <timestamp>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
        ${0##*/} [--config <file>] contract-test [--agent <name>]... [--phase <primary|cross|final|all>] [--output <directory>]
+       ${0##*/} [--config <file>] findings [--run <timestamp>] [--include <confirmed|uncertain|all>] <pull-request-number>
        ${0##*/} --version
 EOF
+}
+
+# Prints the actionable part of a finished review as JSON, for an agent that will
+# do the fixing. It reads only what the orchestrator already published, so it
+# needs no agent CLI, no network, and no Git work, and it writes nothing.
+export_review_findings() {
+    local include=$1
+    local slug search_root candidate selected='' run
+
+    slug=${GITHUB_REPOSITORY//\//-}
+    slug=${slug,,}
+    search_root="${REVIEWS_ROOT}/${slug}"
+    [[ -d "$search_root" && ! -L "$search_root" ]] \
+        || die "No reviews have been stored for ${GITHUB_REPOSITORY} under ${REVIEWS_ROOT}"
+
+    # Names carry their run timestamp, and an artifact-only rerun sorts after the
+    # run it re-synthesized, so the last name is the freshest final synthesis.
+    while IFS= read -r candidate; do
+        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+        if [[ -n "$RUN_SELECTOR" && "${candidate##*/}" != *"-${RUN_SELECTOR}-"* ]]; then
+            continue
+        fi
+        selected=$candidate
+    done < <(find -P "$search_root" -type f -name "${PR_NUMBER}-*-final-findings.json" | sort)
+
+    if [[ -z "$selected" ]]; then
+        if [[ -n "$RUN_SELECTOR" ]]; then
+            die "Run ${RUN_SELECTOR} of PR #${PR_NUMBER} published no structured final synthesis"
+        fi
+        die "PR #${PR_NUMBER} has no completed structured final synthesis; findings requires reporting.finding_contract.final = ndjson-v1"
+    fi
+    jq -e '.findings | type == "array"' "$selected" >/dev/null 2>&1 \
+        || die "Final findings artifact is unreadable: ${selected}"
+
+    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${selected##*/}" | tail -n 1)
+    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg include "$include" '
+        def placement: if .anchor.kind == "pr-level" then 1 else 0 end;
+        (if $include == "confirmed" then ["CONFIRMED"]
+         elif $include == "uncertain" then ["CONFIRMED", "UNCERTAIN"]
+         else ["CONFIRMED", "UNCERTAIN", "REJECTED"] end) as $wanted |
+        {
+            schema_version: 1,
+            pr_number: $pr_number,
+            run: $run,
+            include: $include,
+            findings: ([.findings[]
+                | select(.classification as $classification | $wanted | index($classification))
+                | {
+                    id: .source_id,
+                    classification,
+                    severity,
+                    category,
+                    anchor: {kind: .anchor.kind, file: .anchor.file, start: .anchor.start, "end": .anchor["end"]},
+                    title,
+                    claim,
+                    failure_scenario,
+                    recommendation,
+                    verification_limitations
+                  }] | sort_by(placement))
+        }
+    ' "$selected"
 }
 
 show_version() {
@@ -9649,6 +9713,18 @@ while (( $# > 0 )); do
             CONTRACT_TEST_MODE=true
             shift
             ;;
+        findings)
+            FINDINGS_MODE=true
+            shift
+            ;;
+        --include)
+            (( $# >= 2 )) || die "--include requires confirmed, uncertain, or all"
+            case $2 in
+                confirmed|uncertain|all) FINDINGS_INCLUDE=$2 ;;
+                *) die "Unknown --include scope: ${2}" ;;
+            esac
+            shift 2
+            ;;
         --agent)
             (( $# >= 2 )) || die "--agent requires an agent name"
             CONTRACT_TEST_AGENTS+=("$2")
@@ -9745,6 +9821,15 @@ if [[ "$SHOW_CONFIG" == true ]]; then
     show_configuration
     exit 0
 fi
+
+if [[ "$FINDINGS_MODE" == true ]]; then
+    (( $# == 1 )) || die "findings takes a single pull-request number"
+    [[ "$RERUN_FINAL" == false && "$FORCE_RERUN" == false ]] || die "findings cannot be combined with --rerun-final or --force"
+    [[ -z "$RUN_SELECTOR" || "$RUN_SELECTOR" =~ ^[0-9]{8}-[0-9]{6}-(CET|CEST)$ ]] || die "Invalid run timestamp: ${RUN_SELECTOR}"
+    export_review_findings "$FINDINGS_INCLUDE"
+    exit 0
+fi
+[[ "$FINDINGS_INCLUDE" == confirmed ]] || die "--include is only valid for the findings subcommand"
 
 if [[ -n "$RUN_SELECTOR" && "$RERUN_FINAL" == false ]]; then
     RESUME_RUN=true

@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- `review-pr findings <pull-request>` prints the actionable part of a finished structured review as
+  JSON, for an agent that will do the fixing: id, classification, severity, category, exact anchor,
+  title, claim, failure scenario, recommendation, and verification limitations. Confirmed findings
+  are exported by default; `--include uncertain` and `--include all` widen the set, and `--run`
+  selects a specific run instead of the freshest one. It reads only the canonical final sidecar, so
+  it needs no agent CLI, no network, and no Git work, and it writes nothing.
+
 ### Changed
 
 - A run's working files now live in `work/<timestamp>/` instead of directly in `work/`, so repeated
