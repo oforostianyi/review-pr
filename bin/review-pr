@@ -5143,6 +5143,7 @@ Output contract: ndjson-v1. This orchestrator contract overrides Markdown format
 Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of {"agent":"input-agent-key","source_id":"input-source-id"}. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
 
 - record must be "finding", schema_version 1, and source_id unique within this cross-review.
+- Every supplied primary record carries record_ref, the exact {"agent":...,"source_id":...} object to copy into source_refs when you classify it. Copy it verbatim; never pair an id with an agent key yourself.
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN.
 - CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique agent keys in source_refs.
@@ -5204,7 +5205,11 @@ EOF
             [[ -s "$report_path" ]] || die "Canonical primary findings are missing for structured cross-review: ${input_agent}"
             {
                 printf '\n===== BEGIN CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
-                cat -- "$report_path"
+                # record_ref is the exact pair this reviewer must copy into
+                # source_refs. Supplying it removes the join between an id here
+                # and an agent key in the block header, which is where a reviewer
+                # mis-attributes a record.
+                jq '.agent as $owner | .findings |= map(. + {record_ref: {agent: $owner, source_id: .source_id}})' "$report_path"
                 printf '\n===== END CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
             } >>"$prompt_file"
         done
@@ -5333,7 +5338,7 @@ Output contract: ndjson-v1. This orchestrator contract overrides every Markdown 
 Classify every supplied canonical cross-review finding. Each output finding has exactly these keys: record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary.
 
 - record must be "finding", schema_version 1, and source_id unique within this synthesis.
-- source_refs is a non-empty unique array of {"agent":"cross-review-agent-key","source_id":"cross-review-source-id"}. Every supplied cross-review agent/source_id pair must appear in at least one record; no unknown pair is allowed.
+- source_refs is a non-empty unique array of {"agent":"cross-review-agent-key","source_id":"cross-review-source-id"}. Every supplied cross-review agent/source_id pair must appear in at least one record; no unknown pair is allowed. Every supplied cross-review record carries record_ref, that exact object; copy it verbatim. Its primary_provenance names the upstream primary finding and is never the pair to cite.
 - Merge genuine duplicates by retaining all source_refs. Split a compound claim only when needed for an atomic decision; a source ref may then appear in multiple records. Never add a source-free finding.
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN. CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.
@@ -5450,7 +5455,7 @@ EOF
                 # The finalizer references cross-review records by their own source_id.
                 # Their upstream primary refs are shown as provenance so a model cannot
                 # mistake them for the refs it must cover.
-                jq '.findings |= map(. + {primary_provenance: .source_refs} | del(.source_refs))' "$report"
+                jq '.agent as $owner | .findings |= map(. + {record_ref: {agent: $owner, source_id: .source_id}, primary_provenance: .source_refs} | del(.source_refs))' "$report"
                 printf '\n===== END CANONICAL CROSS-REVIEW FINDINGS: %s =====\n' "$label"
             } >>"$prompt_file"
         done

@@ -858,6 +858,13 @@ additional `REVIEW_PR_PHASE=primary findings repair` invocation with
 source or change, add, remove, split, merge, translate, or reorder findings. The orchestrator compares
 all substantive fields against a parsed baseline and rejects the repair on any difference.
 
+Every canonical record supplied to a reviewer carries `record_ref`, the exact
+`{"agent":…,"source_id":…}` object to copy when citing it: the primary records handed to a
+cross-reviewer, and the cross-review records handed to the finalizer. Without it a reviewer has to
+pair an id from the record with an agent key from the block header, and a mis-paired citation fails
+validation as a missing plus unknown source ref. The finalizer's copy also keeps `primary_provenance`,
+the upstream primary refs, which is never the pair to cite.
+
 Structured cross-review has an equivalent `REVIEW_PR_PHASE=cross-review findings repair` pass. It
 also freezes classification, severity, source provenance, and contributing agents, then reruns the
 complete schema, input-coverage, and changed-line validation before publishing any artifact.

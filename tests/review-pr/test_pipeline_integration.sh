@@ -748,6 +748,28 @@ run_ndjson_cross_case() {
     # The terminal record's arrays hold plain strings. Saying so is what keeps a
     # reviewer from encoding "the file and the symbol" as an object, which the
     # validator rejects and the bounded repair may not rewrite.
+    # Every supplied record carries the exact {agent, source_id} pair to copy when
+    # citing it, so a reviewer never has to pair an id from one place with an agent
+    # key from another. That join is what mis-attributed two pi records to claude.
+    prompt_block() {
+        awk -v begin="===== BEGIN $2 =====" -v end="===== END $2 =====" '
+            $0 == begin {inside = 1; next}
+            $0 == end {inside = 0}
+            inside' "$1"
+    }
+    assert_eq 'beta beta:F-001' \
+        "$(prompt_block "$capture/cross-review-alpha-attempt-1.prompt" 'CANONICAL PRIMARY FINDINGS: beta' \
+            | jq -r '.findings[0].record_ref | .agent + " " + .source_id')" \
+        'a cross-reviewer is handed the ready-made ref for each supplied primary record'
+    assert_eq 'alpha alpha:C-001' \
+        "$(prompt_block "$capture/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: alpha' \
+            | jq -r '.findings[0].record_ref | .agent + " " + .source_id')" \
+        'the finalizer is handed the ready-made ref for each supplied cross-review record'
+    assert_eq 'beta beta:F-001' \
+        "$(prompt_block "$capture/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: alpha' \
+            | jq -r '.findings[0].primary_provenance[0] | .agent + " " + .source_id')" \
+        'upstream provenance stays visible and stays distinct from the ref to cite'
+
     for contract_prompt in primary-review-alpha cross-review-alpha final-synthesis-alpha; do
         assert_file_contains "$capture/${contract_prompt}-attempt-1.prompt" \
             'verification_limitations and positive_evidence are arrays of strings' \

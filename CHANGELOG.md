@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- Every canonical record supplied to a reviewer now carries `record_ref`, the exact
+  `{"agent":…,"source_id":…}` object to copy when citing it. A final synthesis failed on PR 28958
+  because it cited two Pi cross-review records under the Claude agent key: the record's own id and
+  the agent key that owns it were in different places, and the record's `primary_provenance` shows a
+  different agent right next to the id. The contracts now say to copy `record_ref` verbatim and never
+  to assemble the pair.
+
 ## [1.16.1] - 2026-09-14
 
 ### Fixed
