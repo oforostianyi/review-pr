@@ -250,4 +250,22 @@ assert_false 'a final attempt without any usage record is not retried' \
 assert_false 'a final attempt stopped by the output token limit is not retried' \
     final_attempt_is_retryable "$retry_case/produced.ndjson" "$retry_case/usage-productive.json" length
 
+# Working files live under work/<run timestamp>. Runs made before that layout kept
+# them directly in work/, and resume must still find those.
+layout_case="$suite_root/work-layout"
+REPORT_DIR="$layout_case/report"
+REVIEW_ID=123-fixture
+mkdir -p -- "$REPORT_DIR/work"
+assert_eq "$REPORT_DIR/work/20260914-101500-CEST" \
+    "$(resolve_run_work_dir 20260914-101500-CEST)" \
+    'a run with no artifacts yet is placed in its own directory'
+mkdir -p -- "$REPORT_DIR/work/20260914-101500-CEST"
+assert_eq "$REPORT_DIR/work/20260914-101500-CEST" \
+    "$(resolve_run_work_dir 20260914-101500-CEST)" \
+    'an existing run directory is reused'
+: >"$REPORT_DIR/work/${REVIEW_ID}-20260101-000000-CEST-manifest.json"
+assert_eq "$REPORT_DIR/work" \
+    "$(resolve_run_work_dir 20260101-000000-CEST)" \
+    'a run whose manifest sits directly in work keeps the flat layout'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

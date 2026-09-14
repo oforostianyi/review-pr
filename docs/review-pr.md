@@ -667,7 +667,7 @@ inspection.
 
 ## Report layout
 
-Each repository gets its own stable directory under the configured external `reviews_directory`; the GitHub slug is normalized to lowercase with `/` replaced by `-`. This prevents equal PR numbers from different repositories from colliding. Only completed final reviews are written at a run directory’s top level; all intermediate material stays in `work/`:
+Each repository gets its own stable directory under the configured external `reviews_directory`; the GitHub slug is normalized to lowercase with `/` replaced by `-`. This prevents equal PR numbers from different repositories from colliding. Only completed final reviews are written at a run directory’s top level; all intermediate material stays in `work/<timestamp>/`, one directory per run, so repeated runs of the same PR stay separable:
 
 ```text
 $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
@@ -675,26 +675,27 @@ $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
 ├── <review-id>-<timestamp>-comparison.md
 ├── <review-id>-<source-timestamp>-final-rerun-<timestamp>.md
 └── work/
-    ├── <review-id>-<timestamp>-claude.md
-    ├── <review-id>-<timestamp>-claude-raw.ndjson       # only with ndjson-v1
-    ├── <review-id>-<timestamp>-claude-findings.json    # only with ndjson-v1
-    ├── <review-id>-<timestamp>-cross-codex.md
-    ├── <review-id>-<timestamp>-github-context.md
-    ├── <review-id>-<timestamp>-repo-facts.json
-    ├── <review-id>-<timestamp>-repo-facts.md
-    ├── <review-id>-<timestamp>-changed-lines.json
-    ├── <review-id>-<timestamp>-claude-usage.json
-    ├── <review-id>-<timestamp>-cross-codex-usage.json
-    ├── <review-id>-<timestamp>-final-usage.json
-    ├── <review-id>-<timestamp>-final-raw.ndjson       # only with final ndjson-v1
-    ├── <review-id>-<timestamp>-final-findings.json    # only with final ndjson-v1
-    ├── <review-id>-<timestamp>-final-anchor-validation.json
-    ├── <review-id>-<timestamp>-comparison-usage.json
-    ├── <review-id>-<timestamp>-manifest.json
-    └── diagnostics and invalid-output artifacts, if any
+    └── <timestamp>/
+        ├── <review-id>-<timestamp>-claude.md
+        ├── <review-id>-<timestamp>-claude-raw.ndjson       # only with ndjson-v1
+        ├── <review-id>-<timestamp>-claude-findings.json    # only with ndjson-v1
+        ├── <review-id>-<timestamp>-cross-codex.md
+        ├── <review-id>-<timestamp>-github-context.md
+        ├── <review-id>-<timestamp>-repo-facts.json
+        ├── <review-id>-<timestamp>-repo-facts.md
+        ├── <review-id>-<timestamp>-changed-lines.json
+        ├── <review-id>-<timestamp>-claude-usage.json
+        ├── <review-id>-<timestamp>-cross-codex-usage.json
+        ├── <review-id>-<timestamp>-final-usage.json
+        ├── <review-id>-<timestamp>-final-raw.ndjson       # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-findings.json    # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-anchor-validation.json
+        ├── <review-id>-<timestamp>-comparison-usage.json
+        ├── <review-id>-<timestamp>-manifest.json
+        └── diagnostics and invalid-output artifacts, if any
 ```
 
-The orchestration prompt deliberately gives agents no report directory or output path. In orchestrated mode, any reviewer-skill instruction about creating, naming, or storing files is manual-mode-only; agents must return Markdown and the orchestrator persists it atomically. Existing historical runs stored directly under `<reviews_directory>/<review-id>/` or the old checkout-local `docs/reviews/` remain readable by `--rerun-final`.
+The orchestration prompt deliberately gives agents no report directory or output path. In orchestrated mode, any reviewer-skill instruction about creating, naming, or storing files is manual-mode-only; agents must return Markdown and the orchestrator persists it atomically. Existing historical runs stored directly under `<reviews_directory>/<review-id>/` or the old checkout-local `docs/reviews/` remain readable by `--rerun-final`. Runs made before the per-run work directory kept their files directly in `work/`; resume and artifact-only reruns recognise that layout from the manifest's own location and keep working on them unchanged.
 
 Every newly completed primary and cross-review report receives a canonical orchestrator-generated PR metadata header before it is published. It contains the same linked PR title, task, base/head, diff statistics, and author as the final report, plus `Review stage`, `Agent`, `Model`, and `Reasoning effort`. If a CLI uses an unconfigured default and does not report its exact model, the header says so rather than guessing. The final report deliberately omits synthesizer/model metadata.
 

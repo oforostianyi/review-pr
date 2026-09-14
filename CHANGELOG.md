@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- A run's working files now live in `work/<timestamp>/` instead of directly in `work/`, so repeated
+  runs of the same pull request stay separable. File names are unchanged, and the final and
+  comparison reports still sit at the top of the review directory. Runs made before this keep their
+  flat layout: resume and `--rerun-final` recognise it from the manifest's own location and continue
+  to work on them.
+
 ### Fixed
 
 - Every canonical record supplied to a reviewer now carries `record_ref`, the exact

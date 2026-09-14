@@ -89,6 +89,17 @@ latest_manifest() {
     find "$reviews" -type f -name '*-manifest.json' ! -name '*rerun*' -print | sort | tail -n 1
 }
 
+# Working files live in <review>/work/<run>; older runs kept them in <review>/work.
+# Both resolve to the same review directory, where the reader-facing reports live.
+report_root_of() {
+    local work_dir=$1
+    if [[ "${work_dir%/*}" == */work ]]; then
+        printf '%s\n' "${work_dir%/work/*}"
+    else
+        printf '%s\n' "${work_dir%/work}"
+    fi
+}
+
 run_full_success_case() {
     local case_dir="$suite_root/success"
     local reviews="$case_dir/reviews"
@@ -141,10 +152,14 @@ run_full_success_case() {
         'manifest records a disabled timeout explicitly'
 
     work_dir=${manifest%/*}
-    report_dir=${work_dir%/*}
+    report_dir=$(report_root_of "$work_dir")
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     timestamp=$(jq -r '.timestamp' "$manifest")
     assert_file_exists "$report_dir/${stem}-final.md" 'final core report remains in the review directory root'
+    assert_eq "$timestamp" "${work_dir##*/}" \
+        'working files of a run live in their own directory named after the run'
+    assert_eq "$report_dir/work" "${work_dir%/*}" \
+        'run directories sit directly under the review work directory'
     assert_file_exists "$report_dir/${stem}-comparison.md" 'comparison report remains in the review directory root'
     assert_file_exists "$work_dir/${stem}-alpha.md" 'primary artifacts are kept under work/'
     assert_file_exists "$work_dir/${stem}-cross-beta.md" 'cross-review artifacts are kept under work/'
@@ -326,7 +341,7 @@ run_comparison_failure_case() {
 
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
-    report_dir=${work_dir%/*}
+    report_dir=$(report_root_of "$work_dir")
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     assert_eq 'complete_with_unknowns' "$(jq -r '.status' "$work_dir/${stem}-repo-facts.json")" \
         'an unresolved description reference is recorded without aborting otherwise valid fact collection'
@@ -491,7 +506,7 @@ run_anchor_repair_case() {
 
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
-    report_dir=${work_dir%/*}
+    report_dir=$(report_root_of "$work_dir")
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     assert_file_exists "$work_dir/${stem}-changed-lines.json" \
         'full run publishes the exact changed-line map'
@@ -559,7 +574,7 @@ run_unsafe_anchor_repair_case() {
 
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
-    report_dir=${work_dir%/*}
+    report_dir=$(report_root_of "$work_dir")
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     assert_file_not_exists "$report_dir/${stem}-final.md" \
         'unsafe repair cannot publish a canonical final report'
@@ -719,7 +734,7 @@ run_ndjson_cross_case() {
     alpha_prompt="$capture/cross-review-alpha-attempt-1.prompt"
     final_raw="$work_dir/${stem}-final-raw.ndjson"
     final_findings="$work_dir/${stem}-final-findings.json"
-    final_report="${work_dir%/work}/${stem}-final.md"
+    final_report="$(report_root_of "$work_dir")/${stem}-final.md"
     final_prompt="$capture/final-synthesis-alpha-attempt-1.prompt"
 
     assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
@@ -904,7 +919,7 @@ run_dispute_resolution_case() {
     assert_eq '1' "$(jq '.resolutions | length' "$work_dir/${stem}-final-resolutions.json")" 'one resolution per detected dispute'
     assert_eq "${stem}-final-resolutions.json" "$(jq -r '.artifacts.final_resolutions' "$manifest")" 'the manifest records the resolutions sidecar'
     assert_eq 'true' "$(jq -r '.reporting.dispute_resolution' "$manifest")" 'the manifest records the enabled feature'
-    assert_file_contains "${work_dir%/work}/${stem}-final.md" '<!-- review-pr:dispute-resolutions -->' 'the final report renders the dispute table'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" '<!-- review-pr:dispute-resolutions -->' 'the final report renders the dispute table'
 }
 
 run_cross_continuation_case() {
@@ -1021,7 +1036,7 @@ run_final_continuation_case() {
         'the final continuation prompt names its own phase'
     assert_file_exists "$work_dir/${stem}-final-error-continuation-source-raw.ndjson" \
         'the interrupted final draft is preserved for inspection'
-    assert_file_exists "${work_dir%/work}/${stem}-final.md" \
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
         'a continued final synthesis still publishes the report'
 }
 
@@ -1052,7 +1067,7 @@ run_final_retry_case() {
         'a final synthesis that produced an off-contract answer is retried'
     assert_eq '2' "$(grep -c '^start.*final-synthesis' "$events")" \
         'the synthesizer ran exactly twice'
-    assert_file_exists "${work_dir%/work}/${stem}-final.md" 'the retried final synthesis publishes its report'
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" 'the retried final synthesis publishes its report'
     assert_file_exists "$work_dir/${stem}-final-error-attempt-1-invalid.md" \
         'the rejected first answer is preserved under its own attempt number'
     assert_file_exists "$work_dir/${stem}-final-error-attempt-1-usage.json" \
@@ -1115,7 +1130,7 @@ run_dispute_resolution_failure_case() {
     assert_file_contains "$case_dir/stderr.log" 'dispute_resolution_validation_failed: resolution[dispute:alpha:alpha:F-001].confirmed_over_unresolved_factual' \
         'the failure names the count-over-measurement violation'
     assert_file_not_exists "$work_dir/${stem}-final-resolutions.json" 'no resolutions sidecar is published for an invalid final'
-    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" 'no final report is published for an invalid final'
+    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" 'no final report is published for an invalid final'
 }
 
 run_measured_resolution_case() {
@@ -1152,9 +1167,9 @@ run_measured_resolution_case() {
         'an explicit repository rule basis survives end to end'
     assert_eq 'AGENTS.md' "$(jq -r '.resolutions[0].basis_source' "$sidecar")" \
         'the explicit rule names its repository source'
-    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| Measured |' 'the final report shows the Measured column'
-    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| exit 0 |' 'the final report shows the measurement outcome'
-    assert_file_contains "${work_dir%/work}/${stem}-final.md" 'explicit_repository_rule (`AGENTS.md`)' 'the final report shows the rule source'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" '| Measured |' 'the final report shows the Measured column'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" '| exit 0 |' 'the final report shows the measurement outcome'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'explicit_repository_rule (`AGENTS.md`)' 'the final report shows the rule source'
 }
 
 run_unavailable_measurement_case() {
@@ -1184,7 +1199,7 @@ run_unavailable_measurement_case() {
     assert_eq 'uncertain' "$(jq -r '.resolutions[0].resolution_status' "$sidecar")" 'the resolution records the uncertain status'
     assert_eq 'false' "$(jq -r '.resolutions[0].measurement.executed' "$sidecar")" 'a runtime tool proposed by the model is not executed'
     assert_eq 'not_allowlisted' "$(jq -r '.resolutions[0].measurement.skipped_reason' "$sidecar")" 'the skipped measurement names the policy reason'
-    assert_file_contains "${work_dir%/work}/${stem}-final.md" '| skipped: not_allowlisted |' 'the final report shows the skipped measurement'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" '| skipped: not_allowlisted |' 'the final report shows the skipped measurement'
 }
 
 run_split_claim_resolution_case() {
@@ -1244,7 +1259,7 @@ run_diagnostics_case() {
     unset REVIEW_PR_FAKE_REVIEW_THREADS_FAILURE REVIEW_PR_FAKE_CHECK_RUNS_JSON
     manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     sidecar="$work_dir/${stem}-final-diagnostics.json"
-    final_report="${work_dir%/work}/${stem}-final.md"
+    final_report="$(report_root_of "$work_dir")/${stem}-final.md"
     assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'a run with a failed check, unavailable threads, and a retried agent still completes'
     assert_eq 'agent_attempt_failed,github_check_failed,github_review_threads_unavailable' \
         "$(jq -r '[.orchestrator[].type] | unique | join(",")' "$sidecar")" \
@@ -1290,7 +1305,7 @@ run_diagnostic_only_finding_case() {
     manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
     assert_file_contains "$case_dir/stderr.log" 'diagnostic_only_finding: finding[FINAL-001]' 'the failure names the diagnostic-only finding'
     assert_file_not_exists "$work_dir/${stem}-final-diagnostics.json" 'no diagnostics sidecar is published for an invalid final'
-    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" 'no final report is published for an invalid final'
+    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" 'no final report is published for an invalid final'
 }
 
 run_ndjson_cross_resume_case() {
@@ -1591,7 +1606,7 @@ run_ndjson_unsafe_final_repair_case() {
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
-    assert_file_not_exists "${work_dir%/work}/${stem}-final.md" \
+    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
         'unsafe final repair cannot publish human Markdown'
     assert_file_not_exists "$work_dir/${stem}-final-findings.json" \
         'unsafe final repair cannot publish canonical findings'

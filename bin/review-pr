@@ -7547,6 +7547,25 @@ select_source_manifest() {
     fi
 }
 
+# Working files of a run live in work/<run timestamp>, so several runs of the same
+# PR stay separable. Runs created before that layout kept their files directly in
+# work/, and are recognised by the manifest that sits there, so resume and
+# artifact-only reruns keep working on them unchanged.
+resolve_run_work_dir() {
+    local run=$1
+    local nested="${REPORT_DIR}/work/${run}"
+
+    if [[ -d "$nested" ]]; then
+        printf '%s\n' "$nested"
+        return 0
+    fi
+    if [[ -n "$run" && -f "${REPORT_DIR}/work/${REVIEW_ID}-${run}-manifest.json" ]]; then
+        printf '%s\n' "${REPORT_DIR}/work"
+        return 0
+    fi
+    printf '%s\n' "$nested"
+}
+
 select_artifact_source_manifest() {
     local search_root
     local file_pattern
@@ -7756,6 +7775,9 @@ load_artifact_source_run() {
     if [[ "${manifest_directory##*/}" == work ]]; then
         WORK_DIR=$manifest_directory
         REPORT_DIR=${manifest_directory%/*}
+    elif [[ "${manifest_directory%/*}" == */work ]]; then
+        WORK_DIR=$manifest_directory
+        REPORT_DIR=${manifest_directory%/work/*}
     else
         REPORT_DIR=$manifest_directory
         WORK_DIR="${REPORT_DIR}/work"
@@ -9887,11 +9909,19 @@ if [[ "$USING_LEGACY_REPORTS" == true ]]; then
 else
     [[ "$resolved_report_dir" == "${REPOSITORY_REVIEWS_ROOT}/"* ]] || die "Report directory resolves outside the configured repository artifact directory"
 fi
-WORK_DIR="${REPORT_DIR}/work"
+[[ ! -L "${REPORT_DIR}/work" ]] || die "Refusing to use a symlink as the review work directory: ${REPORT_DIR}/work"
+if [[ "$RERUN_FINAL" == true ]]; then
+    # The source manifest decides the layout for an artifact-only rerun; this is
+    # only a safe provisional value until load_source_run resolves it.
+    WORK_DIR="${REPORT_DIR}/work"
+else
+    WORK_DIR=$(resolve_run_work_dir "${RUN_SELECTOR:-$TIMESTAMP}")
+fi
 [[ ! -L "$WORK_DIR" ]] || die "Refusing to use a symlink as the review work directory: ${WORK_DIR}"
 mkdir -p -- "$WORK_DIR"
 resolved_work_dir=$(canonical_existing_path "$WORK_DIR")
-[[ "$resolved_work_dir" == "${REPORT_DIR}/work" ]] || die "Review work directory resolves outside its report directory"
+[[ "$resolved_work_dir" == "${REPORT_DIR}/work" || "$resolved_work_dir" == "${REPORT_DIR}/work/"* ]] \
+    || die "Review work directory resolves outside its report directory"
 
 if [[ "$RESUME_RUN" == true ]]; then
     load_resume_run
