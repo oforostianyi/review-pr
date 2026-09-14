@@ -164,6 +164,8 @@ MEASUREMENT_WORKING_DIRECTORY=""
 FINAL_PROMPT_FILE=""
 FINDINGS_MODE=false
 FINDINGS_INCLUDE=confirmed
+FINDINGS_EXPORT_SCOPE=confirmed
+FINAL_FINDINGS_EXPORT_OUTPUT=""
 FINAL_ATTEMPT_RETRYABLE=false
 FINDING_CONTRACT_FAILURE_REASON=""
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
@@ -302,41 +304,15 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
 EOF
 }
 
-# Prints the actionable part of a finished review as JSON, for an agent that will
-# do the fixing. It reads only what the orchestrator already published, so it
-# needs no agent CLI, no network, and no Git work, and it writes nothing.
-export_review_findings() {
-    local include=$1
-    local slug search_root candidate selected='' run
+# Renders the actionable part of one canonical final synthesis as JSON, for an
+# agent that will do the fixing. Confirmed findings come first; a finding with no
+# changed-line anchor keeps an empty anchor and is listed last, because a missing
+# test or migration has no address and dropping it would be worse.
+render_findings_export() {
+    local canonical_file=$1 run=$2 scope=$3
 
-    slug=${GITHUB_REPOSITORY//\//-}
-    slug=${slug,,}
-    search_root="${REVIEWS_ROOT}/${slug}"
-    [[ -d "$search_root" && ! -L "$search_root" ]] \
-        || die "No reviews have been stored for ${GITHUB_REPOSITORY} under ${REVIEWS_ROOT}"
-
-    # Names carry their run timestamp, and an artifact-only rerun sorts after the
-    # run it re-synthesized, so the last name is the freshest final synthesis.
-    while IFS= read -r candidate; do
-        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
-        if [[ -n "$RUN_SELECTOR" && "${candidate##*/}" != *"-${RUN_SELECTOR}-"* ]]; then
-            continue
-        fi
-        selected=$candidate
-    done < <(find -P "$search_root" -type f -name "${PR_NUMBER}-*-final-findings.json" | sort)
-
-    if [[ -z "$selected" ]]; then
-        if [[ -n "$RUN_SELECTOR" ]]; then
-            die "Run ${RUN_SELECTOR} of PR #${PR_NUMBER} published no structured final synthesis"
-        fi
-        die "PR #${PR_NUMBER} has no completed structured final synthesis; findings requires reporting.finding_contract.final = ndjson-v1"
-    fi
-    jq -e '.findings | type == "array"' "$selected" >/dev/null 2>&1 \
-        || die "Final findings artifact is unreadable: ${selected}"
-
-    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${selected##*/}" | tail -n 1)
     # jq 1.6 parses "include" as the module keyword, so the scope travels as $scope.
-    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg scope "$include" '
+    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg scope "$scope" '
         def placement: if .anchor.kind == "pr-level" then 1 else 0 end;
         (if $scope == "confirmed" then ["CONFIRMED"]
          elif $scope == "uncertain" then ["CONFIRMED", "UNCERTAIN"]
@@ -361,7 +337,57 @@ export_review_findings() {
                     verification_limitations
                   }] | sort_by(placement))
         }
-    ' "$selected"
+    ' "$canonical_file"
+}
+
+# Publishes that export beside the final report the person reads, unless the
+# configured scope is off or the run produced no structured final synthesis.
+publish_findings_export() {
+    [[ "$FINDINGS_EXPORT_SCOPE" != off ]] || return 0
+    [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] || return 0
+    [[ -n "$FINAL_FINDINGS_EXPORT_OUTPUT" && -s "$FINAL_FINDINGS_OUTPUT" ]] || return 0
+    local export_temp run
+    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" | tail -n 1)
+    new_temp_file 'findings-export'; export_temp=$NEW_TEMP_FILE
+    render_findings_export "$FINAL_FINDINGS_OUTPUT" "$run" "$FINDINGS_EXPORT_SCOPE" >"$export_temp" \
+        || die "Could not render the findings export from ${FINAL_FINDINGS_OUTPUT}"
+    assert_new_target "$FINAL_FINDINGS_EXPORT_OUTPUT"
+    mv -- "$export_temp" "$FINAL_FINDINGS_EXPORT_OUTPUT"
+}
+
+# Locates the freshest published final synthesis for a pull request and renders
+# it. Names carry their run timestamp, and an artifact-only rerun sorts after the
+# run it re-synthesized, so the last name is the freshest.
+export_review_findings() {
+    local scope=$1
+    local slug search_root candidate selected='' run
+
+    slug=${GITHUB_REPOSITORY//\//-}
+    slug=${slug,,}
+    search_root="${REVIEWS_ROOT}/${slug}"
+    [[ -d "$search_root" && ! -L "$search_root" ]] \
+        || die "No reviews have been stored for ${GITHUB_REPOSITORY} under ${REVIEWS_ROOT}"
+
+    while IFS= read -r candidate; do
+        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+        if [[ -n "$RUN_SELECTOR" && "${candidate##*/}" != *"-${RUN_SELECTOR}-"* ]]; then
+            continue
+        fi
+        selected=$candidate
+    done < <(find -P "$search_root" -type f \
+        \( -name "${PR_NUMBER}-*-final-findings.json" -o -name "${PR_NUMBER}-*-final-rerun-*-findings.json" \) | sort)
+
+    if [[ -z "$selected" ]]; then
+        if [[ -n "$RUN_SELECTOR" ]]; then
+            die "Run ${RUN_SELECTOR} of PR #${PR_NUMBER} published no structured final synthesis"
+        fi
+        die "PR #${PR_NUMBER} has no completed structured final synthesis; findings requires reporting.finding_contract.final = ndjson-v1"
+    fi
+    jq -e '.findings | type == "array"' "$selected" >/dev/null 2>&1 \
+        || die "Final findings artifact is unreadable: ${selected}"
+
+    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${selected##*/}" | tail -n 1)
+    render_findings_export "$selected" "$run" "$scope"
 }
 
 show_version() {
@@ -613,7 +639,8 @@ load_config() {
         (if has("reporting") then
             (.reporting |
                 type == "object" and
-                ((keys - ["comparison_sections", "dispute_resolution", "execute_measurements", "finding_contract", "include_comparison_sections"]) | length == 0) and
+                ((keys - ["comparison_sections", "dispute_resolution", "execute_measurements", "finding_contract", "findings_export", "include_comparison_sections"]) | length == 0) and
+                (if has("findings_export") then (.findings_export | type == "string" and IN("confirmed", "uncertain", "all", "off")) else true end) and
                 (if has("dispute_resolution") then (.dispute_resolution | type == "boolean") else true end) and
                 (if has("execute_measurements") then (.execute_measurements | type == "boolean") else true end) and
                 (if has("include_comparison_sections") then (.include_comparison_sections | type == "boolean") else true end) and
@@ -816,6 +843,7 @@ load_config() {
         [[ "$FINAL_COMPARISON_MODE" != inline ]] \
             || die 'Structured final synthesis requires reporting.comparison_sections.final=none or standalone'
     fi
+    FINDINGS_EXPORT_SCOPE=$(jq -r '.reporting.findings_export // "confirmed"' "$CONFIG_FILE")
     DISPUTE_RESOLUTION_ENABLED=$(jq -r '.reporting.dispute_resolution // false' "$CONFIG_FILE")
     if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
         [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
@@ -2738,6 +2766,7 @@ show_configuration() {
     printf 'Primary finding contract: %s\n' "$PRIMARY_FINDING_CONTRACT_MODE"
     printf 'Cross-review finding contract: %s\n' "$CROSS_FINDING_CONTRACT_MODE"
     printf 'Final finding contract: %s\n' "$FINAL_FINDING_CONTRACT_MODE"
+    printf 'Findings export: %s\n' "$FINDINGS_EXPORT_SCOPE"
     printf 'Dispute resolution: %s\n' "$(if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then printf enabled; else printf disabled; fi)"
     printf 'Measurement execution: %s\n' "$(if [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]]; then printf enabled; else printf disabled; fi)"
     printf 'Cross-review prompt: %s%s\n' "$CROSS_PROMPT_SOURCE" \
@@ -7329,6 +7358,7 @@ create_full_manifest() {
         --arg final "${FINAL_REPORT##*/}" \
         --arg final_raw "${FINAL_RAW_OUTPUT##*/}" \
         --arg final_findings "${FINAL_FINDINGS_OUTPUT##*/}" \
+        --arg final_findings_export "${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" \
         --arg final_resolutions "${FINAL_RESOLUTIONS_OUTPUT##*/}" \
         --arg final_diagnostics "${FINAL_DIAGNOSTICS_OUTPUT##*/}" \
         --argjson dispute_resolution "$DISPUTE_RESOLUTION_ENABLED" \
@@ -7412,6 +7442,7 @@ create_full_manifest() {
                 final: $final,
                 final_raw: (if $final_finding_contract == "ndjson-v1" then $final_raw else null end),
                 final_findings: (if $final_finding_contract == "ndjson-v1" then $final_findings else null end),
+                final_findings_export: (if $final_findings_export == "" then null else $final_findings_export end),
                 final_resolutions: (if $final_finding_contract == "ndjson-v1" and $dispute_resolution then $final_resolutions else null end),
                 final_diagnostics: (if $final_finding_contract == "ndjson-v1" then $final_diagnostics else null end),
                 final_anchor_validation: $anchor_validation,
@@ -7944,6 +7975,7 @@ run_artifact_only_final_rerun() {
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${rerun_stem}-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${rerun_stem}-findings.json"
+        FINAL_FINDINGS_EXPORT_OUTPUT="${REPORT_DIR}/${rerun_stem}-fix-list.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${rerun_stem}-resolutions.json"
         FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${rerun_stem}-diagnostics.json"
     fi
@@ -8343,6 +8375,7 @@ create_rerun_manifest() {
         --arg output "${FINAL_REPORT##*/}" \
         --arg final_raw "${FINAL_RAW_OUTPUT##*/}" \
         --arg final_findings "${FINAL_FINDINGS_OUTPUT##*/}" \
+        --arg final_findings_export "${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" \
         --arg final_resolutions "${FINAL_RESOLUTIONS_OUTPUT##*/}" \
         --arg final_diagnostics "${FINAL_DIAGNOSTICS_OUTPUT##*/}" \
         --argjson dispute_resolution "$DISPUTE_RESOLUTION_ENABLED" \
@@ -8415,6 +8448,7 @@ create_rerun_manifest() {
             artifact: $output,
             final_raw: (if $final_finding_contract == "ndjson-v1" then $final_raw else null end),
             final_findings: (if $final_finding_contract == "ndjson-v1" then $final_findings else null end),
+            final_findings_export: (if $final_findings_export == "" then null else $final_findings_export end),
             final_resolutions: (if $final_finding_contract == "ndjson-v1" and $dispute_resolution then $final_resolutions else null end),
             final_diagnostics: (if $final_finding_contract == "ndjson-v1" then $final_diagnostics else null end),
             anchor_validation: $anchor_validation,
@@ -9457,6 +9491,7 @@ run_final_synthesis_attempt() {
     fi
     assert_new_target "$FINAL_REPORT"
     mv -- "$final_output" "$FINAL_REPORT"
+    publish_findings_export
     assert_new_target "$FINAL_ANCHOR_VALIDATION_OUTPUT"
     mv -- "$anchor_validation" "$FINAL_ANCHOR_VALIDATION_OUTPUT"
     persist_usage_summary "$final_usage_json" "$FINAL_USAGE_OUTPUT"
@@ -10018,6 +10053,7 @@ if [[ "$RESUME_RUN" == true ]]; then
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
+        FINAL_FINDINGS_EXPORT_OUTPUT="${REPORT_DIR}/${REPORT_STEM}-fix-list.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
         FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-diagnostics.json"
         MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO
@@ -10152,6 +10188,7 @@ if [[ "$RERUN_FINAL" == true ]]; then
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         FINAL_RAW_OUTPUT="${WORK_DIR}/${rerun_stem}-raw.ndjson"
         FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${rerun_stem}-findings.json"
+        FINAL_FINDINGS_EXPORT_OUTPUT="${REPORT_DIR}/${rerun_stem}-fix-list.json"
         FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${rerun_stem}-resolutions.json"
         FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${rerun_stem}-diagnostics.json"
     fi
@@ -10229,6 +10266,7 @@ FINAL_ANCHOR_VALIDATION_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-anchor-validati
 if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
     FINAL_RAW_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-raw.ndjson"
     FINAL_FINDINGS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-findings.json"
+    FINAL_FINDINGS_EXPORT_OUTPUT="${REPORT_DIR}/${REPORT_STEM}-fix-list.json"
     FINAL_RESOLUTIONS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-resolutions.json"
     FINAL_DIAGNOSTICS_OUTPUT="${WORK_DIR}/${REPORT_STEM}-final-diagnostics.json"
     MEASUREMENT_WORKING_DIRECTORY=$REVIEW_REPO

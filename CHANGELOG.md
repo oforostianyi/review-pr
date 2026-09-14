@@ -6,6 +6,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- A structured run now publishes its actionable findings as
+  `<review-id>-<timestamp>-fix-list.json` beside the final report, so the copy meant for a fixing
+  agent travels with the review. `reporting.findings_export` selects `confirmed` (the default),
+  `uncertain`, `all`, or `off`; a run whose final contract is `markdown` publishes nothing. The
+  manifest records the file as `artifacts.final_findings_export`.
 - `review-pr findings <pull-request>` prints the actionable part of a finished structured review as
   JSON, for an agent that will do the fixing: id, classification, severity, category, exact anchor,
   title, claim, failure scenario, recommendation, and verification limitations. Confirmed findings

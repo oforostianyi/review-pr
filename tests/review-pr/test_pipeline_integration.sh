@@ -693,7 +693,7 @@ run_ndjson_cross_case() {
     local checkout
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
-    local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt
+    local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt findings_export
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -802,6 +802,17 @@ run_ndjson_cross_case() {
     assert_file_exists "$final_raw" 'structured final synthesis preserves exact raw NDJSON'
     assert_file_exists "$final_findings" 'structured final synthesis publishes canonical findings JSON'
     assert_file_exists "$final_report" 'structured final synthesis publishes deterministic Markdown in the report root'
+    # The fixing agent's copy is published beside the report a person reads.
+    findings_export="$(report_root_of "$work_dir")/${stem}-fix-list.json"
+    assert_file_exists "$findings_export" 'a structured run publishes the findings export beside the final report'
+    assert_eq 'confirmed' "$(jq -r '.include' "$findings_export")" \
+        'the published export carries the configured scope'
+    assert_eq "$timestamp" "$(jq -r '.run' "$findings_export")" \
+        'the published export names the run it came from'
+    assert_eq 'CONFIRMED' "$(jq -r '[.findings[].classification] | unique | join(",")' "$findings_export")" \
+        'only confirmed findings are published by default'
+    assert_eq "${stem}-fix-list.json" "$(jq -r '.artifacts.final_findings_export' "$manifest")" \
+        'the manifest records the findings export'
     assert_eq final-synthesis "$(jq -r '.phase' "$final_findings")" \
         'final sidecar records its phase'
     assert_eq 'alpha:alpha:F-001,beta:beta:F-001' "$(jq -r '[.findings[0].primary_refs[] | .agent + ":" + .source_id] | join(",")' "$final_findings")" \
@@ -904,6 +915,8 @@ run_dispute_resolution_case() {
     export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture dispute resolution.'
     unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
     write_three_agent_config "$config" "$checkout" "$reviews"
+    jq '.reporting.findings_export = "off"' "$config" >"$config.tmp"
+    mv -- "$config.tmp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
     printf 'cross-ndjson-rejected\n' >"$scenarios/gamma-cross-review"
 
@@ -920,6 +933,8 @@ run_dispute_resolution_case() {
     assert_eq "${stem}-final-resolutions.json" "$(jq -r '.artifacts.final_resolutions' "$manifest")" 'the manifest records the resolutions sidecar'
     assert_eq 'true' "$(jq -r '.reporting.dispute_resolution' "$manifest")" 'the manifest records the enabled feature'
     assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" '<!-- review-pr:dispute-resolutions -->' 'the final report renders the dispute table'
+    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-fix-list.json" \
+        'reporting.findings_export = off publishes no export'
 }
 
 run_cross_continuation_case() {

@@ -132,6 +132,12 @@
             }
           }
         },
+        "findings_export": {
+          "type": "string",
+          "enum": ["confirmed", "uncertain", "all", "off"],
+          "default": "confirmed",
+          "description": "Publish the actionable findings of a structured final synthesis as <review-id>-<timestamp>-fix-list.json beside the final report, for an agent that will do the fixing. off publishes nothing. Runs whose final contract is markdown publish nothing either."
+        },
         "dispute_resolution": {
           "type": "boolean",
           "default": false,

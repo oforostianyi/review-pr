@@ -672,6 +672,7 @@ Each repository gets its own stable directory under the configured external `rev
 ```text
 $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
 ├── <review-id>-<timestamp>-final.md
+├── <review-id>-<timestamp>-fix-list.json        # unless reporting.findings_export = off
 ├── <review-id>-<timestamp>-comparison.md
 ├── <review-id>-<source-timestamp>-final-rerun-<timestamp>.md
 └── work/

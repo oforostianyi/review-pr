@@ -220,4 +220,28 @@ if "$repo_root/bin/review-pr" --config "$measure_without_disputes" --show-config
 fi
 pass 'measurement execution is rejected without dispute_resolution'
 
+# The findings export is published beside the final report for a fixing agent.
+# It only makes sense for a structured final synthesis, and it can be turned off.
+assert_file_contains "$show_output" 'Findings export: confirmed' \
+    'the findings export defaults to the confirmed set'
+export_config="$test_root/findings-export.json"
+export_output="$test_root/findings-export-show-config.txt"
+jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+    .reporting.comparison_sections = {cross_review: "none", final: "none"} |
+    .reporting.findings_export = "all"' "$config_file" >"$export_config"
+"$repo_root/bin/review-pr" --config "$export_config" --show-config >"$export_output"
+assert_file_contains "$export_output" 'Findings export: all' \
+    'the exported scope is reported by --show-config'
+
+export_off="$test_root/findings-export-off.json"
+jq '.reporting.findings_export = "off"' "$config_file" >"$export_off"
+"$repo_root/bin/review-pr" --config "$export_off" --show-config >"$test_root/findings-export-off.txt"
+assert_file_contains "$test_root/findings-export-off.txt" 'Findings export: off' \
+    'the findings export can be turned off'
+
+export_invalid="$test_root/findings-export-invalid.json"
+jq '.reporting.findings_export = "everything"' "$config_file" >"$export_invalid"
+assert_false 'an unknown findings export scope is rejected' \
+    "$repo_root/bin/review-pr" --config "$export_invalid" --show-config
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
