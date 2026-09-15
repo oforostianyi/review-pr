@@ -8311,6 +8311,7 @@ load_legacy_cross_run() {
     local filename
     local manifest_agent
     local prefix
+    local run_work_dir
     local -a cross_files=()
     declare -A seen_agents=()
 
@@ -8318,6 +8319,14 @@ load_legacy_cross_run() {
     SOURCE_MANIFEST=""
     REPORT_STEM="${REVIEW_ID}-${SOURCE_TIMESTAMP}"
     prefix="${REPORT_STEM}-cross-"
+
+    # A forced rerun deliberately ignores the manifest, so nothing else resolves
+    # the layout of the selected run; a run kept in its own work directory would
+    # otherwise be searched for in the flat one.
+    run_work_dir=$(resolve_run_work_dir "$SOURCE_TIMESTAMP")
+    if [[ -d "$run_work_dir" && ! -L "$run_work_dir" ]]; then
+        WORK_DIR=$run_work_dir
+    fi
 
     shopt -s nullglob
     cross_files=("${WORK_DIR}/${prefix}"*.md)

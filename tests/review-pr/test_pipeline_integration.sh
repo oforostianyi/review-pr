@@ -121,6 +121,7 @@ run_full_success_case() {
     local primary_alpha_prompt
     local alpha_cross_prompt
     local rerun_final_prompt
+    local forced_rerun_status
     local legacy_manifest_temp
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
@@ -225,6 +226,17 @@ run_full_success_case() {
     rerun_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sed -n '1p')
     [[ -n "$rerun_manifest" ]] || fail 'artifact-only final rerun did not create a separate manifest'
     pass 'artifact-only final rerun creates a separate manifest'
+
+    forced_rerun_status=0
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_FAKE_GH_LOG="$gh_log" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" --rerun-final --force --run "$timestamp" 123 \
+        >"$case_dir/forced-rerun-output.txt" 2>"$case_dir/forced-rerun-stderr.log" || forced_rerun_status=$?
+    assert_eq 0 "$forced_rerun_status" \
+        'a forced final rerun finds the cross-reviews of a run kept in its own work directory'
+    assert_false 'a forced final rerun does not report the cross-reviews as missing' \
+        grep -q 'needs at least two completed cross-review reports' "$case_dir/forced-rerun-stderr.log"
 
     legacy_manifest_temp="${manifest}.legacy.tmp"
     jq 'del(.artifacts.repository_facts, .artifacts.changed_lines)' "$manifest" >"$legacy_manifest_temp"
