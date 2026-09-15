@@ -709,6 +709,7 @@ run_ndjson_cross_case() {
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
     local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt findings_export
+    local forced_rerun_status forced_rerun_manifest
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -896,6 +897,22 @@ run_ndjson_cross_case() {
     pass 'structured final rerun creates a separate manifest'
     assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.final' "$rerun_manifest")" \
         'structured final rerun records its contract'
+
+    sleep 1
+    forced_rerun_status=0
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" --rerun-final --force --run "$timestamp" 123 \
+        >"$case_dir/forced-rerun-output.txt" 2>"$case_dir/forced-rerun-stderr.log" || forced_rerun_status=$?
+    assert_eq 0 "$forced_rerun_status" \
+        'a forced final rerun of a structured run completes'
+    forced_rerun_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sort | tail -n 1)
+    assert_eq ndjson-v1 "$(jq -r '.reporting.finding_contract.final' "$forced_rerun_manifest")" \
+        'a forced final rerun keeps the configured structured contract'
+    assert_eq 'alpha,beta' \
+        "$(jq -r '.inputs.cross_review_findings | keys | join(",")' "$forced_rerun_manifest")" \
+        'a forced final rerun records the canonical cross-review sidecars it used'
     assert_file_exists "$work_dir/$(jq -r '.final_raw' "$rerun_manifest")" \
         'structured final rerun preserves its own raw NDJSON'
     assert_file_exists "$work_dir/$(jq -r '.final_findings' "$rerun_manifest")" \

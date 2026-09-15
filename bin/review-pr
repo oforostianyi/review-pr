@@ -8312,6 +8312,8 @@ load_legacy_cross_run() {
     local manifest_agent
     local prefix
     local run_work_dir
+    local findings_file
+    local raw_file
     local -a cross_files=()
     declare -A seen_agents=()
 
@@ -8349,6 +8351,19 @@ load_legacy_cross_run() {
         seen_agents[$manifest_agent]=1
         REVIEW_AGENTS+=("$manifest_agent")
         CROSS_OUTPUTS[$manifest_agent]=$cross_file
+        if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+            # The rendered report is only the readable face of a structured
+            # cross-review; the synthesis and the rerun manifest both work from
+            # the canonical sidecar that was published next to it.
+            findings_file="${cross_file%.md}-findings.json"
+            [[ -f "$findings_file" && -s "$findings_file" && ! -L "$findings_file" ]] \
+                || die "Canonical cross-review artifact is missing or unsafe: ${findings_file}"
+            CROSS_FINDINGS_OUTPUTS[$manifest_agent]=$findings_file
+            raw_file="${cross_file%.md}-raw.ndjson"
+            if [[ -f "$raw_file" && -s "$raw_file" && ! -L "$raw_file" ]]; then
+                CROSS_RAW_OUTPUTS[$manifest_agent]=$raw_file
+            fi
+        fi
     done
 
     log "WARNING: forced legacy rerun has no source manifest; using current fetched diff ${BASE_SHA}...${HEAD_SHA}"
