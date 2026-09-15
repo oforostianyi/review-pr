@@ -4,6 +4,25 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A final synthesis or cross-review that mislabels the agent key of a record it cites is now
+  corrected instead of being thrown away, when the cited `source_id` belongs to exactly one supplied
+  record. On PR 28812 the synthesizer wrote `cross-review-pi` and `cross-review-claude` for records
+  owned by claude, codex, and pi; the bounded repair then produced the right pairs and was rejected,
+  because the repair may not change `source_refs`, and the run paid a 45-minute retry for a name it
+  could derive. An unknown or ambiguous `source_id` is still a provenance failure and is never
+  guessed at, and the correction is logged.
+- The three contracts no longer describe `source_refs` with a placeholder that reads like a value.
+  `{"agent":"cross-review-agent-key",...}` invited exactly the output above; the contracts now say to
+  copy `record_ref` verbatim and name the failure mode explicitly.
+- `--rerun-final --force` works again on a structured run. It resolves the run's own
+  `work/<timestamp>/` directory, which only the manifest used to supply and which a forced rerun
+  deliberately skips, and it loads the canonical cross-review sidecars the synthesis needs; without
+  them the run died on an unbound variable before reaching the model. This is the only way to
+  re-synthesise a run whose pull-request head has moved.
+- `packaging/release-dry-run.sh` is executable, like the other packaging scripts.
+
 ## [1.17.0] - 2026-09-15
 
 ### Added

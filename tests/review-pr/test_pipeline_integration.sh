@@ -709,7 +709,7 @@ run_ndjson_cross_case() {
     local config="$case_dir/config.json"
     local config_temp="$case_dir/config.tmp.json"
     local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt findings_export
-    local forced_rerun_status forced_rerun_manifest
+    local forced_rerun_status forced_rerun_manifest mislabelled_status mislabelled_manifest
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -913,6 +913,24 @@ run_ndjson_cross_case() {
     assert_eq 'alpha,beta' \
         "$(jq -r '.inputs.cross_review_findings | keys | join(",")' "$forced_rerun_manifest")" \
         'a forced final rerun records the canonical cross-review sidecars it used'
+
+    sleep 1
+    printf '%s\n' final-mislabelled-agent >"$scenarios/alpha-final-synthesis"
+    mislabelled_status=0
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" --rerun-final --run "$timestamp" 123 \
+        >"$case_dir/mislabelled-output.txt" 2>"$case_dir/mislabelled-stderr.log" || mislabelled_status=$?
+    assert_eq 0 "$mislabelled_status" \
+        'a synthesis that mislabels the agent key of a known source id still completes'
+    mislabelled_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sort | tail -n 1)
+    assert_eq 'alpha beta' \
+        "$(jq -r '[.findings[].source_refs[].agent] | unique | join(" ")' "$work_dir/$(jq -r '.final_findings' "$mislabelled_manifest")")" \
+        'the canonical sidecar carries the corrected owners, not the mislabelled keys'
+    assert_file_contains "$case_dir/mislabelled-stderr.log" 'Corrected mislabelled source_refs agent keys' \
+        'the run says that it corrected the agent keys'
     assert_file_exists "$work_dir/$(jq -r '.final_raw' "$rerun_manifest")" \
         'structured final rerun preserves its own raw NDJSON'
     assert_file_exists "$work_dir/$(jq -r '.final_findings' "$rerun_manifest")" \

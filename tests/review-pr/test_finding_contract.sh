@@ -522,6 +522,32 @@ jq '.[0].source_refs[0].source_id = "alpha:C-999"' "$final_records" >"$final_mis
 assert_false 'final synthesis rejects missing and unknown cross-review provenance' \
     validate_final_ndjson_records "$final_missing_ref" "$test_root/final-missing-canonical.json" "$final_expected_refs"
 
+# A synthesizer that writes the contract's placeholder wording into the agent key
+# ("cross-review-alpha" for "alpha") names a record that exists under exactly one
+# owner. Correcting it is arithmetic on the supplied refs, not a decision.
+final_prefixed_agent="$test_root/final-prefixed-agent.json"
+final_normalized_agent="$test_root/final-normalized-agent.json"
+jq '.[0].source_refs[0].agent = "cross-review-alpha" | .[0].contributing_agents = ["cross-review-alpha"]' \
+    "$final_records" >"$final_prefixed_agent"
+assert_false 'a mislabelled cross-review agent key fails validation untouched' \
+    validate_final_ndjson_records "$final_prefixed_agent" "$test_root/final-prefixed-canonical.json" "$final_expected_refs"
+assert_true 'an unambiguous source id repairs its agent key' \
+    normalize_ndjson_source_ref_agents "$final_prefixed_agent" "$final_expected_refs" "$final_normalized_agent"
+assert_eq 'alpha' "$(jq -r '.[0].source_refs[0].agent' "$final_normalized_agent")" \
+    'the agent key is corrected to the single owner of that source id'
+assert_eq 'alpha' "$(jq -r '.[0].contributing_agents | join(",")' "$final_normalized_agent")" \
+    'contributing_agents follows the corrected source refs'
+assert_true 'the corrected stream then passes validation' \
+    validate_final_ndjson_records "$final_normalized_agent" "$test_root/final-normalized-canonical.json" "$final_expected_refs"
+
+final_unknown_id="$test_root/final-unknown-id.json"
+final_unknown_normalized="$test_root/final-unknown-normalized.json"
+jq '.[0].source_refs[0].source_id = "alpha:C-999"' "$final_records" >"$final_unknown_id"
+assert_true 'normalization runs over a stream it cannot repair' \
+    normalize_ndjson_source_ref_agents "$final_unknown_id" "$final_expected_refs" "$final_unknown_normalized"
+assert_eq 'alpha:C-999' "$(jq -r '.[0].source_refs[0].source_id' "$final_unknown_normalized")" \
+    'an unknown source id is left alone rather than guessed at'
+
 final_bad_rejected_flag="$test_root/final-bad-rejected-flag.json"
 jq '.[0].include_in_rejected_summary = true' "$final_records" >"$final_bad_rejected_flag"
 assert_false 'only rejected findings may enter the important-rejections summary' \

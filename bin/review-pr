@@ -3137,6 +3137,60 @@ process_primary_ndjson_output() {
     PRIMARY_FINDINGS_OUTPUTS[$agent]=$findings_target
 }
 
+# A reviewer that mislabels the agent key of a record it cites — writing the
+# contract's placeholder wording, or simply the wrong reviewer — still names a
+# source_id. When exactly one supplied record carries that source_id, its owner
+# is the only possible answer, so the orchestrator corrects the key itself
+# instead of failing the whole phase over a name it can derive. An unknown or
+# ambiguous source_id is left untouched: that is a real provenance error.
+normalize_ndjson_source_ref_agents() {
+    local records_file=$1
+    local expected_refs_file=$2
+    local output_file=$3
+
+    jq --slurpfile expected_refs "$expected_refs_file" '
+        ($expected_refs[0] | group_by(.agent)
+            | map({key: .[0].agent,
+                   value: (map(.source_id) | map({key: ., value: true}) | from_entries)})
+            | from_entries) as $known
+        | ($expected_refs[0] | group_by(.source_id)
+            | map(select((map(.agent) | unique | length) == 1))
+            | map({key: .[0].source_id, value: .[0].agent})
+            | from_entries) as $owner
+        | map(
+            if (.record // "finding") == "finding" and (.source_refs | type) == "array"
+            then
+                ((.source_refs | map(.agent) | unique)) as $before
+                | .source_refs = (.source_refs | map(
+                    if ((($known[.agent] // {})[.source_id]) // false) then .
+                    elif ($owner[.source_id] // null) != null then .agent = $owner[.source_id]
+                    else . end))
+                | (if (.contributing_agents | type) == "array"
+                       and (.contributing_agents | unique) == $before
+                   then .contributing_agents = (.source_refs | map(.agent) | unique)
+                   else . end)
+            else . end)
+    ' "$records_file" >"$output_file"
+}
+
+# Applies the correction in place and records that it happened; a phase that
+# needed it is worth seeing in the log even though it went on to succeed.
+repair_ndjson_source_ref_agents() {
+    local phase=$1
+    local agent=$2
+    local records_file=$3
+    local expected_refs_file=$4
+    local repaired_file
+
+    [[ -s "$records_file" && -s "$expected_refs_file" ]] || return 0
+    new_temp_file "${phase}${agent:+-$agent}-source-ref-agents"; repaired_file=$NEW_TEMP_FILE
+    normalize_ndjson_source_ref_agents "$records_file" "$expected_refs_file" "$repaired_file" || return 0
+    [[ -s "$repaired_file" ]] || return 0
+    cmp -s "$records_file" "$repaired_file" && return 0
+    cp -- "$repaired_file" "$records_file"
+    activity_log "Corrected mislabelled source_refs agent keys in the ${phase} stream${agent:+ from ${agent}}"
+}
+
 build_cross_expected_refs() {
     local reviewer=$1
     local output_file=$2
@@ -3380,6 +3434,7 @@ process_cross_ndjson_output() {
         return 1
     }
     mv -- "$records_array_file" "$records_file"
+    repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
     if ! validate_cross_ndjson_records "$records_file" "$canonical_file" "$agent" "$expected_refs_file"; then
         detail=$(describe_ndjson_validation_failure cross "$records_file" "$agent" "$expected_refs_file")
         FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
@@ -4335,6 +4390,7 @@ process_final_ndjson_output() {
     # the detected disputes, not as findings.
     jq '[.[] | select(.record == "resolution")]' "$records_array_file" >"$resolutions_file"
     jq '[.[] | select(.record != "resolution")]' "$records_array_file" >"$records_file"
+    repair_ndjson_source_ref_agents final '' "$records_file" "$expected_refs_file"
     if [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] && (( $(jq 'length' "$resolutions_file") > 0 )); then
         FINDING_CONTRACT_FAILURE_REASON=unexpected_resolution_records
         return 1
@@ -5290,7 +5346,7 @@ EOF
         output_contract_block=$(cat <<'EOF'
 Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
 
-Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of {"agent":"input-agent-key","source_id":"input-source-id"}. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
+Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of objects with exactly the keys agent and source_id, each one copied verbatim from the record_ref of a supplied input finding. Never build the pair yourself and never decorate either value: an agent key is exactly what record_ref says, such as claude, never a phrase like cross-review-claude. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
 
 - record must be "finding", schema_version 1, and source_id unique within this cross-review.
 - Every supplied primary record carries record_ref, the exact {"agent":...,"source_id":...} object to copy into source_refs when you classify it. Copy it verbatim; never pair an id with an agent key yourself.
@@ -5488,7 +5544,7 @@ Output contract: ndjson-v1. This orchestrator contract overrides every Markdown 
 Classify every supplied canonical cross-review finding. Each output finding has exactly these keys: record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary.
 
 - record must be "finding", schema_version 1, and source_id unique within this synthesis.
-- source_refs is a non-empty unique array of {"agent":"cross-review-agent-key","source_id":"cross-review-source-id"}. Every supplied cross-review agent/source_id pair must appear in at least one record; no unknown pair is allowed. Every supplied cross-review record carries record_ref, that exact object; copy it verbatim. Its primary_provenance names the upstream primary finding and is never the pair to cite.
+- source_refs is a non-empty unique array of objects with exactly the keys agent and source_id. Every supplied cross-review record carries record_ref, that exact object; copy it verbatim and never assemble or decorate the pair yourself: an agent key is exactly what record_ref says, such as claude, never a phrase like cross-review-claude. Every supplied cross-review agent/source_id pair must appear in at least one record; no unknown pair is allowed. Its primary_provenance names the upstream primary finding and is never the pair to cite.
 - Merge genuine duplicates by retaining all source_refs. Split a compound claim only when needed for an atomic decision; a source ref may then appear in multiple records. Never add a source-free finding.
 - classification must be exactly CONFIRMED, REJECTED, or UNCERTAIN. CONFIRMED requires severity P0, P1, P2, or P3. REJECTED and UNCERTAIN require severity null.
 - contributing_agents must equal the unique cross-review agent keys in source_refs. The orchestrator derives primary provenance; do not invent or restate it.

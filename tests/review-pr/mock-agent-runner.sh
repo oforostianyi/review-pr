@@ -481,6 +481,13 @@ case "$behavior" in
         emit_valid_ndjson_final not_applicable source null general_engineering '' CONFIRMED true severity
         write_usage null 57
         ;;
+    final-mislabelled-agent)
+        emit_valid_ndjson_final | jq -c 'if .record == "finding" then
+                .source_refs |= map(.agent = "cross-review-" + .agent)
+                | .contributing_agents |= map("cross-review-" + .)
+            else . end'
+        write_usage null 57
+        ;;
     final-diagnostic-only)
         emit_valid_ndjson_final | jq -c 'if .record == "finding" then .evidence = ["CI check phpunit failed", "Pipeline status: pending"] else . end'
         write_usage null 57

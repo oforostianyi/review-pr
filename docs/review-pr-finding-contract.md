@@ -68,8 +68,11 @@ prompt presents the upstream primary refs of each cross-review record under `pri
 they cannot be mistaken for the refs to cover.
 
 Cross-review records additionally contain `source_refs`, a non-empty array of `{agent, source_id}`
-objects. The agent key makes source-local IDs unambiguous across reports. Every supplied source ref
-must be covered and unknown refs are rejected. A compound source claim may become multiple records
+objects, each copied verbatim from the `record_ref` of a supplied record. The agent key makes
+source-local IDs unambiguous across reports. Every supplied source ref must be covered and unknown
+refs are rejected, with one mechanical exception: when a cited `source_id` belongs to exactly one
+supplied record, the orchestrator corrects a mislabelled agent key to that owner before validating,
+and says so in the log. An unknown or ambiguous `source_id` is never guessed at. A compound source claim may become multiple records
 so each classification remains atomic. Consolidation may merge duplicate records, but it retains
 every source ref and contributing agent.
 
