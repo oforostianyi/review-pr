@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-09-15
+
 ### Added
 
 - Usage summaries now report what a phase actually cost. A CLI that reports usage per request —
