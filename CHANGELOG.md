@@ -4,6 +4,24 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Usage summaries now report what a phase actually cost. A CLI that reports usage per request —
+  Pi does — was read for its last request only, so a ten-request synthesis was recorded at a tenth
+  of its size: on PR 28816 the file said 77318 tokens where the conversation billed 792393. Those
+  per-request figures are summed now, and two fields say what the totals are made of: `requests`,
+  the number of model calls, and `final_context_tokens`, the last request's context, which is what
+  bounds the model's window. A CLI that reports once is unchanged.
+- Usage summaries count `context_compactions`, and a run whose context overflowed says so in its
+  diagnostics. After a compaction the agent continues from a summary of what it read rather than
+  from what it read, which is worth knowing when weighing its findings. Measured on a real primary
+  review, the context climbed to 102445 tokens over 80 requests before Pi compacted it back to
+  37780. The count is `null` for a CLI that does not report compaction, never a guessed zero.
+- The status column names the attempt on screen. A retry used to look exactly like a first attempt,
+  so `RUNNING` becomes `RETRYING[2]` while the second attempt runs and while it waits to start; the
+  spinner still marks the live row. The column took three characters from `Agent` and `Tokens`, both
+  of which had slack; `Elapsed` did not, since a run can pass an hour.
+
 ### Fixed
 
 - A final synthesis or cross-review that mislabels the agent key of a record it cites is now

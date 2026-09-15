@@ -163,6 +163,35 @@ extract_token_usage \
 assert_eq '2300' "$(jq -r '.reported_total_tokens' "$usage_output")" \
     'usage totals use non-overlapping input/output/cache components'
 
+# A provider that reports usage per request, not cumulatively, is billed for the
+# whole conversation: every turn resends the context. The summary must say what
+# the run actually costs, not what its last request happened to carry.
+pi_multi_usage="$test_root/usage-pi-multi.json"
+extract_token_usage \
+    "$test_dir/fixtures/usage-pi-multi-request.jsonl" \
+    "$test_root/usage-pi-multi.total" \
+    "$pi_multi_usage" \
+    pi \
+    'primary review' \
+    local-fixture \
+    ''
+assert_eq '6000' "$(jq -r '.input_tokens' "$pi_multi_usage")" \
+    'per-request input tokens are summed over the whole conversation'
+assert_eq '60' "$(jq -r '.output_tokens' "$pi_multi_usage")" \
+    'per-request output tokens are summed over the whole conversation'
+assert_eq '6' "$(jq -r '.reasoning_tokens' "$pi_multi_usage")" \
+    'reasoning tokens are summed as well'
+assert_eq '6060' "$(jq -r '.reported_total_tokens' "$pi_multi_usage")" \
+    'the reported total is the billed total, not the final context'
+assert_eq '3' "$(jq -r '.requests' "$pi_multi_usage")" \
+    'the number of model requests is recorded'
+assert_eq '3000' "$(jq -r '.final_context_tokens' "$pi_multi_usage")" \
+    'the last request context is kept separately, since it bounds the window'
+assert_eq 'stop' "$(jq -r '.stop_reason' "$pi_multi_usage")" \
+    'the stop reason still comes from the last assistant message'
+assert_eq '1' "$(jq -r '.context_compactions' "$pi_multi_usage")" \
+    'a context compaction is counted, since it means the window overflowed'
+
 pi_error_usage="$test_root/usage-pi-error.json"
 extract_token_usage \
     "$test_dir/fixtures/usage-pi-error.jsonl" \
@@ -178,6 +207,10 @@ assert_eq 'Connection error.' "$(jq -r '.error_message' "$pi_error_usage")" \
     'a failed Pi turn preserves the provider error message'
 assert_eq 'null' "$(jq -r '.error_message' "$usage_output")" \
     'a successful turn records no error message'
+assert_eq '0' "$(jq -r '.context_compactions' "$pi_error_usage")" \
+    'a conversation that never compacted reports zero, not unknown'
+assert_eq 'null' "$(jq -r '.context_compactions' "$usage_output")" \
+    'a CLI that does not report compaction leaves the count unknown'
 
 stale_manifest="$test_root/stale-manifest.json"
 jq -n '{schema_version: 1, run_type: "full", review_id: "123-fixture", pr_number: 123,

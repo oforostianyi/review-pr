@@ -199,6 +199,31 @@ assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt" | tr -d ' ')" 
 assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/frame.txt")" \
     'one frame draws the primary section title exactly once'
 
+# A retry looks exactly like a first attempt in the table unless the status says
+# otherwise, and the attempt number is the whole point of saying it.
+assert_eq 'RUNNING' "$(dashboard_attempt_status 1)" \
+    'a first attempt is plain RUNNING'
+assert_eq 'RETRYING[2]' "$(dashboard_attempt_status 2)" \
+    'a second attempt names itself a retry and its number'
+assert_eq 'RETRY[12]' "$(dashboard_attempt_status 12)" \
+    'a two-digit attempt uses the short form so it still fits the column'
+
+set_dashboard_status primary beta "$(dashboard_attempt_status 2)" 4242 "$(date +%s)" 0 '31m'
+render_dashboard_snapshot false 2>"$CASE_DIR/retry-frame.txt"
+assert_file_contains "$CASE_DIR/retry-frame.txt" 'RETRYING[2]' \
+    'the rendered table shows the retry and its attempt number'
+table_line_widths() {
+    local file=$1 line widths=()
+    while IFS= read -r line; do
+        if [[ "$line" == *'│'* || "$line" == *'─'* ]]; then
+            widths+=("${#line}")
+        fi
+    done <"$file"
+    printf '%s\n' "${widths[@]}" | sort -u | tr '\n' ' '
+}
+assert_eq '84 ' "$(table_line_widths "$CASE_DIR/retry-frame.txt")" \
+    'every table line keeps the same width once a retry status is shown'
+
 AGENT_LABELS[wide]='An unusually long agent label'
 AGENT_MODELS[wide]='provider/some-model'
 AGENT_EFFORTS[wide]=''

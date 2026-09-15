@@ -3844,7 +3844,7 @@ collect_orchestrator_diagnostics() {
         jq -r '[.artifacts.usage.primary // {}, .artifacts.usage.cross_review // {}] | .[] | to_entries[] | .value | strings' <<<"$manifest_json" 2>/dev/null |
         while IFS= read -r usage_path; do
             [[ -n "$usage_path" && -s "${WORK_DIR}/${usage_path}" ]] || continue
-            jq -c 'select(has("pi_guard")) | {agent, phase, pi_guard}' "${WORK_DIR}/${usage_path}" 2>/dev/null || true
+            jq -c 'select(has("pi_guard") or ((.context_compactions // 0) > 0)) | {agent, phase, pi_guard, context_compactions}' "${WORK_DIR}/${usage_path}" 2>/dev/null || true
         done | jq -s '.'
     )
     jq -n \
@@ -3885,7 +3885,8 @@ collect_orchestrator_diagnostics() {
             rec("measurement_skipped"; "finding"; "final"; null; (.measurement.skipped_reason // "unknown"); [.dispute_id])),
           ($usage[] | . as $u |
             (if ($u.pi_guard.duplicates_blocked // 0) > 0 then rec("pi_guard_duplicates_blocked"; "agent"; $u.phase; $u.agent; (($u.pi_guard.duplicates_blocked | tostring) + " identical tool calls blocked"); []) else empty end),
-            (if ($u.pi_guard.budget_blocked // 0) > 0 or ($u.pi_guard.terminated // false) then rec("pi_guard_budget_exhausted"; "agent"; $u.phase; $u.agent; (($u.pi_guard.budget_blocked | tostring) + " calls blocked after the budget" + (if ($u.pi_guard.terminated // false) then ", agent terminated" else "" end)); []) else empty end))
+            (if ($u.pi_guard.budget_blocked // 0) > 0 or ($u.pi_guard.terminated // false) then rec("pi_guard_budget_exhausted"; "agent"; $u.phase; $u.agent; (($u.pi_guard.budget_blocked | tostring) + " calls blocked after the budget" + (if ($u.pi_guard.terminated // false) then ", agent terminated" else "" end)); []) else empty end),
+            (if ($u.context_compactions // 0) > 0 then rec("context_compacted"; "agent"; $u.phase; $u.agent; (($u.context_compactions | tostring) + " context compaction(s); work after one rests on a summary, not on what was read"); []) else empty end))
         ] | unique_by(.type, .detail) | sort_by(.type, .detail)
     ' >"$output_file"
 }
@@ -4044,14 +4045,14 @@ render_final_findings_markdown() {
                              github_check_failed: "Перевірка CI не пройшла", github_check_cancelled: "Перевірку CI скасовано", github_check_pending: "Перевірка CI не завершена", github_check_skipped: "Перевірку CI пропущено",
                              changed_line_map_unavailable: "Карта змінених рядків недоступна", repository_facts_measurement_failed: "Факти репозиторію не виміряні",
                              agent_attempt_timeout: "Спроба агента перевищила час", agent_attempt_output_limit: "Спроба агента досягла ліміту виводу", agent_attempt_invalid_output: "Спроба агента дала недійсний вивід", agent_attempt_failed: "Спроба агента не вдалася",
-                             pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів",
+                             pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів", context_compacted: "Контекст стискався: вікно моделі переповнилось",
                              measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна"}
                         else
                             {github_review_threads_unavailable: "Review threads unavailable", github_review_threads_partial: "Review threads partial",
                              github_check_failed: "CI check failed", github_check_cancelled: "CI check cancelled", github_check_pending: "CI check pending", github_check_skipped: "CI check skipped",
                              changed_line_map_unavailable: "Changed-line map unavailable", repository_facts_measurement_failed: "Repository facts not measured",
                              agent_attempt_timeout: "Agent attempt timed out", agent_attempt_output_limit: "Agent attempt hit the output limit", agent_attempt_invalid_output: "Agent attempt produced invalid output", agent_attempt_failed: "Agent attempt failed",
-                             pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked",
+                             pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked", context_compacted: "Context was compacted: the model window overflowed",
                              measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable"}
                         end) as $labels | ($labels[.type] // .type);
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
@@ -5870,7 +5871,44 @@ extract_token_usage() {
             select(.type? == "message_end") |
             .message? |
             select(.role? == "assistant")] | last // null) as $assistant_message |
-        ([$response | .. | objects | .usage? | select(type == "object")] | last // null) as $usage |
+        ([$response[]? |
+            select(.type? == "message_end") |
+            .message? |
+            select(.role? == "assistant") |
+            .usage? |
+            select(type == "object")]) as $request_usages |
+        def request_sum($keys):
+            [$request_usages[] |
+                first($keys[] as $key | .[$key]? | select(type == "number" and . >= 0))] |
+            map(select(. != null)) |
+            if length == 0 then null else add end;
+        # A CLI that reports usage once reports the whole conversation; one that
+        # reports it per message reports only that request, and the provider
+        # bills every one of them, context resent and all. Sum those instead of
+        # reading the last one, or the summary understates the run by the number
+        # of turns it took.
+        (if ($request_usages | length) > 0 then
+            {
+                input: request_sum(["input_tokens", "input"]),
+                output: request_sum(["output_tokens", "output"]),
+                reasoning: request_sum(["reasoning_tokens", "reasoning", "thinking_tokens"]),
+                cacheRead: request_sum(["cache_read_input_tokens", "cacheRead", "cached_input_tokens"]),
+                cacheWrite: request_sum(["cache_creation_input_tokens", "cacheWrite"]),
+                totalTokens: request_sum(["total_tokens", "totalTokens", "total"])
+            }
+        else
+            ([$response | .. | objects | .usage? | select(type == "object")] | last // null)
+        end) as $usage |
+        # A compaction means the window overflowed and the agent continued from a
+        # summary of what it had read, not from what it read. That changes what
+        # its findings rest on, so it is worth counting.
+        ([$response[]? | select(.type? == "compaction_start")] | length) as $compactions |
+        ([$response[]? | select(.type? == "message_start" or .type? == "message_end" or .type? == "compaction_start")] | length) as $stream_events |
+        (if $stream_events > 0 then $compactions else null end) as $context_compactions |
+        (if ($request_usages | length) > 0 then ($request_usages | length) else null end) as $requests |
+        (if ($request_usages | length) > 0
+         then ($request_usages | last | first(["input_tokens", "input"][] as $key | .[$key]? | select(type == "number" and . >= 0)) // null)
+         else null end) as $final_context |
         def usage_number($keys):
             first($keys[] as $key | $usage[$key]? | select(type == "number" and . >= 0)) // null;
         if $usage == null then
@@ -5884,6 +5922,9 @@ extract_token_usage() {
                 available: false,
                 source: "not_reported_by_cli",
                 reported_total_tokens: null,
+                requests: $requests,
+                final_context_tokens: $final_context,
+                context_compactions: $context_compactions,
                 input_tokens: null,
                 output_tokens: null,
                 reasoning_tokens: null,
@@ -5912,6 +5953,9 @@ extract_token_usage() {
                 available: true,
                 source: "cli_structured_usage",
                 reported_total_tokens: (if $native_total != null then $native_total elif ($components | length) > 0 then ($components | add) else null end),
+                requests: $requests,
+                final_context_tokens: $final_context,
+                context_compactions: $context_compactions,
                 input_tokens: $input,
                 output_tokens: $output,
                 reasoning_tokens: $reasoning,
@@ -6558,6 +6602,22 @@ format_dashboard_elapsed() {
     fi
 }
 
+# A running retry is indistinguishable from a first attempt unless the status
+# says so, and knowing which attempt is on screen is the difference between
+# "this is slow" and "this is the second time it has been slow". The short form
+# keeps a two-digit attempt inside the status column.
+dashboard_attempt_status() {
+    local attempt=${1:-1}
+
+    if (( attempt <= 1 )); then
+        printf 'RUNNING'
+    elif (( attempt <= 9 )); then
+        printf 'RETRYING[%d]' "$attempt"
+    else
+        printf 'RETRY[%d]' "$attempt"
+    fi
+}
+
 dashboard_key() {
     printf '%s|%s' "$1" "$2"
 }
@@ -6771,7 +6831,7 @@ dashboard_status_color() {
     case "$1" in
         COMPLETE | LOADED) DASHBOARD_STATUS_COLOR=$'\033[32m' ;;
         RUNNING) DASHBOARD_STATUS_COLOR=$'\033[36m' ;;
-        QUEUED | RETRYING) DASHBOARD_STATUS_COLOR=$'\033[33m' ;;
+        QUEUED | RETRY*) DASHBOARD_STATUS_COLOR=$'\033[33m' ;;
         FAILED) DASHBOARD_STATUS_COLOR=$'\033[31;1m' ;;
         WAITING | SKIPPED) DASHBOARD_STATUS_COLOR=$'\033[2m' ;;
         *) DASHBOARD_STATUS_COLOR="" ;;
@@ -6835,9 +6895,9 @@ render_dashboard_snapshot() {
         if [[ "$section" != "$current_section" ]]; then
             if [[ -n "$current_section" ]]; then
                 if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-                    printf '\033[2K\r└───────────────────────────────┴────────────┴───────────┴──────────┴─────────┘\n' >&2
+                    printf '\033[2K\r└─────────────────────────────┴───────────────┴───────────┴──────────┴────────┘\n' >&2
                 else
-                    printf '\033[2K\r└───────────────────────────────┴────────────┴──────────┴─────────┘\n' >&2
+                    printf '\033[2K\r└─────────────────────────────┴───────────────┴──────────┴────────┘\n' >&2
                 fi
                 printf '\033[2K\r\n' >&2
             fi
@@ -6852,18 +6912,18 @@ render_dashboard_snapshot() {
                 "$separator" \
                 "$reset_color" >&2
             if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-                printf '\033[2K\r┌───────────────────────────────┬────────────┬───────────┬──────────┬─────────┐\n' >&2
-                printf '\033[2K\r│ %s%-29s │ %-10s │ %-9s │ %-8s │ %-7s%s │\n' \
+                printf '\033[2K\r┌─────────────────────────────┬───────────────┬───────────┬──────────┬────────┐\n' >&2
+                printf '\033[2K\r│ %s%-27s │ %-13s │ %-9s │ %-8s │ %-6s%s │\n' \
                     "$header_color" Agent Status PID Elapsed Tokens "$reset_color" >&2
             else
-                printf '\033[2K\r┌───────────────────────────────┬────────────┬──────────┬─────────┐\n' >&2
-                printf '\033[2K\r│ %s%-29s │ %-10s │ %-8s │ %-7s%s │\n' \
+                printf '\033[2K\r┌─────────────────────────────┬───────────────┬──────────┬────────┐\n' >&2
+                printf '\033[2K\r│ %s%-27s │ %-13s │ %-8s │ %-6s%s │\n' \
                     "$header_color" Agent Status Elapsed Tokens "$reset_color" >&2
             fi
             if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-                printf '\033[2K\r├───────────────────────────────┼────────────┼───────────┼──────────┼─────────┤\n' >&2
+                printf '\033[2K\r├─────────────────────────────┼───────────────┼───────────┼──────────┼────────┤\n' >&2
             else
-                printf '\033[2K\r├───────────────────────────────┼────────────┼──────────┼─────────┤\n' >&2
+                printf '\033[2K\r├─────────────────────────────┼───────────────┼──────────┼────────┤\n' >&2
             fi
             current_section=$section
         fi
@@ -6871,7 +6931,11 @@ render_dashboard_snapshot() {
         indicator=' '
         case "$status" in
             RUNNING) indicator=$spinner ;;
-            RETRYING) indicator='↻' ;;
+            RETRY*)
+                # The same label covers "queued for attempt 2" and "attempt 2 is
+                # running"; only a started, unfinished row is still alive.
+                if (( started_at > 0 && finished_at == 0 )); then indicator=$spinner; else indicator='↻'; fi
+                ;;
             COMPLETE | LOADED) indicator='✓' ;;
             FAILED) indicator='✗' ;;
             QUEUED | WAITING) indicator='…' ;;
@@ -6887,19 +6951,19 @@ render_dashboard_snapshot() {
             fi
         fi
         dashboard_status_color "$status"
-        printf '\033[2K\r│ %-29.29s │ ' "$label" >&2
-        printf '%s%-8s%s %s' "$DASHBOARD_STATUS_COLOR" "$status" "$reset_color" "$indicator" >&2
+        printf '\033[2K\r│ %-27.27s │ ' "$label" >&2
+        printf '%s%-11.11s%s %s' "$DASHBOARD_STATUS_COLOR" "$status" "$reset_color" "$indicator" >&2
         tokens=${tokens:--}
         if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-            printf ' │ %-9s │ %-8s │ %-7.7s │\n' "$display_pid" "$elapsed" "$tokens" >&2
+            printf ' │ %-9s │ %-8s │ %-6.6s │\n' "$display_pid" "$elapsed" "$tokens" >&2
         else
-            printf ' │ %-8s │ %-7.7s │\n' "$elapsed" "$tokens" >&2
+            printf ' │ %-8s │ %-6.6s │\n' "$elapsed" "$tokens" >&2
         fi
     done <"$DASHBOARD_STATE_FILE"
     if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-        printf '\033[2K\r└───────────────────────────────┴────────────┴───────────┴──────────┴─────────┘\n' >&2
+        printf '\033[2K\r└─────────────────────────────┴───────────────┴───────────┴──────────┴────────┘\n' >&2
     else
-        printf '\033[2K\r└───────────────────────────────┴────────────┴──────────┴─────────┘\n' >&2
+        printf '\033[2K\r└─────────────────────────────┴───────────────┴──────────┴────────┘\n' >&2
     fi
     printf '\033[2K\r\n' >&2
     printf '\033[2K\r%s%s%s\n' "$footer_color" "$footer_separator" "$reset_color" >&2
@@ -7113,7 +7177,7 @@ run_review_phase() {
                 set_dashboard_status \
                     "$dashboard_section" \
                     "$agent" \
-                    RUNNING \
+                    "$(dashboard_attempt_status "$attempt")" \
                     "$STARTED_PID" \
                     "${phase_started_at[$agent]}" \
                     0
@@ -7238,7 +7302,7 @@ run_review_phase() {
                     set_dashboard_status \
                         "$dashboard_section" \
                         "$agent" \
-                        RETRYING \
+                        "$(dashboard_attempt_status "$((attempt + 1))")" \
                         "" \
                         0 \
                         0 \
@@ -9424,7 +9488,7 @@ run_final_synthesis_attempt() {
     start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
     final_pid=$STARTED_PID
     final_started_at=$(date +%s)
-    set_dashboard_status final "$FINAL_SYNTHESIZER" RUNNING "$final_pid" "$final_started_at" 0
+    set_dashboard_status final "$FINAL_SYNTHESIZER" "$(dashboard_attempt_status "$attempt")" "$final_pid" "$final_started_at" 0
     heartbeat_agent "final synthesis" "$FINAL_SYNTHESIZER" "$final_pid" "$final_started_at" &
     final_heartbeat_pid=$!
     RUNNING_PIDS=("$final_pid" "$final_heartbeat_pid")
@@ -9688,7 +9752,7 @@ run_final_synthesis() {
         if (( final_attempt >= RETRY_MAX_ATTEMPTS )) || [[ "$FINAL_ATTEMPT_RETRYABLE" != true ]]; then
             return 1
         fi
-        set_dashboard_status final "$FINAL_SYNTHESIZER" RETRYING "" 0 0 "-"
+        set_dashboard_status final "$FINAL_SYNTHESIZER" "$(dashboard_attempt_status "$((final_attempt + 1))")" "" 0 0 "-"
         activity_log "Failed final synthesis attempt ${final_attempt}/${RETRY_MAX_ATTEMPTS}: ${FINAL_FAILURE_REASON}; queued for retry"
         if (( RETRY_DELAY_SECONDS > 0 )); then
             sleep "$RETRY_DELAY_SECONDS"
