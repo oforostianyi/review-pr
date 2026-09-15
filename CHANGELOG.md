@@ -4,6 +4,18 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- A rejected configuration now says what is wrong with it. Validation is one long boolean, so the
+  reader was told only that the file was invalid and had to bisect a hundred conditions by hand: a
+  real `clcd.json` failed because it named a disabled agent as its synthesizer, and finding that
+  meant evaluating the clauses one at a time. Failures are now listed, each naming the setting and
+  quoting the offending value, with the allowed values for an enum. The validator itself is
+  untouched and remains the authority on what is accepted; the diagnostic runs only after it
+  refuses, and falls back to the old message for anything it does not recognise, so it cannot widen
+  what the orchestrator accepts.
+
+
 ## [1.18.0] - 2026-09-15
 
 ### Added

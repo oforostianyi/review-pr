@@ -244,4 +244,40 @@ jq '.reporting.findings_export = "everything"' "$config_file" >"$export_invalid"
 assert_false 'an unknown findings export scope is rejected' \
     "$repo_root/bin/review-pr" --config "$export_invalid" --show-config
 
+# A rejected configuration has to say what is wrong with it. The validator is one
+# long boolean, so without this the user is told only that the file is invalid and
+# has to bisect a hundred conditions by hand.
+config_error() {
+    local candidate=$1
+    "$repo_root/bin/review-pr" --config "$candidate" --show-config >/dev/null 2>"$test_root/config-error.txt" || true
+    cat "$test_root/config-error.txt"
+}
+
+disabled_synthesizer="$test_root/disabled-synthesizer.json"
+jq '.agents.beta.enabled = false | .agents.gamma = {"label": "Gamma", enabled: true, model: "m", effort: ""} |
+    .reviewers = ["alpha", "beta", "gamma"] | .synthesizer = "beta"' "$config_file" >"$disabled_synthesizer"
+assert_file_contains <(config_error "$disabled_synthesizer") 'is disabled' \
+    'a disabled synthesizer is reported as disabled'
+assert_file_contains <(config_error "$disabled_synthesizer") '"beta"' \
+    'the error names the agent that cannot synthesize'
+
+too_few_reviewers="$test_root/too-few-reviewers.json"
+jq '.agents.beta.enabled = false' "$config_file" >"$too_few_reviewers"
+assert_file_contains <(config_error "$too_few_reviewers") 'two enabled reviewers' \
+    'a review that cannot be cross-checked says so'
+
+unknown_key="$test_root/unknown-key.json"
+jq '.reviewrs = ["alpha"]' "$config_file" >"$unknown_key"
+assert_file_contains <(config_error "$unknown_key") 'reviewrs' \
+    'a misspelled top-level key is quoted back'
+
+bad_effort="$test_root/bad-effort.json"
+jq '.agents.claude = {"label": "Claude", enabled: true, model: "claude-opus-5", effort: "extreme"} |
+    .reviewers = ["claude", "alpha", "beta"]' "$config_file" >"$bad_effort"
+assert_file_contains <(config_error "$bad_effort") 'extreme' \
+    'an unsupported effort value is quoted back'
+
+assert_file_contains <(config_error "$export_invalid") 'findings_export' \
+    'an unknown export scope names the setting it belongs to'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

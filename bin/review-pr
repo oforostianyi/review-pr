@@ -565,6 +565,106 @@ load_config() {
     CONFIG_DIRECTORY=${CONFIG_FILE%/*}
     require_command jq
 
+# The validator above is one boolean, so a rejected file tells the reader only
+# that it was rejected. These checks re-express the conditions a person actually
+# trips over and name the offending value; anything they do not cover falls back
+# to the generic message rather than claiming the file is fine.
+describe_configuration_problems() {
+    jq -r '
+        def known_efforts($agent):
+            if $agent == "claude" then ["low", "medium", "high", "xhigh", "max"]
+            elif $agent == "codex" then ["none", "low", "medium", "high", "xhigh", "max"]
+            elif $agent == "pi" then ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+            else null end;
+        def enum_problem($where; $value; $allowed):
+            if $value == null then empty
+            elif ($allowed | index($value)) then empty
+            else "\($where) is \($value | tojson); allowed: \($allowed | join(", "))" end;
+        . as $config
+        | [
+            (if type != "object" then "the configuration is \(type), not an object" else empty end),
+            ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer"])[]
+                | "unknown top-level key \(tojson)"),
+            enum_problem("language"; .language; ["EN", "UA"]),
+            enum_problem("finalization.language"; .finalization.language; ["EN", "UA"]),
+            enum_problem("reporting.findings_export"; .reporting.findings_export; ["confirmed", "uncertain", "all", "off"]),
+            enum_problem("reporting.finding_contract.primary"; .reporting.finding_contract.primary; ["markdown", "ndjson-v1"]),
+            enum_problem("reporting.finding_contract.cross_review"; .reporting.finding_contract.cross_review; ["markdown", "ndjson-v1"]),
+            enum_problem("reporting.finding_contract.final"; .reporting.finding_contract.final; ["markdown", "ndjson-v1"]),
+            enum_problem("reporting.comparison_sections.cross_review"; .reporting.comparison_sections.cross_review; ["none", "inline"]),
+            enum_problem("reporting.comparison_sections.final"; .reporting.comparison_sections.final; ["none", "inline", "standalone"]),
+            enum_problem("status.mode"; .status.mode; ["auto", "table", "log", "off"]),
+            enum_problem("status.color"; .status.color; ["auto", "always", "never"]),
+            (if (.reviewers | type) != "array" then "reviewers must be an array of agent keys"
+             elif (.reviewers | length) < 2 then "reviewers lists \(.reviewers | length) agent(s); at least two are required"
+             elif (.reviewers | unique | length) != (.reviewers | length) then "reviewers repeats an agent key"
+             else empty end),
+            (.reviewers[]? as $reviewer | select(($config.agents | has($reviewer)) | not) | "reviewer \($reviewer | tojson) has no entry under agents"),
+            (if (.reviewers | type) == "array"
+             then ([.reviewers[] | select(. as $a | ($config.agents[$a] | if type == "object" and has("enabled") then .enabled else true end))] | length) as $enabled
+                  | if $enabled < 2
+                    then "only \($enabled) of the listed reviewers \(if $enabled == 1 then "is" else "are" end) enabled; a cross-review needs two enabled reviewers"
+                    else empty end
+             else empty end),
+            (if (.synthesizer | type) != "string" then "synthesizer must be an agent key"
+             elif ($config.agents | has($config.synthesizer)) | not then "synthesizer \(.synthesizer | tojson) has no entry under agents"
+             elif ($config.agents[.synthesizer] | if type == "object" and has("enabled") then .enabled else true end) != true
+             then "synthesizer \(.synthesizer | tojson) is disabled; the agent that writes the final synthesis must be enabled"
+             else empty end),
+            (.agents | to_entries[]?
+                | .key as $agent | .value as $settings
+                | ((($settings | keys_unsorted) - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds"])[]
+                    | "unknown key \(tojson) under agents.\($agent)"),
+                  (if ($settings | has("runner")) and ($settings | has("command"))
+                   then "agents.\($agent) sets both runner and command; they are alternatives"
+                   else empty end),
+                  (if $agent != "pi" and ($settings | has("max_tool_calls"))
+                   then "agents.\($agent) sets max_tool_calls, which only the pi runner enforces"
+                   else empty end),
+                  (known_efforts($agent) as $allowed
+                   | if $allowed == null or ($settings.effort // "") == "" then empty
+                     else enum_problem("agents.\($agent).effort"; $settings.effort; $allowed) end)),
+            (known_efforts(.synthesizer) as $allowed
+             | if $allowed == null or (.finalization.effort // "") == "" then empty
+               else enum_problem("finalization.effort for synthesizer \(.synthesizer)"; .finalization.effort; $allowed) end),
+            (if (.repositories | type) == "object"
+             then (.default_repository as $default
+                   | if ($default | type) != "string" then "default_repository must name one of the configured repositories"
+                     elif ($config.repositories | has($default)) | not then "default_repository \($default | tojson) is not in repositories"
+                     else empty end),
+                  (.repositories | to_entries[]
+                    | .key as $alias | .value as $repository
+                    | (if ($repository.checkout // "") | startswith("/") | not
+                       then "repositories.\($alias).checkout must be an absolute path"
+                       else empty end),
+                      (if ($repository.github // "") | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") | not
+                       then "repositories.\($alias).github must read owner/repository"
+                       else empty end),
+                      (($repository.profile // "") as $profile
+                       | if $profile != "" and ((($config.profiles // {}) | has($profile)) | not)
+                         then "repositories.\($alias) names profile \($profile | tojson), which is not defined under profiles"
+                         else empty end))
+             else empty end)
+          ]
+        | map(select(. != null)) | unique
+        | .[]
+    ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+die_with_configuration_problems() {
+    local problems
+
+    problems=$(describe_configuration_problems)
+    if [[ -z "$problems" ]]; then
+        die "Invalid review-pr JSON configuration: ${CONFIG_FILE}"
+    fi
+    printf '%s\n' "Invalid review-pr JSON configuration: ${CONFIG_FILE}" >&2
+    while IFS= read -r problem; do
+        [[ -z "$problem" ]] || printf '  - %s\n' "$problem" >&2
+    done <<<"$problems"
+    exit 1
+}
+
     validation_filter='
         def valid_prompt:
             type == "string" or
@@ -772,7 +872,7 @@ load_config() {
     '
 
     if ! jq -e "$validation_filter" "$CONFIG_FILE" >/dev/null; then
-        die "Invalid review-pr JSON configuration: ${CONFIG_FILE}"
+        die_with_configuration_problems
     fi
 
     if [[ -z "$REVIEWS_ROOT" ]]; then
