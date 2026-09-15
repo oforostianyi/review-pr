@@ -6,6 +6,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A shortened agent label keeps its ellipsis. The label was trimmed to 29 characters while the row
+  printed it at 27, so a long one lost the ellipsis and ended mid-word (`Claude (claude-sonnet-5 hig`).
+  One constant now sets the column width, and the label builder, the header, and the row all read it.
 - The live table no longer prints its section header two or three times. Anything written straight
   to the terminal while the table is up leaves the cursor one row below where the next redraw
   expects it, and every later frame strands a copy of its own top line; two stray lines in a run

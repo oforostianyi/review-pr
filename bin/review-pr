@@ -251,6 +251,10 @@ DASHBOARD_COLOR_ENABLED=false
 DASHBOARD_SHOW_PID=true
 DASHBOARD_ACTIVE=false
 DASHBOARD_MESSAGE_FILE=""
+# The agent column, in characters. The label is trimmed to it and the row prints
+# it at the same width; when the two drift apart printf cuts the ellipsis off a
+# shortened label and it ends mid-word.
+readonly DASHBOARD_AGENT_COLUMN_WIDTH=27
 DASHBOARD_STATE_FILE=""
 DASHBOARD_STATE_TEMP_FILE=""
 DASHBOARD_PID=""
@@ -1482,9 +1486,9 @@ dashboard_agent_label() {
     if [[ -n "$effort" ]]; then
         model+=" ${effort}"
     fi
-    available_model_length=$((29 - ${#label} - 3))
+    available_model_length=$((DASHBOARD_AGENT_COLUMN_WIDTH - ${#label} - 3))
     if (( available_model_length <= 0 )); then
-        printf '%s\n' "${label:0:15}..."
+        printf '%s\n' "${label:0:$((DASHBOARD_AGENT_COLUMN_WIDTH - 3))}..."
         return
     fi
     if (( ${#model} > available_model_length )); then
@@ -7035,11 +7039,11 @@ render_dashboard_snapshot() {
                 "$reset_color" >&2
             if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
                 printf '\033[2K\r┌─────────────────────────────┬───────────────┬───────────┬──────────┬────────┐\n' >&2
-                printf '\033[2K\r│ %s%-27s │ %-13s │ %-9s │ %-8s │ %-6s%s │\n' \
+                printf "\033[2K\r│ %s%-${DASHBOARD_AGENT_COLUMN_WIDTH}s │ %-13s │ %-9s │ %-8s │ %-6s%s │\n" \
                     "$header_color" Agent Status PID Elapsed Tokens "$reset_color" >&2
             else
                 printf '\033[2K\r┌─────────────────────────────┬───────────────┬──────────┬────────┐\n' >&2
-                printf '\033[2K\r│ %s%-27s │ %-13s │ %-8s │ %-6s%s │\n' \
+                printf "\033[2K\r│ %s%-${DASHBOARD_AGENT_COLUMN_WIDTH}s │ %-13s │ %-8s │ %-6s%s │\n" \
                     "$header_color" Agent Status Elapsed Tokens "$reset_color" >&2
             fi
             if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
@@ -7073,7 +7077,7 @@ render_dashboard_snapshot() {
             fi
         fi
         dashboard_status_color "$status"
-        printf '\033[2K\r│ %-27.27s │ ' "$label" >&2
+        printf "\033[2K\r│ %-${DASHBOARD_AGENT_COLUMN_WIDTH}.${DASHBOARD_AGENT_COLUMN_WIDTH}s │ " "$label" >&2
         printf '%s%-11.11s%s %s' "$DASHBOARD_STATUS_COLOR" "$status" "$reset_color" "$indicator" >&2
         tokens=${tokens:--}
         if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
