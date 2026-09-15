@@ -4,6 +4,18 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The live table no longer prints its section header two or three times. Anything written straight
+  to the terminal while the table is up leaves the cursor one row below where the next redraw
+  expects it, and every later frame strands a copy of its own top line; two stray lines in a run
+  were enough to show `PRIMARY REVIEW` three times. While the table is up the renderer is now the
+  only writer: `log` hands it the line, and it prints what is waiting where the frame begins, so
+  messages scroll into the history above a table that keeps its exact height. The same defect was
+  fixed once before by moving one particular message onto the suppressed logger, which left the
+  class open; the suite only ever exercised log mode, so the table path was never covered. It is
+  covered now.
+
 ### Changed
 
 - A rejected configuration now says what is wrong with it. Validation is one long boolean, so the

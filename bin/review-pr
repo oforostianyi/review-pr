@@ -250,6 +250,7 @@ DASHBOARD_ENABLED=false
 DASHBOARD_COLOR_ENABLED=false
 DASHBOARD_SHOW_PID=true
 DASHBOARD_ACTIVE=false
+DASHBOARD_MESSAGE_FILE=""
 DASHBOARD_STATE_FILE=""
 DASHBOARD_STATE_TEMP_FILE=""
 DASHBOARD_PID=""
@@ -395,7 +396,18 @@ show_version() {
 }
 
 log() {
-    printf '[review-pr %s] %s\n' "$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')" "$*" >&2
+    local message
+    message=$(printf '[review-pr %s] %s' "$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')" "$*")
+    # A line printed into the live table leaves the cursor one row below where
+    # the next redraw assumes it is, so every later frame strands a copy of its
+    # top line and the header appears two or three times. While the table is up
+    # the renderer is the only writer allowed to touch the terminal, so hand it
+    # the line instead and let it print above the next frame.
+    if [[ "$DASHBOARD_ACTIVE" == true && -n "$DASHBOARD_MESSAGE_FILE" ]]; then
+        printf '%s\n' "$message" >>"$DASHBOARD_MESSAGE_FILE"
+        return
+    fi
+    printf '%s\n' "$message" >&2
 }
 
 format_duration() {
@@ -6795,7 +6807,9 @@ initialize_dashboard() {
 
     DASHBOARD_STATE_FILE=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-dashboard.tmp.XXXXXX")
     DASHBOARD_STATE_TEMP_FILE="${DASHBOARD_STATE_FILE}.new.$$"
-    TEMP_FILES+=("$DASHBOARD_STATE_FILE" "$DASHBOARD_STATE_TEMP_FILE")
+    DASHBOARD_MESSAGE_FILE="${DASHBOARD_STATE_FILE}.messages"
+    : >"$DASHBOARD_MESSAGE_FILE"
+    TEMP_FILES+=("$DASHBOARD_STATE_FILE" "$DASHBOARD_STATE_TEMP_FILE" "$DASHBOARD_MESSAGE_FILE")
     write_dashboard_state
 }
 
@@ -6990,6 +7004,14 @@ render_dashboard_snapshot() {
         # frame height instead; CSI cursor movement is broadly supported.
         printf '\033[%dA\r' "$DASHBOARD_LINE_COUNT" >&2
     fi
+    # Anything the run wanted to say while the table was up is printed here,
+    # where the frame starts: it scrolls into the history above the table and
+    # the frame that follows stays exactly one frame tall.
+    if [[ -s "${DASHBOARD_MESSAGE_FILE:-/dev/null}" ]]; then
+        printf '\033[0J' >&2
+        cat -- "$DASHBOARD_MESSAGE_FILE" >&2
+        : >"$DASHBOARD_MESSAGE_FILE"
+    fi
 
     while IFS='|' read -r section label status pid started_at finished_at tokens; do
         if [[ "$section" != "$current_section" ]]; then
@@ -7163,6 +7185,10 @@ stop_dashboard() {
     printf '\033[?25h\n' >&2
     DASHBOARD_ACTIVE=false
     DASHBOARD_PID=""
+    if [[ -s "${DASHBOARD_MESSAGE_FILE:-/dev/null}" ]]; then
+        cat -- "$DASHBOARD_MESSAGE_FILE" >&2
+        : >"$DASHBOARD_MESSAGE_FILE"
+    fi
 }
 
 heartbeat_agent() {

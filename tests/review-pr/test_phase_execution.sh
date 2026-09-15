@@ -224,6 +224,31 @@ table_line_widths() {
 assert_eq '84 ' "$(table_line_widths "$CASE_DIR/retry-frame.txt")" \
     'every table line keeps the same width once a retry status is shown'
 
+# A line printed straight to the terminal while the table is up leaves the cursor
+# one row below where the next redraw expects it, and every later frame strands a
+# copy of its own header — the reason the section title appeared three times. The
+# renderer is the only writer while the table is up; log hands it the line.
+DASHBOARD_MESSAGE_FILE="$CASE_DIR/dashboard-messages.txt"
+: >"$DASHBOARD_MESSAGE_FILE"
+DASHBOARD_ACTIVE=true
+log 'WARNING: something happened while the table was up' 2>"$CASE_DIR/direct-stderr.txt"
+assert_eq '' "$(cat "$CASE_DIR/direct-stderr.txt")" \
+    'a message logged while the table is up does not go straight to the terminal'
+assert_file_contains "$DASHBOARD_MESSAGE_FILE" 'something happened while the table was up' \
+    'the message waits for the renderer instead'
+render_dashboard_snapshot false 2>"$CASE_DIR/message-frame.txt"
+DASHBOARD_ACTIVE=false
+assert_file_contains "$CASE_DIR/message-frame.txt" 'something happened while the table was up' \
+    'the renderer prints the waiting message where the frame begins'
+assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/message-frame.txt")" \
+    'the frame that follows the message still draws its title once'
+assert_eq "$((DASHBOARD_LINE_COUNT + 1))" \
+    "$(wc -l <"$CASE_DIR/message-frame.txt" | tr -d ' ')" \
+    'the frame keeps its height and the message adds exactly its own line'
+assert_eq '0' "$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')" \
+    'a printed message is not printed again on the next frame'
+DASHBOARD_MESSAGE_FILE=""
+
 AGENT_LABELS[wide]='An unusually long agent label'
 AGENT_MODELS[wide]='provider/some-model'
 AGENT_EFFORTS[wide]=''
