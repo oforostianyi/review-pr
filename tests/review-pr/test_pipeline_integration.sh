@@ -121,6 +121,7 @@ run_full_success_case() {
     local primary_alpha_prompt
     local alpha_cross_prompt
     local rerun_final_prompt
+    local history
     local forced_rerun_status
     local legacy_manifest_temp
 
@@ -208,6 +209,27 @@ run_full_success_case() {
     assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" \
         'Existing-feedback rule:' \
         'final synthesizer receives the duplicate-feedback rule'
+
+    # Finding out what ran last night should not mean reading through review
+    # directories. One appended line per launch and per outcome, next to the
+    # reviews themselves, answers it.
+    history="$reviews/run-history.jsonl"
+    assert_file_exists "$history" 'a run records itself in the history log'
+    assert_eq 'started finished' \
+        "$(jq -r 'select(.pr == 123) | .event' "$history" | tr '\n' ' ' | sed 's/ $//')" \
+        'the log carries the launch and the outcome of the run'
+    assert_eq '123' "$(jq -r 'select(.event == "started") | .pr | tostring' "$history" | head -1)" \
+        'the launch record names the pull request'
+    assert_eq 'full' "$(jq -r 'select(.event == "started") | .mode' "$history" | head -1)" \
+        'the launch record says what kind of run it was'
+    assert_eq 'example/repository' "$(jq -r 'select(.event == "started") | .repository' "$history" | head -1)" \
+        'the launch record names the repository, since one log covers them all'
+    assert_eq '0' "$(jq -r 'select(.event == "finished") | .exit_status | tostring' "$history" | head -1)" \
+        'the outcome record carries the exit status'
+    assert_eq "$timestamp" "$(jq -r 'select(.event == "finished") | .run' "$history" | head -1)" \
+        'the outcome record points at the run directory it produced'
+    assert_true 'the outcome record measures how long the run took' \
+        jq -e 'select(.event == "finished") | .duration_seconds | type == "number"' "$history"
 
     cross_alpha_checksum=$(cksum "$work_dir/${stem}-cross-alpha.md")
     gh_calls_before=$(wc -l <"$gh_log" | tr -d ' ')

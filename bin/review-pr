@@ -251,6 +251,8 @@ DASHBOARD_COLOR_ENABLED=false
 DASHBOARD_SHOW_PID=true
 DASHBOARD_ACTIVE=false
 DASHBOARD_MESSAGE_FILE=""
+RUN_HISTORY_FILE=""
+RUN_HISTORY_STARTED_AT=0
 # The agent column, in characters. The label is trimmed to it and the row prints
 # it at the same width; when the two drift apart printf cuts the ellipsis off a
 # shortened label and it ends mid-word.
@@ -452,6 +454,7 @@ cleanup() {
     local temp_file
 
     trap - EXIT INT TERM
+    record_run_history finished "$exit_status"
 
     if [[ "$DASHBOARD_ACTIVE" == true ]]; then
         if [[ -n "$DASHBOARD_PID" ]]; then
@@ -6734,6 +6737,65 @@ dashboard_attempt_status() {
     fi
 }
 
+# One appended line per launch and per outcome, at the root of the reviews
+# directory. Answering "what ran last night" should not mean reading through
+# per-review directories, and a run that was interrupted has to appear too --
+# hence a record when it starts, not only when it ends.
+record_run_history() {
+    local event=$1
+    local exit_status=${2:-}
+    local entry
+    local duration=null
+
+    [[ -n "$RUN_HISTORY_FILE" ]] || return 0
+    if [[ "$event" == finished && "$RUN_HISTORY_STARTED_AT" -gt 0 ]]; then
+        duration=$(( $(date +%s) - RUN_HISTORY_STARTED_AT ))
+    fi
+    entry=$(jq -c -n \
+        --argjson schema_version 1 \
+        --arg event "$event" \
+        --arg at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg version "$REVIEW_PR_VERSION" \
+        --argjson pr "$PR_NUMBER" \
+        --arg repository "${GITHUB_REPOSITORY:-}" \
+        --arg mode "$(run_history_mode)" \
+        --arg review_id "${REVIEW_ID:-}" \
+        --arg run "${RUN_SELECTOR:-${TIMESTAMP:-}}" \
+        --arg config "$CONFIG_FILE" \
+        --argjson pid "$$" \
+        --arg exit_status "$exit_status" \
+        --argjson duration "$duration" \
+        '{schema_version: $schema_version, event: $event, at: $at, pr: $pr,
+          repository: (if $repository == "" then null else $repository end),
+          mode: $mode,
+          review_id: (if $review_id == "" then null else $review_id end),
+          run: (if $run == "" then null else $run end),
+          exit_status: (if $exit_status == "" then null else ($exit_status | tonumber) end),
+          duration_seconds: $duration,
+          review_pr_version: $version, config: $config, pid: $pid}') || return 0
+    printf '%s\n' "$entry" >>"$RUN_HISTORY_FILE" 2>/dev/null || true
+}
+
+run_history_mode() {
+    if [[ "$RERUN_FINAL" == true ]]; then
+        printf 'rerun-final'
+    elif [[ "$RESUME_RUN" == true ]]; then
+        printf 'resume'
+    else
+        printf 'full'
+    fi
+}
+
+# A run that never reaches the reviews directory has nothing to append to, so
+# the log is opened only once the directory it belongs beside is known.
+open_run_history() {
+    [[ -n "$REVIEWS_ROOT" && -d "$REVIEWS_ROOT" ]] || return 0
+    RUN_HISTORY_FILE="${REVIEWS_ROOT}/run-history.jsonl"
+    [[ ! -L "$RUN_HISTORY_FILE" ]] || { RUN_HISTORY_FILE=""; return 0; }
+    RUN_HISTORY_STARTED_AT=$(date +%s)
+    record_run_history started
+}
+
 dashboard_key() {
     printf '%s|%s' "$1" "$2"
 }
@@ -10225,6 +10287,8 @@ if (( $# != 1 )); then
 fi
 
 [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || die "Pull-request number must be a positive integer"
+
+open_run_history
 
 if [[ "$RERUN_FINAL" == true && "$FORCE_RERUN" == false ]]; then
     for required_command in jq mktemp env grep sed find; do

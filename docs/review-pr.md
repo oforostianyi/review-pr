@@ -667,6 +667,13 @@ inspection.
 
 ## Report layout
 
+The root of `reviews_directory` holds `run-history.jsonl`, an append-only log of every run across every configured repository, so "what ran last night" is one file rather than a walk through review directories. Each run appends two lines: one when it starts and one when it ends. Both are written, because a run that was interrupted or refused would otherwise leave no trace at all, and the end record is appended from the exit path so it survives a failure, a `die`, or Ctrl+C. A record carries the time, pull request, repository, mode (`full`, `resume`, `rerun-final`), review id, run timestamp, exit status, duration, the `review-pr` version, the configuration file, and the process id. Read commands such as `findings` and `--show-config` are not runs and are not logged.
+
+```bash
+jq -r 'select(.event=="finished") | "\(.at) \(.repository)#\(.pr) \(.mode) exit=\(.exit_status) \(.duration_seconds)s"' \
+    "$HOME/review-pr/run-history.jsonl" | tail -20
+```
+
 Each repository gets its own stable directory under the configured external `reviews_directory`; the GitHub slug is normalized to lowercase with `/` replaced by `-`. This prevents equal PR numbers from different repositories from colliding. Only completed final reviews are written at a run directory’s top level; all intermediate material stays in `work/<timestamp>/`, one directory per run, so repeated runs of the same PR stay separable:
 
 ```text

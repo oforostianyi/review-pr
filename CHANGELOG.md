@@ -4,6 +4,16 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Every run appends itself to `run-history.jsonl` at the root of the reviews directory, one log across
+  every configured repository, so finding out what ran overnight no longer means reading through review
+  directories. Two lines per run: one when it starts, one when it ends. Both, because a run that was
+  interrupted or refused would otherwise leave nothing behind, and the end record is appended from the
+  exit path, so it survives a failure or a Ctrl+C rather than only a clean finish. A record carries the
+  time, pull request, repository, mode, review id, run timestamp, exit status, duration, version,
+  configuration file, and pid. `findings` and `--show-config` read rather than run, and are not logged.
+
 ### Fixed
 
 - A shortened agent label keeps its ellipsis. The label was trimmed to 29 characters while the row
