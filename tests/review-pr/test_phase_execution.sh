@@ -281,6 +281,20 @@ assert_eq '--thinking xhigh' "$(agent_effort_arguments pi xhigh | paste -sd ' ' 
 assert_eq '' "$(agent_effort_arguments pi '' | paste -sd ' ' -)" 'an empty Pi effort adds no thinking flag'
 assert_eq '' "$(agent_effort_arguments custom high | paste -sd ' ' -)" 'other agents receive no effort flag'
 
+# The adapter decides how effort is spelled, so an agent named anything at all
+# passes the flags of its type. Without this the key had to be the CLI name.
+AGENT_TYPES[opus]=claude
+AGENT_TYPES[flash]=pi
+AGENT_TYPES[terra]=codex
+assert_eq '--effort high' "$(agent_effort_arguments opus high | paste -sd ' ' -)" \
+    'an agent typed as claude receives the Claude effort flag under any key'
+assert_eq '--thinking low' "$(agent_effort_arguments flash low | paste -sd ' ' -)" \
+    'an agent typed as pi receives a thinking level under any key'
+assert_eq '-c model_reasoning_effort="medium"' "$(agent_effort_arguments terra medium | paste -sd ' ' -)" \
+    'an agent typed as codex receives a reasoning override under any key'
+assert_eq 'claude' "$(agent_type opus)" 'the adapter is reported for a typed agent'
+assert_eq 'codex' "$(agent_type codex)" 'an agent without a type is still its own adapter'
+
 # A failed final synthesis is retried only when the agent actually produced
 # something. An attempt that never got a turn, because of a usage limit or any
 # other startup failure, records no tokens and no output; repeating it would

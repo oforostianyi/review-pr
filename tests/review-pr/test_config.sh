@@ -280,4 +280,66 @@ assert_file_contains <(config_error "$bad_effort") 'extreme' \
 assert_file_contains <(config_error "$export_invalid") 'findings_export' \
     'an unknown export scope names the setting it belongs to'
 
+# The agent key used to be the choice of runner, so one CLI could serve one agent
+# and a second Pi with a different model was impossible. `type` names the adapter;
+# the key stays a free label and keeps owning the artifacts.
+two_pi="$test_root/two-pi.json"
+jq '.agents = {
+        "pi-local": {"label": "Pi local", enabled: true, type: "pi", model: "dirk-local", effort: "high", max_tool_calls: 300},
+        "pi-cloud": {"label": "Pi cloud", enabled: true, type: "pi", model: "vendor/flash", effort: "low", max_tool_calls: 120},
+        "opus": {"label": "Opus", enabled: true, type: "claude", model: "claude-opus-5", effort: "high"}
+    } | .reviewers = ["pi-local", "pi-cloud", "opus"] | .synthesizer = "pi-cloud"
+    | .profiles.fixture.skills = {"pi-local": "php-code-review"}' "$config_file" >"$two_pi"
+assert_true 'two agents may share the pi adapter with different models' \
+    "$repo_root/bin/review-pr" --config "$two_pi" --show-config
+assert_file_contains <("$repo_root/bin/review-pr" --config "$two_pi" --show-config) 'pi-local pi-cloud opus' \
+    'every agent of a shared type is active'
+
+# The budget is a property of the Pi runner, not of the agent that happens to be
+# called "pi", so every agent of that type may set one.
+unknown_type="$test_root/unknown-type.json"
+jq '.agents.alpha.type = "gemini"' "$config_file" >"$unknown_type"
+assert_false 'an unknown adapter type is rejected' \
+    "$repo_root/bin/review-pr" --config "$unknown_type" --show-config
+assert_file_contains <(config_error "$unknown_type") 'gemini' \
+    'the error quotes the adapter it does not know'
+
+budget_on_typed_pi="$test_root/budget-typed.json"
+jq '.agents.beta = {"label": "Beta", enabled: true, type: "pi", model: "m", effort: "", max_tool_calls: 50}' \
+    "$config_file" >"$budget_on_typed_pi"
+assert_true 'a tool-call budget belongs to the pi adapter, not to the key "pi"' \
+    "$repo_root/bin/review-pr" --config "$budget_on_typed_pi" --show-config
+
+budget_on_claude="$test_root/budget-claude.json"
+jq '.agents.beta = {"label": "Beta", enabled: true, type: "claude", model: "m", effort: "", max_tool_calls: 50}' \
+    "$config_file" >"$budget_on_claude"
+assert_false 'a tool-call budget is still refused for an adapter that cannot enforce it' \
+    "$repo_root/bin/review-pr" --config "$budget_on_claude" --show-config
+
+typed_effort="$test_root/typed-effort.json"
+jq '.agents.beta = {"label": "Beta", enabled: true, type: "codex", model: "m", effort: "none"}' \
+    "$config_file" >"$typed_effort"
+assert_true 'the effort vocabulary follows the adapter, not the key' \
+    "$repo_root/bin/review-pr" --config "$typed_effort" --show-config
+jq '.agents.beta = {"label": "Beta", enabled: true, type: "claude", model: "m", effort: "none"}' \
+    "$config_file" >"$typed_effort"
+assert_false 'an effort the adapter does not accept is still refused' \
+    "$repo_root/bin/review-pr" --config "$typed_effort" --show-config
+
+# A second agent of a known type should not silently lose its review skill just
+# because the skills map does not mention its key. Look the key up first, so an
+# explicit entry still wins, then fall back to the adapter.
+skill_config="$test_root/skill-inheritance.json"
+jq '.agents = {
+        "pi-local": {"label": "Pi local", enabled: true, type: "pi", model: "m1", effort: ""},
+        "pi-cloud": {"label": "Pi cloud", enabled: true, type: "pi", model: "m2", effort: ""}
+    } | .reviewers = ["pi-local", "pi-cloud"] | .synthesizer = "pi-local"
+    | .profiles.fixture.skills = {"pi": "php-code-review", "pi-cloud": "other-review"}' \
+    "$config_file" >"$skill_config"
+skill_output=$("$repo_root/bin/review-pr" --config "$skill_config" --show-config)
+assert_file_contains <(printf '%s\n' "$skill_output") 'pi-local: skill=php-code-review' \
+    'an agent without its own skill entry inherits the one configured for its type'
+assert_file_contains <(printf '%s\n' "$skill_output") 'pi-cloud: skill=other-review' \
+    'an explicit entry for the agent key still wins over the type'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

@@ -115,18 +115,27 @@
           "properties": {
             "primary": {
               "type": "string",
-              "enum": ["markdown", "ndjson-v1"],
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
               "default": "markdown"
             },
             "cross_review": {
               "type": "string",
-              "enum": ["markdown", "ndjson-v1"],
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
               "default": "markdown",
               "description": "Structured cross-review requires primary=ndjson-v1 and comparison_sections.cross_review=none."
             },
             "final": {
               "type": "string",
-              "enum": ["markdown", "ndjson-v1"],
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
               "default": "markdown",
               "description": "Structured final synthesis requires primary and cross_review ndjson-v1, and comparison_sections.final set to none or standalone."
             }
@@ -134,7 +143,12 @@
         },
         "findings_export": {
           "type": "string",
-          "enum": ["confirmed", "uncertain", "all", "off"],
+          "enum": [
+            "confirmed",
+            "uncertain",
+            "all",
+            "off"
+          ],
           "default": "confirmed",
           "description": "Publish the actionable findings of a structured final synthesis as <review-id>-<timestamp>-fix-list.json beside the final report, for an agent that will do the fixing. off publishes nothing. Runs whose final contract is markdown publish nothing either."
         },
@@ -160,13 +174,20 @@
           "properties": {
             "cross_review": {
               "type": "string",
-              "enum": ["none", "inline"],
+              "enum": [
+                "none",
+                "inline"
+              ],
               "default": "none",
               "description": "Whether each cross-review omits or embeds the extended comparison block."
             },
             "final": {
               "type": "string",
-              "enum": ["none", "inline", "standalone"],
+              "enum": [
+                "none",
+                "inline",
+                "standalone"
+              ],
               "default": "standalone",
               "description": "Whether final synthesis omits, embeds, or generates the extended comparison block as a separate report."
             }
@@ -192,7 +213,9 @@
                 }
               },
               "not": {
-                "required": ["max_tool_calls"]
+                "required": [
+                  "max_tool_calls"
+                ]
               }
             }
           ]
@@ -209,7 +232,9 @@
                 }
               },
               "not": {
-                "required": ["max_tool_calls"]
+                "required": [
+                  "max_tool_calls"
+                ]
               }
             }
           ]
@@ -330,15 +355,24 @@
     {
       "oneOf": [
         {
-          "required": ["review_repository"],
+          "required": [
+            "review_repository"
+          ],
           "not": {
-            "required": ["repositories"]
+            "required": [
+              "repositories"
+            ]
           }
         },
         {
-          "required": ["repositories", "default_repository"],
+          "required": [
+            "repositories",
+            "default_repository"
+          ],
           "not": {
-            "required": ["review_repository"]
+            "required": [
+              "review_repository"
+            ]
           }
         }
       ]
@@ -431,7 +465,10 @@
     "repository": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["github", "checkout"],
+      "required": [
+        "github",
+        "checkout"
+      ],
       "properties": {
         "github": {
           "type": "string",
@@ -467,6 +504,15 @@
         },
         "label": {
           "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "pi"
+          ],
+          "description": "Built-in adapter that runs this agent. Defaults to the agent key, so an agent named after an adapter needs no type. Several agents may share one adapter with different models. Ignored when runner or command is set."
         },
         "model": {
           "type": "string"

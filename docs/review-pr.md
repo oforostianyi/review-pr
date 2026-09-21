@@ -225,7 +225,20 @@ already run with tools disabled.
 
 ## Built-in agents, models, and reasoning effort
 
-`claude`, `codex`, and `pi` have built-in runners. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
+`claude`, `codex`, and `pi` are built-in adapters. The agent key names the agent; `type` names the adapter that runs it and defaults to the key, so a configuration that calls its agents `claude`, `codex`, and `pi` needs no `type` and behaves exactly as before. Naming the adapter explicitly lets several agents share one CLI with different models:
+
+```json
+{
+  "agents": {
+    "pi-local": {"label": "Pi local", "type": "pi", "model": "dirk-qwen3.8-27b@iq3_s", "max_tool_calls": 300},
+    "pi-cloud": {"label": "Pi cloud", "type": "pi", "model": "qwen-token-plan/qwen3.8-flash", "max_tool_calls": 120},
+    "opus": {"label": "Opus", "type": "claude", "model": "claude-opus-5", "effort": "high"}
+  },
+  "reviewers": ["pi-local", "pi-cloud", "opus"]
+}
+```
+
+The adapter decides which executable is required, how reasoning effort is spelled, whether `max_tool_calls` is accepted, and whether an event stream is preserved for diagnosis. The key keeps owning everything else: artifacts are named after it, so agents sharing an adapter never collide. A review skill is looked up by key first and by type second, so a new agent inherits its adapter's skill until it is given its own — an explicit empty entry still means "no skill". `runner` and `command` take precedence over `type`. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
 
 For Pi review phases, the orchestration control prompt also prohibits repeating identical tool
 calls or restarting the same inspection after context compaction. It tells the model to stop tool

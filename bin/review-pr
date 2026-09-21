@@ -53,6 +53,7 @@ declare -A AGENT_TIMEOUT_SECONDS=(
     [pi]=0
 )
 declare -A AGENT_MAX_TOOL_CALLS=()
+declare -A AGENT_TYPES=()
 declare -A AGENT_RUNNERS=()
 declare -A AGENT_COMMANDS=()
 declare -A AGENT_INSTRUCTIONS=()
@@ -590,10 +591,10 @@ load_config() {
 # to the generic message rather than claiming the file is fine.
 describe_configuration_problems() {
     jq -r '
-        def known_efforts($agent):
-            if $agent == "claude" then ["low", "medium", "high", "xhigh", "max"]
-            elif $agent == "codex" then ["none", "low", "medium", "high", "xhigh", "max"]
-            elif $agent == "pi" then ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        def known_efforts($type):
+            if $type == "claude" then ["low", "medium", "high", "xhigh", "max"]
+            elif $type == "codex" then ["none", "low", "medium", "high", "xhigh", "max"]
+            elif $type == "pi" then ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
             else null end;
         def enum_problem($where; $value; $allowed):
             if $value == null then empty
@@ -632,18 +633,23 @@ describe_configuration_problems() {
              else empty end),
             (.agents | to_entries[]?
                 | .key as $agent | .value as $settings
-                | ((($settings | keys_unsorted) - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds"])[]
+                | (($settings.type // $agent)) as $type
+                | ((($settings | keys_unsorted) - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds", "type"])[]
                     | "unknown key \(tojson) under agents.\($agent)"),
+                  (if ($settings | has("type")) and (["claude", "codex", "pi"] | index($settings.type) | not)
+                   then "agents.\($agent).type is \($settings.type | tojson); allowed: claude, codex, pi"
+                   else empty end),
                   (if ($settings | has("runner")) and ($settings | has("command"))
                    then "agents.\($agent) sets both runner and command; they are alternatives"
                    else empty end),
-                  (if $agent != "pi" and ($settings | has("max_tool_calls"))
+                  (if $type != "pi" and ($settings | has("max_tool_calls"))
                    then "agents.\($agent) sets max_tool_calls, which only the pi runner enforces"
                    else empty end),
-                  (known_efforts($agent) as $allowed
+                  (known_efforts($type) as $allowed
                    | if $allowed == null or ($settings.effort // "") == "" then empty
                      else enum_problem("agents.\($agent).effort"; $settings.effort; $allowed) end)),
-            (known_efforts(.synthesizer) as $allowed
+            ((.agents[.synthesizer].type // .synthesizer) as $synthesizer_type
+             | known_efforts($synthesizer_type) as $allowed
              | if $allowed == null or (.finalization.effort // "") == "" then empty
                else enum_problem("finalization.effort for synthesizer \(.synthesizer)"; .finalization.effort; $allowed) end),
             (if (.repositories | type) == "object"
@@ -694,6 +700,14 @@ die_with_configuration_problems() {
             . == "" or IN("none", "low", "medium", "high", "xhigh", "max");
         def valid_pi_thinking:
             . == "" or IN("off", "minimal", "low", "medium", "high", "xhigh", "max");
+        # The agent key is a label the reader chooses; `type` names the adapter that
+        # runs it, so two agents may share one CLI with different models. An agent
+        # without `type` keeps the old meaning, where the key was the adapter.
+        def valid_effort_for($type):
+            if $type == "claude" then valid_claude_effort
+            elif $type == "codex" then valid_codex_effort
+            elif $type == "pi" then valid_pi_thinking
+            else true end;
         def valid_language:
             . == "EN" or . == "UA";
         def valid_language_override:
@@ -849,7 +863,8 @@ die_with_configuration_problems() {
         (all(.agents | keys[]; test("^[A-Za-z0-9._-]+$"))) and
         (all(.agents[];
             type == "object" and
-            ((keys - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds"]) | length == 0) and
+            ((keys - ["command", "effort", "enabled", "instructions", "label", "max_tool_calls", "model", "runner", "timeout_seconds", "type"]) | length == 0) and
+            (if has("type") then (.type | type == "string" and IN("claude", "codex", "pi")) else true end) and
             (if has("enabled") then (.enabled | type == "boolean") else true end) and
             (if has("label") then (.["label"] | type == "string") else true end) and
             (if has("model") then (.model | type == "string") else true end) and
@@ -875,19 +890,20 @@ die_with_configuration_problems() {
             ((has("runner") and has("command")) | not) and
             (if has("instructions") then (.instructions | type == "string") else true end)
         )) and
-        (if .agents.claude? then (.agents.claude.effort // "" | valid_claude_effort) else true end) and
-        (if .agents.codex? then (.agents.codex.effort // "" | valid_codex_effort) else true end) and
-        (if .agents.pi? then (.agents.pi.effort // "" | valid_pi_thinking) else true end) and
-        (all(.agents | to_entries[]; .key == "pi" or ((.value | has("max_tool_calls")) | not))) and
+        (all(.agents | to_entries[];
+            . as $entry
+            | (($entry.value.effort // "") | valid_effort_for($entry.value.type // $entry.key)))) and
+        (all(.agents | to_entries[];
+            . as $entry
+            | ($entry.value.type // $entry.key) == "pi" or (($entry.value | has("max_tool_calls")) | not))) and
         (. as $config |
             [$config.reviewers[] | select(. as $agent |
                 ($config.agents[$agent] | if type == "object" and has("enabled") then .enabled else true end))] | length >= 2) and
         (. as $config |
             ($config.agents[$config.synthesizer] | if type == "object" and has("enabled") then .enabled else true end) == true) and
-        (if .synthesizer == "claude" then (.finalization.effort // "" | valid_claude_effort)
-         elif .synthesizer == "codex" then (.finalization.effort // "" | valid_codex_effort)
-         elif .synthesizer == "pi" then (.finalization.effort // "" | valid_pi_thinking)
-         else true end)
+        (. as $config
+         | (($config.agents[$config.synthesizer].type // $config.synthesizer)) as $synthesizer_type
+         | (($config.finalization.effort // "") | valid_effort_for($synthesizer_type)))
     '
 
     if ! jq -e "$validation_filter" "$CONFIG_FILE" >/dev/null; then
@@ -1002,6 +1018,7 @@ die_with_configuration_problems() {
         AGENT_EFFORTS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].effort // ""' "$CONFIG_FILE")
         AGENT_TIMEOUT_SECONDS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].timeout_seconds // 0' "$CONFIG_FILE")
         AGENT_MAX_TOOL_CALLS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].max_tool_calls // ""' "$CONFIG_FILE")
+        AGENT_TYPES[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].type // $agent' "$CONFIG_FILE")
         AGENT_RUNNERS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].runner // ""' "$CONFIG_FILE")
         AGENT_COMMANDS[$agent]=$(jq -c --arg agent "$agent" '.agents[$agent].command // []' "$CONFIG_FILE")
         AGENT_ENABLED[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent] | if has("enabled") then .enabled else true end' "$CONFIG_FILE")
@@ -1029,6 +1046,7 @@ activate_repository() {
     local alias
     local normalized_alias
     local configured_skill
+    local agent_kind
 
     normalized_requested=$(normalize_repository_reference "$requested_alias")
     SELECTED_REPOSITORY_ALIAS=""
@@ -1058,6 +1076,16 @@ activate_repository() {
         [[ -n "$alias" ]] || continue
         AGENT_SKILLS[$alias]=$configured_skill
     done < <(jq -r --arg repository "$SELECTED_REPOSITORY_ALIAS" '.repositories[$repository].skills // {} | to_entries[] | [.key, .value] | @tsv' "$CONFIG_FILE")
+
+    # A skills map written before an agent was split into several of the same type
+    # names the type, not the new keys. Prefer the agent's own entry -- including an
+    # empty one, which deliberately means "no skill" -- and fall back to its type.
+    for alias in "${!AGENT_TYPES[@]}"; do
+        [[ ! -v "AGENT_SKILLS[$alias]" ]] || continue
+        agent_kind=${AGENT_TYPES[$alias]}
+        [[ -v "AGENT_SKILLS[$agent_kind]" ]] || continue
+        AGENT_SKILLS[$alias]=${AGENT_SKILLS[$agent_kind]}
+    done
 }
 
 activate_default_repository() {
@@ -1447,12 +1475,19 @@ join_codex_agent_messages() {
 
 # Prints the CLI arguments that carry a configured effort to a built-in agent,
 # one per line: Claude --effort, Codex a reasoning override, Pi --thinking.
+# The adapter that runs an agent. The key is a label the reader chooses, so two
+# agents can share one CLI with different models; an agent that names no type
+# keeps the old meaning, where the key itself was the adapter.
+agent_type() {
+    printf '%s' "${AGENT_TYPES[$1]:-$1}"
+}
+
 agent_effort_arguments() {
     local agent=$1
     local effort=$2
 
     [[ -n "$effort" ]] || return 0
-    case "$agent" in
+    case "$(agent_type "$agent")" in
         claude) printf '%s\n' --effort "$effort" ;;
         codex) printf '%s\n' -c "model_reasoning_effort=\"${effort}\"" ;;
         pi) printf '%s\n' --thinking "$effort" ;;
@@ -2752,7 +2787,7 @@ agent_skill_instruction() {
         return
     fi
 
-    case "$agent" in
+    case "$(agent_type "$agent")" in
         claude)
             AGENT_SKILL_INSTRUCTION="Use any applicable PHP code-review skill and repository instructions available in your current installation."
             ;;
@@ -2842,9 +2877,9 @@ validate_configuration() {
             continue
         fi
 
-        case "$agent" in
+        case "$(agent_type "$agent")" in
             claude | codex)
-                require_command "$agent"
+                require_command "$(agent_type "$agent")"
                 ;;
             pi)
                 require_command pi
@@ -5366,6 +5401,7 @@ preserve_error_log() {
 
 preserve_agent_failure_artifacts() {
     local agent=$1
+    local agent_kind
     local output_file=$2
     local usage_file=$3
     local usage_json_file=$4
@@ -5387,7 +5423,8 @@ preserve_agent_failure_artifacts() {
         mv -- "$usage_json_file" "$destination"
         activity_log "Failure usage details: ${destination}"
     fi
-    if [[ ( "$agent" == pi || "$agent" == codex ) && -s "$response_file" ]]; then
+    agent_kind=$(agent_type "$agent")
+    if [[ ( "$agent_kind" == pi || "$agent_kind" == codex ) && -s "$response_file" ]]; then
         destination="${artifact_base}-events.jsonl"
         assert_new_target "$destination"
         mv -- "$response_file" "$destination"
@@ -6622,7 +6659,7 @@ start_agent() {
         return
     fi
 
-    case "$agent" in
+    case "$(agent_type "$agent")" in
         codex)
             local response_file="${usage_file}.events"
             TEMP_FILES+=("$response_file")

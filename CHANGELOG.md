@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- An agent's key no longer decides which CLI runs it. `type` names the built-in adapter — `claude`,
+  `codex`, or `pi` — and defaults to the key, so every existing configuration keeps working untouched.
+  Naming it lets several agents share one adapter with different models, which the key could not
+  express: a local Pi and a hosted Pi, or two Claude models at different efforts, in one review. The
+  adapter now decides which executable is required, how effort is spelled, whether `max_tool_calls` is
+  accepted — it was restricted to the literal key `pi`, which blocked a second Pi outright — and
+  whether an event stream is kept for diagnosis. Artifacts stay named after the key, so agents sharing
+  an adapter never collide, and a review skill is resolved by key first and by type second, so a new
+  agent inherits its adapter's skill instead of silently losing one.
+
+
 ### Fixed
 
 - A lone backslash inside a string no longer throws away a finished stream. JSON gives a backslash
