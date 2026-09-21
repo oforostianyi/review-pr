@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- The README says where the package comes from. It opened at "extract the archive" without naming
+  anything that produces one, and no release asset exists to download, so the first step led nowhere.
+  A checkout is now the documented primary path — it installs directly, with no packaging step — and
+  building the archive with `packaging/build-package.sh` is documented for handing the tool to a
+  machine that will not clone the repository, including what it writes and what makes it refuse. The
+  upgrade and rollback sections no longer assume an archive is the only form.
+- Documentation examples no longer put review checkouts under a `Work` directory, which is one
+  maintainer's personal layout rather than a convention worth prescribing. They use `$HOME/Review`
+  and a neutral `Reviews/` in the configuration example.
+
+
 ### Added
 
 - Every run appends itself to `run-history.jsonl` at the root of the reviews directory, one log across

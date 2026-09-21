@@ -210,22 +210,75 @@ The Antigravity list above is from `agy models` on the maintainer's Antigravity 
 Create a separate clone for each repository you want to review. Never point a configured repository checkout at a development checkout containing unrelated work:
 
 ```bash
-git clone git@github.com:YOUR-ORG/YOUR-REPOSITORY.git "$HOME/Work/Review"
+git clone git@github.com:YOUR-ORG/YOUR-REPOSITORY.git "$HOME/Review"
 ```
 
 The configured path must be absolute.
 
-## Install
+## Get the package
 
-Extract the archive and run its POSIX installer:
+`review-pr` is distributed as a source checkout, not as a binary. There are two
+ways to reach an installable tree, and the first one is enough for most people.
+
+### From a checkout
+
+Clone the repository and check out the release you want. `main` is the current
+development line; a tag is a released version:
 
 ```bash
-shasum -a 256 -c review-pr-1.18.0.tar.gz.sha256  # macOS
-# or: sha256sum -c review-pr-1.18.0.tar.gz.sha256 # Linux
+git clone git@github.com:OWNER/review-pr.git "$HOME/src/review-pr"
+cd "$HOME/src/review-pr"
+git checkout v1.18.0        # or stay on main for the development version
+```
+
+The checkout is directly installable — skip to **Install** and run `./install.sh`
+from this directory. Nothing has to be packaged first.
+
+### As an archive
+
+Build the distributable archive when you need to hand `review-pr` to a machine
+that will not clone the repository, or to pin exactly what was installed:
+
+```bash
+packaging/build-package.sh
+```
+
+It writes two files into `dist/` and refuses to build when `VERSION` and
+`bin/review-pr` disagree or when the private-data audit finds anything:
+
+```text
+dist/review-pr-1.18.0.tar.gz
+dist/review-pr-1.18.0.tar.gz.sha256
+```
+
+Copy both to the target machine. `REVIEW_PR_DIST_DIR=<path>` writes them
+somewhere else. If your organization publishes the archive as a release asset,
+`gh release download v1.18.0 --repo OWNER/review-pr` fetches the same two files.
+
+## Install
+
+From a checkout, run the installer in place:
+
+```bash
+./install.sh --repo "$HOME/Review" --reviews-dir "$HOME/review-pr"
+```
+
+From an archive, verify the checksum first, then extract and run the same
+installer. Verifying is the point of shipping the `.sha256` beside it — a
+truncated download otherwise fails much later and much less clearly:
+
+```bash
+sha256sum -c review-pr-1.18.0.tar.gz.sha256   # Linux
+# or: shasum -a 256 -c review-pr-1.18.0.tar.gz.sha256  # macOS
 tar -xzf review-pr-1.18.0.tar.gz
 cd review-pr-1.18.0
-./install.sh --repo "$HOME/Work/Review" --reviews-dir "$HOME/review-pr"
+./install.sh --repo "$HOME/Review" --reviews-dir "$HOME/review-pr"
 ```
+
+`--repo` is the dedicated review checkout created above and must be absolute;
+`--reviews-dir` is where reports are written and defaults to `$HOME/review-pr`.
+Run `./install.sh --help` for the full set, including `--prefix` and
+`--config-dir`.
 
 The installer detects the GitHub `owner/repository` slug from that checkout. Pass `--github-repository OWNER/REPOSITORY` only when automatic detection is not available.
 
@@ -471,12 +524,12 @@ Confirmed findings are exported by default. `--include uncertain` adds the claim
 
 ## Upgrade
 
-Extract a newer archive and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended. Each file is renamed into place rather than rewritten where it stands, so a review already running keeps reading the build it started with instead of a half-replaced script.
+Get the newer version the same way you got the first one — pull the checkout and check out the newer tag, or extract a newer archive — and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended. Each file is renamed into place rather than rewritten where it stands, so a review already running keeps reading the build it started with instead of a half-replaced script.
 
-Use `review-pr --version` to identify the installed release. See `CHANGELOG.md` in the release archive for release notes and compatibility-impacting changes.
+Use `review-pr --version` to identify the installed release. See `CHANGELOG.md` in the checkout or the release archive for release notes and compatibility-impacting changes.
 
-Rollback works the same way: extract the previous archive and run its `install.sh` with the same
-options. Program files are replaced wholesale and the configuration is backed up again first. If a
+Rollback works the same way: check out the previous tag, or extract the previous archive, and run
+that `install.sh` with the same options. Program files are replaced wholesale and the configuration is backed up again first. If a
 newer release migrated `config.json` (for example the legacy single `review_repository` field into
 `repositories`), restore the matching pre-upgrade copy from `<config-dir>/backups/config-<timestamp>.json`
 before running the older version; backups are byte-for-byte copies and are never pruned by the

@@ -97,12 +97,12 @@ Add repositories later without creating another utility. Each entry needs a sepa
   "repositories": {
     "backend": {
       "github": "example/backend",
-      "checkout": "/Users/example/Work/backend-review",
+      "checkout": "/Users/example/Reviews/backend-review",
       "profile": "php"
     },
     "service": {
       "github": "example/service",
-      "checkout": "/Users/example/Work/service-review",
+      "checkout": "/Users/example/Reviews/service-review",
       "skills": {
         "codex": "php-code-review"
       }
