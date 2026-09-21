@@ -4,6 +4,20 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A lone backslash inside a string no longer throws away a finished stream. JSON gives a backslash
+  one job, so a backslash before a character that starts no escape can only have meant a literal
+  backslash; the orchestrator doubles it and parses the line again. Reviewing PHP makes this the
+  likeliest way for a valid review to be rejected — every fully qualified class name carries
+  backslashes — and it already had: on PR 28956 the reviewer finished a complete twelve-record stream,
+  eleven findings and the terminal record, and the run failed after 65 requests and 84 tool calls over
+  one unescaped `GuzzleHttp\Handler\MockHandler`. A line that still does not parse fails as before.
+- The three `ndjson-v1` contracts now show how to escape a backslash, with the PHP class name that
+  causes the failure as the example. The blocks sit in heredocs with different quoting, so the same
+  source text does not reach the model the same way; a test reads the generated prompts and checks
+  that the wrong example really carries one backslash in all three.
+
 ### Changed
 
 - The distributed example configuration runs `ndjson-v1` in all three stages and no longer carries

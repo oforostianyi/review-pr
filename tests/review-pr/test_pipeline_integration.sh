@@ -732,6 +732,7 @@ run_ndjson_cross_case() {
     local config_temp="$case_dir/config.tmp.json"
     local manifest work_dir stem timestamp alpha_raw alpha_findings alpha_report alpha_prompt final_raw final_findings final_report final_prompt rerun_manifest contract_prompt findings_export
     local forced_rerun_status forced_rerun_manifest mislabelled_status mislabelled_manifest
+    local contract_prompt
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$capture" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -895,6 +896,14 @@ run_ndjson_cross_case() {
         'structured final synthesis is told that check and tool failures are limitations'
     assert_file_contains "$alpha_prompt" 'is a verification limitation, never a finding by itself' \
         'structured cross-review is told that check and tool failures are limitations'
+    # The three contract blocks sit in heredocs with different quoting, so the same
+    # source text does not reach the model the same way. An example that teaches the
+    # wrong escaping is worse than no example: check what the prompt actually says.
+    for contract_prompt in "$capture/primary-review-alpha-attempt-1.prompt" "$alpha_prompt" "$final_prompt"; do
+        assert_file_contains "$contract_prompt" \
+            'written "GuzzleHttp\\Handler\\MockHandler", never "GuzzleHttp\Handler\MockHandler"' \
+            "the escaping rule reaches ${contract_prompt##*/} with one backslash in the wrong example"
+    done
     assert_file_contains "$capture/primary-review-alpha-attempt-1.prompt" 'is a verification limitation, never a finding by itself' \
         'structured primary review is told that check and tool failures are limitations'
     assert_file_exists "$work_dir/${stem}-final-diagnostics.json" 'a structured final run publishes the diagnostics sidecar'

@@ -226,7 +226,7 @@ Clone the repository and check out the release you want. `main` is the current
 development line; a tag is a released version:
 
 ```bash
-git clone git@github.com:OWNER/review-pr.git "$HOME/src/review-pr"
+git clone git@github.com:oforostianyi/review-pr.git "$HOME/src/review-pr"
 cd "$HOME/src/review-pr"
 git checkout v1.19.0        # or stay on main for the development version
 ```
@@ -260,7 +260,7 @@ Tagged releases carry the same two files, built and checked by CI from the tagge
 commit, so a target machine needs neither a clone nor a build:
 
 ```bash
-gh release download v1.19.0 --repo OWNER/review-pr --pattern 'review-pr-*'
+gh release download v1.19.0 --repo oforostianyi/review-pr --pattern 'review-pr-*'
 ```
 
 ## Install

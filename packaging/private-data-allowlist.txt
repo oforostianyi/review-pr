@@ -5,6 +5,12 @@
 # path:<file>    skips one tracked file entirely. Use only for files whose job is
 #                to contain the audited patterns themselves.
 
+# The project's own public address. The audit treats the maintainer's handle as
+# private because it appears in personal paths; the repository slug is not
+# private, it is where the package is published. Only this exact slug is
+# allowed, so `/home/oforostianyi/...` still fails the audit.
+pattern:oforostianyi/review-pr
+
 # Placeholder home directories used in README and docs examples.
 pattern:/home/example(/[A-Za-z0-9._/-]*)?
 pattern:/Users/example(/[A-Za-z0-9._/-]*)?

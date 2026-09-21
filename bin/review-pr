@@ -2987,6 +2987,44 @@ assert_new_target() {
     [[ ! -e "$target" ]] || die "Refusing to overwrite existing artifact: ${target}"
 }
 
+# JSON gives a backslash exactly one job, and a backslash before a character that
+# starts no escape has exactly one possible meaning: a literal backslash the
+# model failed to double. Reviewing PHP makes this the likeliest way for a valid
+# stream to be rejected -- every fully qualified class name carries backslashes,
+# and `GuzzleHttp\Handler\MockHandler` inside a string is invalid JSON. Doubling
+# such a backslash is arithmetic, not interpretation: it cannot change what the
+# string says, and a line that still does not parse is left to fail.
+repair_lone_json_escapes() {
+    local line=$1
+    local repaired=''
+    local index=0
+    local length=${#line}
+    local character
+    local following
+
+    while (( index < length )); do
+        character=${line:index:1}
+        if [[ "$character" == '\' ]]; then
+            following=${line:index+1:1}
+            case "$following" in
+                '"'|'\'|'/'|b|f|n|r|t|u)
+                    repaired+="${character}${following}"
+                    index=$((index + 2))
+                    continue
+                    ;;
+                *)
+                    repaired+='\\'
+                    index=$((index + 1))
+                    continue
+                    ;;
+            esac
+        fi
+        repaired+=$character
+        index=$((index + 1))
+    done
+    printf '%s' "$repaired"
+}
+
 normalize_primary_ndjson_stream() {
     local input_file=$1
     local output_file=$2
@@ -3208,6 +3246,8 @@ process_primary_ndjson_output() {
     local records_array_file
     local line
     local line_number=0
+    local repaired_line
+    local escape_repairs=0
     local raw_target=${PRIMARY_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-raw.ndjson}
     local findings_target=${PRIMARY_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-findings.json}
 
@@ -3228,8 +3268,13 @@ process_primary_ndjson_output() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
-            FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
-            return 1
+            repaired_line=$(repair_lone_json_escapes "$line")
+            if [[ "$repaired_line" == "$line" ]] \
+                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
+                return 1
+            fi
+            escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
     if ! jq -s '.' "$records_file" >"$records_array_file"; then
@@ -3519,6 +3564,8 @@ process_cross_ndjson_output() {
     local agent=$2
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local line_number=0
+    local repaired_line
+    local escape_repairs=0
     local raw_target=${CROSS_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson}
     local findings_target=${CROSS_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json}
 
@@ -3544,8 +3591,13 @@ process_cross_ndjson_output() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
-            FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
-            return 1
+            repaired_line=$(repair_lone_json_escapes "$line")
+            if [[ "$repaired_line" == "$line" ]] \
+                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
+                return 1
+            fi
+            escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
     jq -s '.' "$records_file" >"$records_array_file" || {
@@ -4482,6 +4534,8 @@ process_final_ndjson_output() {
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local resolutions_file disputes_file resolutions_canonical_file diagnostics_file
     local line_number=0
+    local repaired_line
+    local escape_repairs=0
 
     FINDING_CONTRACT_FAILURE_REASON=""
     FINAL_PROCESSED_RESOLUTIONS_FILE=""
@@ -4503,7 +4557,15 @@ process_final_ndjson_output() {
     : >"$records_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
-        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"; return 1; fi
+        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
+            repaired_line=$(repair_lone_json_escapes "$line")
+            if [[ "$repaired_line" == "$line" ]] \
+                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
+                return 1
+            fi
+            escape_repairs=$((escape_repairs + 1))
+        fi
     done <"$normalized_file"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     # Resolution records travel in the same stream but are validated against
@@ -5355,7 +5417,7 @@ write_primary_prompt() {
     reviewer_label=$(agent_label "$reviewer")
     if [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         output_contract_block=$(cat <<EOF
-Output contract: ndjson-v1. This orchestrator contract overrides any Markdown formatting requested by a skill. Return only newline-delimited JSON: exactly one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
+Output contract: ndjson-v1. This orchestrator contract overrides any Markdown formatting requested by a skill. Return only newline-delimited JSON: exactly one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment. Every backslash inside a string value must be doubled: a PHP class name is written "GuzzleHttp\\\\Handler\\\\MockHandler", never "GuzzleHttp\\Handler\\MockHandler", which is not valid JSON and rejects the whole record.
 
 Every issue must be one atomic finding record with exactly these keys: record, schema_version, source_id, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback.
 
@@ -5464,7 +5526,7 @@ EOF
         # block below is the only formatting instruction under ndjson-v1.
         cross_instructions_block=''
         output_contract_block=$(cat <<'EOF'
-Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
+Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment. Every backslash inside a string value must be doubled: a PHP class name is written "GuzzleHttp\\Handler\\MockHandler", never "GuzzleHttp\Handler\MockHandler", which is not valid JSON and rejects the whole record.
 
 Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of objects with exactly the keys agent and source_id, each one copied verbatim from the record_ref of a supplied input finding. Never build the pair yourself and never decorate either value: an agent key is exactly what record_ref says, such as claude, never a phrase like cross-review-claude. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
 
@@ -5659,7 +5721,7 @@ write_final_prompt() {
         comparison_prompt_block='Extended comparison content is not part of this machine-readable synthesis. A standalone comparison may be generated later from the deterministic final report.'
         [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] || dispute_contract_block=$FINAL_RESOLUTION_CONTRACT_BLOCK
         final_format_block=$(cat <<EOF
-Output contract: ndjson-v1. This orchestrator contract overrides every Markdown format requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment.
+Output contract: ndjson-v1. This orchestrator contract overrides every Markdown format requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment. Every backslash inside a string value must be doubled: a PHP class name is written "GuzzleHttp\\\\Handler\\\\MockHandler", never "GuzzleHttp\\Handler\\MockHandler", which is not valid JSON and rejects the whole record.
 
 Classify every supplied canonical cross-review finding. Each output finding has exactly these keys: record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary.
 

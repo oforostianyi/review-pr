@@ -30,6 +30,47 @@ assert_true 'raw agent response is preserved byte-for-byte' \
     cmp -s "$test_dir/fixtures/primary-findings-valid.ndjson" "${PRIMARY_RAW_OUTPUTS[codex]}"
 assert_eq ndjson-v1 "$(jq -r '.contract' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
     'canonical finding artifact records its protocol'
+
+# A PHP namespace inside a JSON string is the single most likely way for a
+# reviewer of PHP to emit an invalid escape: `GuzzleHttp\Handler` is not valid
+# JSON, and a backslash before a character that starts no escape can only have
+# meant a literal backslash. A whole finished stream was thrown away over one.
+escape_input="$test_root/primary-invalid-escape.ndjson"
+escape_raw="$test_root/fixture-en-escape-raw.ndjson"
+escape_findings="$test_root/fixture-en-escape-findings.json"
+python3 - "$test_dir/fixtures/primary-findings-valid.ndjson" "$escape_input" <<'PYTHON'
+import json, sys
+
+lines = [line for line in open(sys.argv[1], encoding='utf-8').read().split('\n') if line.strip()]
+out = []
+for line in lines:
+    record = json.loads(line)
+    if record.get('record') == 'finding' and record.get('recommendation'):
+        record['recommendation'] = 'Mock it with GuzzleHttp\\Handler\\MockHandler instead.'
+        # Undo JSON's own escaping so the line carries the lone backslashes a
+        # model writes when it quotes a PHP namespace.
+        out.append(json.dumps(record, ensure_ascii=False).replace('\\\\', '\\'))
+    else:
+        out.append(line)
+open(sys.argv[2], 'w', encoding='utf-8').write('\n'.join(out) + '\n')
+PYTHON
+assert_false 'the fixture really is invalid JSON before the repair' \
+    jq -e . "$escape_input"
+saved_raw=${PRIMARY_RAW_OUTPUTS[codex]}
+saved_findings=${PRIMARY_FINDINGS_OUTPUTS[codex]}
+PRIMARY_RAW_OUTPUTS[codex]=$escape_raw
+PRIMARY_FINDINGS_OUTPUTS[codex]=$escape_findings
+assert_true 'a lone backslash inside a string does not fail the phase' \
+    process_primary_ndjson_output "$escape_input" codex
+assert_file_contains "$escape_findings" 'GuzzleHttp' \
+    'the repaired record keeps the text the model wrote'
+assert_eq '2' "$(jq -r '.finding_count' "$escape_findings")" \
+    'every record of the stream survives the repair'
+assert_eq 'GuzzleHttp\Handler\MockHandler' \
+    "$(jq -r '.findings[0].recommendation | capture("(?<n>GuzzleHttp[^ ]*)").n' "$escape_findings")" \
+    'the namespace reads as one literal backslash per separator, not two'
+PRIMARY_RAW_OUTPUTS[codex]=$saved_raw
+PRIMARY_FINDINGS_OUTPUTS[codex]=$saved_findings
 assert_eq '2' "$(jq -r '.finding_count' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
     'canonical finding count matches the completed stream'
 assert_file_contains "$input" '<!-- review-pr:anchor:changed-line -->' \
