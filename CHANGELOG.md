@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- The distributed example configuration runs `ndjson-v1` in all three stages and no longer carries
+  `prompts`. It shipped the `markdown` contract with cross-review and final prompts that describe
+  Markdown classification tables — instructions the orchestrator discards under `ndjson-v1`, where the
+  model returns records and the Markdown is rendered deterministically. A new installation therefore
+  started on the older mode, and anyone who switched contracts kept prompts that contradicted them.
+  The example also pins `claude-opus-5` and `gpt-5.6-terra` at `high` effort for its two enabled
+  agents instead of leaving the model empty.
+- `docs/review-pr.md` says that `prompts` apply only to the `markdown` contract and are not sent under
+  `ndjson-v1`, which was true in the code but stated nowhere.
+
+
 ## [1.19.0] - 2026-09-21
 
 ### Added

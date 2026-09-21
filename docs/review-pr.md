@@ -535,6 +535,8 @@ Supported modes are `auto`, `table`, `log`, and `off`. `table` also falls back t
 
 The orchestrator keeps its core source-verification and safety rules, while output-format instructions are configurable under `prompts`. A prompt may be one string or an array of lines; arrays are joined with newlines.
 
+These blocks apply **only to the `markdown` contract**. Under `ndjson-v1` the stage's configured prompt is not sent at all: the model returns records and the orchestrator renders the Markdown itself, so a prompt describing headings or tables would contradict the output contract rather than shape it. A configuration that runs `ndjson-v1` everywhere can delete `prompts` entirely — the distributed example does.
+
 ```json
 {
   "prompts": {
@@ -550,7 +552,7 @@ The orchestrator keeps its core source-verification and safety rules, while outp
 }
 ```
 
-The distributed cross-review prompt starts with a language-specific classification table. Final synthesis uses a non-overridable `## Classification table` for `EN` or `## Таблиця класифікацій` for `UA`. Its severity column is `Severity` (`EN`) or `Серйозність` (`UA`); every confirmed row must use exactly `P0`, `P1`, `P2`, or `P3` (use `—` only where severity does not apply). The final table must account for every atomic cross-review claim as `CONFIRMED`, `REJECTED`, or `UNCERTAIN`, consolidate duplicates, and show concrete verification.
+Under the `markdown` contract the cross-review prompt starts with a language-specific classification table. Final synthesis uses a non-overridable `## Classification table` for `EN` or `## Таблиця класифікацій` for `UA`. Its severity column is `Severity` (`EN`) or `Серйозність` (`UA`); every confirmed row must use exactly `P0`, `P1`, `P2`, or `P3` (use `—` only where severity does not apply). The final table must account for every atomic cross-review claim as `CONFIRMED`, `REJECTED`, or `UNCERTAIN`, consolidate duplicates, and show concrete verification.
 
 When the corresponding comparison mode is `inline`, that cross-review or final synthesis embeds a compact conclusion, a Sources table, a `Who found, accepted, or missed what` reviewer matrix, Agreements and Disagreements, a Review-depth comparison table, and a prioritized Agreed actions list. With final mode `standalone`, the same material is generated after the core final synthesis in its own report. The localized UA headings are `## Висновок`, `## Джерела`, `## Хто що знайшов, прийняв або пропустив`, `### Збіги`, `### Розбіжності`, `## Порівняння глибини перевірки`, and `## Узгоджені дії`.
 

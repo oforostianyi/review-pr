@@ -105,8 +105,14 @@ assert_eq 'example/repository' "$(jq -r '.repositories.repository.github' "$conf
     'the default repository records the requested GitHub identity'
 assert_eq "$reviews_dir" "$(jq -r '.reviews_directory' "$config_dir/config.json")" \
     'the reviews directory is recorded as requested'
-assert_eq 'markdown' "$(jq -r '.reporting.finding_contract.final' "$config_dir/config.json")" \
-    'the default configuration keeps the backward-compatible Markdown contract'
+# A fresh installation starts on the structured contract. `markdown` remains the
+# code default for a configuration that says nothing, so existing installations
+# are untouched, but shipping it as the installed default left new users on the
+# older mode and on prompts the structured contract discards.
+assert_eq 'ndjson-v1' "$(jq -r '.reporting.finding_contract.final' "$config_dir/config.json")" \
+    'a fresh installation starts on the structured contract'
+assert_eq 'false' "$(jq 'has("prompts")' "$config_dir/config.json")" \
+    'the installed configuration carries no prompts, which ndjson-v1 would discard'
 
 assert_eq "review-pr ${package_version}" "$(HOME=$home_dir PATH="$fake_bin:$PATH" "$prefix/bin/review-pr" --version)" \
     'the installed launcher runs the implementation and reports the package version'
@@ -115,7 +121,7 @@ HOME=$home_dir PATH="$fake_bin:$PATH" "$prefix/bin/review-pr" --show-config \
     || fail "--show-config failed on a clean install: $(cat "$test_root/show-config.err")"
 assert_file_contains "$test_root/show-config.txt" "review-pr version: ${package_version}" \
     '--show-config works on a clean install through the launcher and its config pointer'
-assert_file_contains "$test_root/show-config.txt" 'Final finding contract: markdown' \
+assert_file_contains "$test_root/show-config.txt" 'Final finding contract: ndjson-v1' \
     '--show-config resolves the default reporting configuration'
 assert_true 'the launcher accepts an explicit Bash override' \
     env HOME="$home_dir" PATH="$fake_bin:$PATH" REVIEW_PR_BASH="$(command -v bash)" "$prefix/bin/review-pr" --version
