@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-09-21
+
 ### Added
 
 - Pushing a `v*` tag publishes the archive. CI already built and verified the package on every push,
