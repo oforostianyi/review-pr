@@ -135,6 +135,8 @@ review-pr --version
 
 Each new full-run and final-rerun manifest records the exact `review_pr_version` used to create it. Release notes are maintained in the root `CHANGELOG.md` and are included in the portable release archive.
 
+Pushing a `v*` tag publishes the release. CI runs the full suite first, then refuses the tag if it disagrees with `VERSION`, builds the archive, and attaches `review-pr-<version>.tar.gz` and its `.sha256` to the GitHub release, with the notes taken from that version's `CHANGELOG.md` section by `packaging/release-notes.sh`. Re-pushing the same tag replaces the attached files rather than failing, so a corrected build can be published without deleting the release.
+
 
 Before tagging a release, run the release-candidate dry run from the source repository:
 

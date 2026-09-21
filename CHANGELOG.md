@@ -4,6 +4,20 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- Pushing a `v*` tag publishes the archive. CI already built and verified the package on every push,
+  but only as a workflow artifact that expires after two weeks, so the install instructions had
+  nothing durable to point at. The release job runs after the test jobs, refuses a tag that disagrees
+  with `VERSION` — an archive whose contents claim another version is worse than no archive — builds
+  the package, and attaches `review-pr-<version>.tar.gz` and its `.sha256` to the GitHub release.
+  Re-pushing a tag replaces the attached files instead of failing, so a corrected build can be
+  published without deleting the release.
+- `packaging/release-notes.sh` prints one version's `CHANGELOG.md` section, which the release job
+  uses as the release notes. It lives in a script rather than inline in the workflow so it can be
+  tested: the section runs from its own heading to the next one, never includes `Unreleased` or the
+  file preamble, and a version with no section fails rather than publishing an empty release page.
+
 ### Changed
 
 - The README says where the package comes from. It opened at "extract the archive" without naming

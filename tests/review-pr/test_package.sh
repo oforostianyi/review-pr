@@ -90,4 +90,47 @@ assert_true 'the installation from the archive passes --show-config' \
 assert_true 'the installed implementation is byte-for-byte the packaged one' \
     cmp -s "$extract_dir/$package_name/bin/review-pr" "$home_dir/.local/libexec/review-pr/review-pr"
 
+# A release publishes the archive together with the notes for that version, so
+# the section has to be cut out of the changelog exactly: from its own heading to
+# the next one, and never the Unreleased section that sits above it.
+notes_changelog="$test_root/CHANGELOG.md"
+cat >"$notes_changelog" <<'CHANGELOG'
+# Changelog
+
+Preamble that belongs to no release.
+
+## [Unreleased]
+
+### Added
+
+- Something not released yet.
+
+## [9.9.9] - 2026-01-02
+
+### Fixed
+
+- The thing that was broken.
+- Another line.
+
+## [9.9.8] - 2026-01-01
+
+### Added
+
+- An older entry.
+CHANGELOG
+
+notes_out="$test_root/notes.md"
+"$repo_root/packaging/release-notes.sh" --changelog "$notes_changelog" 9.9.9 >"$notes_out" \
+    || fail "release-notes.sh failed: $(cat "$notes_out")"
+assert_file_contains "$notes_out" 'The thing that was broken.' 'the notes carry the entries of that version'
+assert_file_contains "$notes_out" 'Another line.' 'the notes carry every entry of that version'
+assert_false 'the notes stop before the previous version' \
+    grep -q 'An older entry.' "$notes_out"
+assert_false 'the notes never include the unreleased section' \
+    grep -q 'Something not released yet.' "$notes_out"
+assert_false 'the notes leave out the changelog preamble' \
+    grep -q 'belongs to no release' "$notes_out"
+assert_false 'a version with no section is refused rather than published empty' \
+    "$repo_root/packaging/release-notes.sh" --changelog "$notes_changelog" 1.2.3
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

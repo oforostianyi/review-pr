@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -145,3 +146,44 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
           retention-days: 14
+
+  # A tag publishes what CI just verified. Without this the archive existed only
+  # as a workflow artifact that expires, so the install instructions had nothing
+  # to point at.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, minimum-jq, matrix, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse a tag that disagrees with VERSION
+        run: |
+          set -euo pipefail
+          version=$(sed -n '1p' VERSION)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            printf 'tag %s does not match VERSION %s\n' "${GITHUB_REF_NAME}" "$version" >&2
+            exit 1
+          fi
+
+      - name: Build package
+        run: bash packaging/build-package.sh
+
+      - name: Publish the archive and its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '1p' VERSION)
+          bash packaging/release-notes.sh "$version" >release-notes.md
+          archive="dist/review-pr-${version}.tar.gz"
+          checksum="${archive}.sha256"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "$archive" "$checksum" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "$archive" "$checksum" \
+              --title "review-pr ${version}" --notes-file release-notes.md
+          fi

@@ -252,8 +252,16 @@ dist/review-pr-1.18.0.tar.gz.sha256
 ```
 
 Copy both to the target machine. `REVIEW_PR_DIST_DIR=<path>` writes them
-somewhere else. If your organization publishes the archive as a release asset,
-`gh release download v1.18.0 --repo OWNER/review-pr` fetches the same two files.
+somewhere else.
+
+### From a release
+
+Tagged releases carry the same two files, built and checked by CI from the tagged
+commit, so a target machine needs neither a clone nor a build:
+
+```bash
+gh release download v1.18.0 --repo OWNER/review-pr --pattern 'review-pr-*'
+```
 
 ## Install
 
