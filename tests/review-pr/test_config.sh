@@ -349,4 +349,27 @@ assert_file_contains <(printf '%s\n' "$skill_output") 'pi-local: skill=php-code-
 assert_file_contains <(printf '%s\n' "$skill_output") 'pi-cloud: skill=other-review' \
     'an explicit entry for the agent key still wins over the type'
 
+# Timestamps used to be pinned to one maintainer's zone. The setting moves all of
+# them together -- run identifiers, manifest times, log lines, the dashboard clock.
+timezone_config="$test_root/timezone.json"
+jq '.timezone = "America/New_York"' "$config_file" >"$timezone_config"
+assert_file_contains <("$repo_root/bin/review-pr" --config "$timezone_config" --show-config) \
+    'Timezone: America/New_York' 'the configured timezone is visible in diagnostics'
+assert_file_contains <("$repo_root/bin/review-pr" --config "$config_file" --show-config) \
+    'Timezone: system default' 'an unset timezone follows the machine'
+
+# TZ never reports an unknown zone; it silently gives UTC, so a typo would rename
+# every run without a word.
+unknown_timezone="$test_root/unknown-timezone.json"
+jq '.timezone = "Europe/Warsow"' "$config_file" >"$unknown_timezone"
+assert_file_contains <(config_error "$unknown_timezone") 'Europe/Warsow' \
+    'a misspelled timezone is quoted back instead of silently becoming UTC'
+assert_file_contains <(config_error "$unknown_timezone") 'timezone' \
+    'the error names the setting the typo is in'
+
+traversing_timezone="$test_root/traversing-timezone.json"
+jq '.timezone = "../../etc/passwd"' "$config_file" >"$traversing_timezone"
+assert_file_contains <(config_error "$traversing_timezone") 'timezone' \
+    'a timezone that is a path rather than a zone name is refused'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

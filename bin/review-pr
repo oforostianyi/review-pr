@@ -94,6 +94,11 @@ SELECTED_REPOSITORY_ALIAS=""
 SELECTED_REPOSITORY_PROFILE=""
 GITHUB_REPOSITORY=""
 
+# Empty means the machine's own zone. Every timestamp the tool writes comes from
+# review_pr_date, so this one setting moves the run identifiers, the manifest
+# times, the log lines and the dashboard clock together.
+REVIEW_PR_TIMEZONE=""
+
 FINAL_SYNTHESIZER=codex
 FINALIZATION_MODEL=""
 FINALIZATION_EFFORT=""
@@ -348,6 +353,72 @@ render_findings_export() {
     ' "$canonical_file"
 }
 
+# A run identifier ends in whatever `date +%Z` printed when the run started. That
+# is an abbreviation for most zones, but a zone without one prints a numeric
+# offset instead, and some of those carry no minutes: America/Sao_Paulo yields
+# `20260922-110355--03`. All three shapes have to be recognised, or a run made
+# outside Central Europe could not be selected with --run at all.
+readonly RUN_TIMESTAMP_PATTERN='[0-9]{8}-[0-9]{6}-([A-Za-z]{2,6}|[+-][0-9]{2}([0-9]{2})?)'
+
+is_run_timestamp() {
+    [[ "$1" =~ ^${RUN_TIMESTAMP_PATTERN}$ ]]
+}
+
+# A zone abbreviation does not order chronologically -- GMT follows IST but sorts
+# before it -- so the largest identifier is not the newest run. Manifests record
+# created_at with a numeric offset, which names an instant exactly; this turns one
+# into seconds so two runs can be compared whatever clock each was written by.
+# The civil-date arithmetic is done here rather than handed to `date`, whose
+# parsing flags differ between GNU and BSD.
+timestamp_to_epoch() {
+    local year month day hour minute second sign offset_hours offset_minutes
+    local era year_of_era day_of_year day_of_era days offset
+
+    [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})([+-])([0-9]{2}):?([0-9]{2})$ ]] || return 1
+    year=$((10#${BASH_REMATCH[1]}))
+    month=$((10#${BASH_REMATCH[2]}))
+    day=$((10#${BASH_REMATCH[3]}))
+    hour=$((10#${BASH_REMATCH[4]}))
+    minute=$((10#${BASH_REMATCH[5]}))
+    second=$((10#${BASH_REMATCH[6]}))
+    sign=${BASH_REMATCH[7]}
+    offset_hours=$((10#${BASH_REMATCH[8]}))
+    offset_minutes=$((10#${BASH_REMATCH[9]}))
+
+    (( month > 2 )) || year=$((year - 1))
+    era=$((year / 400))
+    year_of_era=$((year - era * 400))
+    if (( month > 2 )); then
+        day_of_year=$(((153 * (month - 3) + 2) / 5 + day - 1))
+    else
+        day_of_year=$(((153 * (month + 9) + 2) / 5 + day - 1))
+    fi
+    day_of_era=$((year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year))
+    days=$((era * 146097 + day_of_era - 719468))
+    offset=$((offset_hours * 3600 + offset_minutes * 60))
+    if [[ "$sign" == '+' ]]; then
+        offset=$((-offset))
+    fi
+    printf '%d' $((days * 86400 + hour * 3600 + minute * 60 + second + offset))
+}
+
+# Decides which of two candidate manifests is the newer run. Falls back to the
+# identifier for runs made before created_at was recorded, which is all this ever
+# had to go on.
+manifest_is_newer() {
+    local candidate=$1 candidate_timestamp=$2 selected=$3 selected_timestamp=$4
+    local candidate_epoch selected_epoch
+
+    [[ -n "$selected_timestamp" ]] || return 0
+    candidate_epoch=$(timestamp_to_epoch "$(jq -r '.created_at // ""' "$candidate" 2>/dev/null)") || candidate_epoch=""
+    selected_epoch=$(timestamp_to_epoch "$(jq -r '.created_at // ""' "$selected" 2>/dev/null)") || selected_epoch=""
+    if [[ -n "$candidate_epoch" && -n "$selected_epoch" ]]; then
+        (( candidate_epoch > selected_epoch ))
+        return
+    fi
+    [[ "$candidate_timestamp" > "$selected_timestamp" ]]
+}
+
 # Publishes that export beside the final report the person reads, unless the
 # configured scope is off or the run produced no structured final synthesis.
 publish_findings_export() {
@@ -355,7 +426,7 @@ publish_findings_export() {
     [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] || return 0
     [[ -n "$FINAL_FINDINGS_EXPORT_OUTPUT" && -s "$FINAL_FINDINGS_OUTPUT" ]] || return 0
     local export_temp run
-    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" | tail -n 1)
+    run=$(grep -oE "$RUN_TIMESTAMP_PATTERN" <<<"${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" | tail -n 1)
     new_temp_file 'findings-export'; export_temp=$NEW_TEMP_FILE
     render_findings_export "$FINAL_FINDINGS_OUTPUT" "$run" "$FINDINGS_EXPORT_SCOPE" >"$export_temp" \
         || die "Could not render the findings export from ${FINAL_FINDINGS_OUTPUT}"
@@ -394,7 +465,7 @@ export_review_findings() {
     jq -e '.findings | type == "array"' "$selected" >/dev/null 2>&1 \
         || die "Final findings artifact is unreadable: ${selected}"
 
-    run=$(grep -oE '[0-9]{8}-[0-9]{6}-(CET|CEST)' <<<"${selected##*/}" | tail -n 1)
+    run=$(grep -oE "$RUN_TIMESTAMP_PATTERN" <<<"${selected##*/}" | tail -n 1)
     render_findings_export "$selected" "$run" "$scope"
 }
 
@@ -402,9 +473,29 @@ show_version() {
     printf 'review-pr %s\n' "$REVIEW_PR_VERSION"
 }
 
+review_pr_date() {
+    if [[ -n "$REVIEW_PR_TIMEZONE" ]]; then
+        TZ=$REVIEW_PR_TIMEZONE date "$@"
+    else
+        date "$@"
+    fi
+}
+
+# TZ does not report an unknown zone: it falls back to UTC without a word, which
+# would quietly rename every run a typo touched. The zone database is a directory
+# of files, so the name has to resolve to one of them, and a name that could climb
+# out of it is not a zone name at all.
+timezone_is_known() {
+    local zone=$1
+
+    [[ "$zone" =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$ ]] || return 1
+    [[ "$zone" != *..* ]] || return 1
+    [[ -f "${TZDIR:-/usr/share/zoneinfo}/${zone}" ]]
+}
+
 log() {
     local message
-    message=$(printf '[review-pr %s] %s' "$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')" "$*")
+    message=$(printf '[review-pr %s] %s' "$(review_pr_date '+%Y-%m-%d %H:%M:%S %Z')" "$*")
     # A line printed into the live table leaves the cursor one row below where
     # the next redraw assumes it is, so every later frame strands a copy of its
     # top line and the header appears two or three times. While the table is up
@@ -603,8 +694,11 @@ describe_configuration_problems() {
         . as $config
         | [
             (if type != "object" then "the configuration is \(type), not an object" else empty end),
-            ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer"])[]
+            ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"])[]
                 | "unknown top-level key \(tojson)"),
+            (if (.timezone != null) and ((.timezone | type) != "string")
+             then "timezone is \(.timezone | tojson); it must be a timezone name such as \"Europe/Warsaw\""
+             else empty end),
             enum_problem("language"; .language; ["EN", "UA"]),
             enum_problem("finalization.language"; .finalization.language; ["EN", "UA"]),
             enum_problem("reporting.findings_export"; .reporting.findings_export; ["confirmed", "uncertain", "all", "off"]),
@@ -677,9 +771,11 @@ describe_configuration_problems() {
 }
 
 die_with_configuration_problems() {
+    local extra=${1:-}
     local problems
 
     problems=$(describe_configuration_problems)
+    [[ -z "$extra" ]] || problems=${problems:+${problems}$'\n'}${extra}
     if [[ -z "$problems" ]]; then
         die "Invalid review-pr JSON configuration: ${CONFIG_FILE}"
     fi
@@ -729,7 +825,8 @@ die_with_configuration_problems() {
             (if has("skills") then (.skills | valid_skill_map) else true end);
 
         type == "object" and
-        ((keys - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer"]) | length == 0) and
+        ((keys - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"]) | length == 0) and
+        (if has("timezone") then (.timezone | type == "string") else true end) and
         (if has("language") then (.language | type == "string" and valid_language) else true end) and
         (if has("review_repository") then (.review_repository | type == "string" and startswith("/")) else true end) and
         (if has("reviews_directory") then (.reviews_directory | type == "string" and startswith("/")) else true end) and
@@ -908,6 +1005,12 @@ die_with_configuration_problems() {
 
     if ! jq -e "$validation_filter" "$CONFIG_FILE" >/dev/null; then
         die_with_configuration_problems
+    fi
+
+    REVIEW_PR_TIMEZONE=$(jq -r '.timezone // ""' "$CONFIG_FILE")
+    if [[ -n "$REVIEW_PR_TIMEZONE" ]] && ! timezone_is_known "$REVIEW_PR_TIMEZONE"; then
+        die_with_configuration_problems \
+            "timezone is $(jq -n --arg zone "$REVIEW_PR_TIMEZONE" '$zone | tojson' -r); no zone of that name is installed"
     fi
 
     if [[ -z "$REVIEWS_ROOT" ]]; then
@@ -1866,7 +1969,7 @@ write_github_context_snapshot() {
         printf 'Fetched by review-pr %s for `%s` at `%s`. This is contextual material; the checked-out source and exact diff remain the source of truth.\n\n' \
             "$REVIEW_PR_VERSION" \
             "$HEAD_SHA" \
-            "$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
+            "$(review_pr_date '+%Y-%m-%d %H:%M:%S %Z')"
 
         printf '## PR description\n\n'
         if [[ -n "$PR_BODY" ]]; then
@@ -2415,7 +2518,7 @@ collect_repository_facts() {
     jq -n \
         --argjson schema_version 1 \
         --arg status "$collection_status" \
-        --arg collected_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg collected_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
         --arg review_pr_version "$REVIEW_PR_VERSION" \
         --arg repository_alias "$SELECTED_REPOSITORY_ALIAS" \
         --arg github_repository "$GITHUB_REPOSITORY" \
@@ -2693,7 +2796,7 @@ collect_changed_line_map() {
     jq -n \
         --argjson schema_version 1 \
         --arg status complete \
-        --arg generated_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg generated_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
         --arg review_pr_version "$REVIEW_PR_VERSION" \
         --arg github_repository "$GITHUB_REPOSITORY" \
         --argjson pr_number "$PR_NUMBER" \
@@ -2955,6 +3058,11 @@ show_configuration() {
         fi
     fi
     printf 'Final effort: %s (%s)\n' "$final_effort" "$final_effort_source"
+    if [[ -n "$REVIEW_PR_TIMEZONE" ]]; then
+        printf 'Timezone: %s (%s)\n' "$REVIEW_PR_TIMEZONE" "$(review_pr_date '+%Z')"
+    else
+        printf 'Timezone: system default (%s)\n' "$(review_pr_date '+%Z')"
+    fi
     printf 'Global language: %s\n' "$GLOBAL_REVIEW_LANGUAGE"
     printf 'Primary review language: %s (%s)\n' "$PRIMARY_REVIEW_LANGUAGE" "$PRIMARY_REVIEW_LANGUAGE_NAME"
     printf 'Cross-review language: %s (%s)\n' "$CROSS_REVIEW_LANGUAGE" "$CROSS_REVIEW_LANGUAGE_NAME"
@@ -6868,7 +6976,7 @@ record_run_history() {
     entry=$(jq -c -n \
         --argjson schema_version 1 \
         --arg event "$event" \
-        --arg at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
         --arg version "$REVIEW_PR_VERSION" \
         --argjson pr "$PR_NUMBER" \
         --arg repository "${GITHUB_REPOSITORY:-}" \
@@ -7270,9 +7378,9 @@ render_dashboard_snapshot() {
     printf '\033[2K\r\n' >&2
     printf '\033[2K\r%s%s%s\n' "$footer_color" "$footer_separator" "$reset_color" >&2
     if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-        footer_status="Updated: $(TZ=Europe/Warsaw date '+%H:%M:%S %Z') · Elapsed: ${dashboard_elapsed} · Ctrl+C to stop"
+        footer_status="Updated: $(review_pr_date '+%H:%M:%S %Z') · Elapsed: ${dashboard_elapsed} · Ctrl+C to stop"
     else
-        footer_status="Updated: $(TZ=Europe/Warsaw date '+%H:%M:%S') · Elapsed: ${dashboard_elapsed} · Ctrl+C"
+        footer_status="Updated: $(review_pr_date '+%H:%M:%S') · Elapsed: ${dashboard_elapsed} · Ctrl+C"
     fi
     printf '\033[2K\r%s%s%s\n' "$footer_color" "$footer_status" "$reset_color" >&2
 }
@@ -7794,7 +7902,7 @@ create_full_manifest() {
         --arg github_repository "$GITHUB_REPOSITORY" \
         --argjson pr_number "$PR_NUMBER" \
         --arg timestamp "$TIMESTAMP" \
-        --arg created_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg created_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
         --arg base_ref "$BASE_REF" \
         --arg head_ref "$HEAD_REF" \
         --arg base_sha "$BASE_SHA" \
@@ -8031,7 +8139,7 @@ complete_full_manifest() {
              .status.pipeline = "complete" |
              .completed_at = $completed_at
          end' \
-        --arg completed_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')"
+        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')"
 }
 
 complete_full_manifest_comparison() {
@@ -8039,7 +8147,7 @@ complete_full_manifest_comparison() {
         '.status.comparison = "complete" |
          .status.pipeline = "complete" |
          .completed_at = $completed_at' \
-        --arg completed_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')"
+        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')"
 }
 
 fail_full_manifest_comparison() {
@@ -8115,12 +8223,12 @@ select_source_manifest() {
             continue
         fi
         candidate_timestamp=$(jq -r '.timestamp' "$candidate")
-        [[ "$candidate_timestamp" =~ ^[0-9]{8}-[0-9]{6}-(CET|CEST)$ ]] || continue
+        is_run_timestamp "$candidate_timestamp" || continue
         if [[ -n "$RUN_SELECTOR" ]]; then
             SOURCE_MANIFEST=$candidate
             break
         fi
-        if [[ -z "$selected_timestamp" || "$candidate_timestamp" > "$selected_timestamp" ]]; then
+        if manifest_is_newer "$candidate" "$candidate_timestamp" "$SOURCE_MANIFEST" "$selected_timestamp"; then
             SOURCE_MANIFEST=$candidate
             selected_timestamp=$candidate_timestamp
         fi
@@ -8190,6 +8298,7 @@ select_artifact_source_manifest() {
                 --arg review_id_prefix "$pr_prefix" \
                 --argjson pr_number "$PR_NUMBER" \
                 --arg run_timestamp "$RUN_SELECTOR" \
+                --arg run_pattern "$RUN_TIMESTAMP_PATTERN" \
                 --arg github_repository "$GITHUB_REPOSITORY" \
                 '. as $manifest |
                  .schema_version == 1 and
@@ -8201,7 +8310,7 @@ select_artifact_source_manifest() {
                   then true
                   else (.github_repository | ascii_downcase) == ($github_repository | ascii_downcase)
                   end) and
-                 (.timestamp | type == "string" and test("^[0-9]{8}-[0-9]{6}-(CET|CEST)$")) and
+                 (.timestamp | type == "string" and test("^" + $run_pattern + "$")) and
                  (.base_ref | type == "string" and length > 0) and
                  (.head_ref | type == "string" and length > 0) and
                  (.base_sha | type == "string" and length > 0) and
@@ -8231,7 +8340,7 @@ select_artifact_source_manifest() {
                 ((valid_count += 1))
                 continue
             fi
-            if [[ -z "$selected_timestamp" || "$candidate_timestamp" > "$selected_timestamp" ]]; then
+            if manifest_is_newer "$canonical_candidate" "$candidate_timestamp" "$SOURCE_MANIFEST" "$selected_timestamp"; then
                 SOURCE_MANIFEST=$canonical_candidate
                 selected_timestamp=$candidate_timestamp
             fi
@@ -8457,7 +8566,7 @@ run_artifact_only_final_rerun() {
     local comparison_error_log
 
     load_artifact_source_run
-    TIMESTAMP=$(TZ=Europe/Warsaw date '+%Y%m%d-%H%M%S-%Z')
+    TIMESTAMP=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
     rerun_stem="${REVIEW_ID}-${SOURCE_TIMESTAMP}-final-rerun-${TIMESTAMP}"
     REPORT_STEM=$rerun_stem
     FINAL_REPORT="${REPORT_DIR}/${rerun_stem}.md"
@@ -8852,7 +8961,7 @@ create_rerun_manifest() {
         --arg github_repository "$GITHUB_REPOSITORY" \
         --argjson pr_number "$PR_NUMBER" \
         --arg timestamp "$TIMESTAMP" \
-        --arg created_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg created_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
         --arg source_timestamp "$SOURCE_TIMESTAMP" \
         --arg source_manifest "${SOURCE_MANIFEST##*/}" \
         --arg source_type "$([[ -n "$SOURCE_MANIFEST" ]] && printf manifest || printf legacy_cross_reviews)" \
@@ -8983,7 +9092,7 @@ create_rerun_manifest() {
 
 complete_rerun_manifest() {
     local completed_at
-    completed_at=$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')
+    completed_at=$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')
     atomic_manifest_update \
         '.final_status = "complete" |
          .comparison.status = (if .comparison.mode == "standalone" then "complete" else "skipped" end) |
@@ -9002,7 +9111,7 @@ complete_rerun_manifest() {
 # and a rerun that never published a final leaves no trace. The pointer is
 # appended, so a source re-synthesised twice keeps both.
 record_final_rerun_on_source_manifest() {
-    local completed_at=${1:-$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')}
+    local completed_at=${1:-$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')}
 
     [[ -n "$SOURCE_MANIFEST" && -f "$SOURCE_MANIFEST" ]] || return 0
     [[ "$(jq -r '.final_status // ""' "$MANIFEST_FILE")" == complete ]] || return 0
@@ -10181,7 +10290,7 @@ run_contract_test() {
     done
     validate_configuration contract-test
 
-    timestamp=$(TZ=Europe/Warsaw date '+%Y%m%d-%H%M%S-%Z')
+    timestamp=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
     if [[ -n "$CONTRACT_TEST_OUTPUT" ]]; then
         root=$CONTRACT_TEST_OUTPUT
     else
@@ -10415,7 +10524,7 @@ fi
 if [[ "$FINDINGS_MODE" == true ]]; then
     (( $# == 1 )) || die "findings takes a single pull-request number"
     [[ "$RERUN_FINAL" == false && "$FORCE_RERUN" == false ]] || die "findings cannot be combined with --rerun-final or --force"
-    [[ -z "$RUN_SELECTOR" || "$RUN_SELECTOR" =~ ^[0-9]{8}-[0-9]{6}-(CET|CEST)$ ]] || die "Invalid run timestamp: ${RUN_SELECTOR}"
+    [[ -z "$RUN_SELECTOR" ]] || is_run_timestamp "$RUN_SELECTOR" || die "Invalid run timestamp: ${RUN_SELECTOR}"
     export_review_findings "$FINDINGS_INCLUDE"
     exit 0
 fi
@@ -10430,7 +10539,7 @@ fi
 if [[ "$FORCE_RERUN" == true && -z "$RUN_SELECTOR" ]]; then
     die "--force requires an exact source run via --run <timestamp>"
 fi
-if [[ -n "$RUN_SELECTOR" && ! "$RUN_SELECTOR" =~ ^[0-9]{8}-[0-9]{6}-(CET|CEST)$ ]]; then
+if [[ -n "$RUN_SELECTOR" ]] && ! is_run_timestamp "$RUN_SELECTOR"; then
     die "Invalid run timestamp: ${RUN_SELECTOR}"
 fi
 
@@ -10538,7 +10647,7 @@ fetch_github_pr_context
 
 NORMALIZED_HEAD=${HEAD_REF//\//-}
 REVIEW_ID="${PR_NUMBER}-${NORMALIZED_HEAD}"
-TIMESTAMP=$(TZ=Europe/Warsaw date '+%Y%m%d-%H%M%S-%Z')
+TIMESTAMP=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
 NORMALIZED_GITHUB_REPOSITORY=${GITHUB_REPOSITORY//\//-}
 NORMALIZED_GITHUB_REPOSITORY=${NORMALIZED_GITHUB_REPOSITORY,,}
 REPOSITORY_REVIEWS_ROOT="${REVIEWS_ROOT}/${NORMALIZED_GITHUB_REPOSITORY}"

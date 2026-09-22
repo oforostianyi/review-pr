@@ -396,4 +396,65 @@ SOURCE_MANIFEST=""
 assert_true 'a forced rerun with no source manifest records nothing and does not fail' \
     record_final_rerun_on_source_manifest '2026-09-22T09:00:00+0200'
 
+# A run identifier ends in whatever abbreviation the configured timezone has, and
+# some zones have no abbreviation at all -- date prints a numeric offset instead.
+assert_true 'a Central European identifier is still accepted' \
+    is_run_timestamp 20260922-092256-CEST
+assert_true 'an identifier from another zone is accepted' \
+    is_run_timestamp 20260922-110000-EDT
+assert_true 'a zone that prints a numeric offset is accepted' \
+    is_run_timestamp 20260922-194855-+0545
+assert_true 'an offset without minutes is accepted' \
+    is_run_timestamp 20260922-110355--03
+assert_true 'UTC is accepted' \
+    is_run_timestamp 20260922-110000-UTC
+assert_false 'a truncated identifier is still rejected' \
+    is_run_timestamp 20260922-110000
+assert_false 'an identifier with a path separator is rejected' \
+    is_run_timestamp 20260922-110000-CE/ST
+assert_false 'a malformed date is rejected' \
+    is_run_timestamp 2026922-110000-CEST
+
+# A timezone abbreviation does not order chronologically, so "newest" cannot be
+# the largest identifier. GMT follows IST but sorts before it, and a run made
+# after flying west carries a smaller clock time than the run before the flight.
+assert_eq 1790029280 "$(timestamp_to_epoch 2026-09-22T00:21:20+0200)" \
+    'an offset timestamp converts to the instant it names'
+assert_eq 1790029280 "$(timestamp_to_epoch 2026-09-21T22:21:20+0000)" \
+    'the same instant written in another offset converts identically'
+assert_false 'a timestamp that is not an instant is refused rather than guessed' \
+    timestamp_to_epoch 20260922-002120-CEST
+
+newest_case="$suite_root/newest-run"
+mkdir -p -- "$newest_case"
+write_run_manifest() {
+    jq -n --arg created_at "$2" '{created_at: $created_at}' >"$newest_case/$1.json"
+}
+
+# Ireland, the night the clocks go back: 01:30 IST, then 01:30 GMT an hour later.
+write_run_manifest ireland-first 2026-10-25T01:30:00+0100
+write_run_manifest ireland-second 2026-10-25T01:30:00+0000
+assert_true 'the run made after the clocks went back is the newer one' \
+    manifest_is_newer "$newest_case/ireland-second.json" 20261025-013000-GMT \
+        "$newest_case/ireland-first.json" 20261025-013000-IST
+assert_false 'and the earlier one is not' \
+    manifest_is_newer "$newest_case/ireland-first.json" 20261025-013000-IST \
+        "$newest_case/ireland-second.json" 20261025-013000-GMT
+
+# Warsaw 14:00, then New York 11:00 three hours later on the same day.
+write_run_manifest warsaw 2026-09-22T14:00:00+0200
+write_run_manifest new-york 2026-09-22T11:00:00-0400
+assert_true 'a run made after flying west is the newer one' \
+    manifest_is_newer "$newest_case/new-york.json" 20260922-110000-EDT \
+        "$newest_case/warsaw.json" 20260922-140000-CEST
+
+# Runs made before created_at existed still have to be ordered somehow.
+printf '{}\n' >"$newest_case/legacy-old.json"
+printf '{}\n' >"$newest_case/legacy-new.json"
+assert_true 'without a recorded instant the identifier still decides' \
+    manifest_is_newer "$newest_case/legacy-new.json" 20260922-140000-CEST \
+        "$newest_case/legacy-old.json" 20260922-090000-CEST
+assert_true 'the first candidate seen is always newer than nothing' \
+    manifest_is_newer "$newest_case/warsaw.json" 20260922-140000-CEST '' ''
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

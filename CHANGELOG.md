@@ -6,6 +6,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- `timezone` names the zone every timestamp is written in: the run identifier that names a run's
+  directory and is passed back to `--run`, the manifest and run-history times, the log prefix, and
+  the dashboard clock. It was `Europe/Warsaw`, compiled in at sixteen call sites, so a tool about to
+  be published named every run in one maintainer's local time. Omitting the key follows the machine's
+  own zone, which is what most people want and what the old default happened to be on the machine it
+  was written on. A zone that is not installed is refused when the configuration loads, because `TZ`
+  reports nothing for an unknown name — it silently gives UTC, and a typo would have renamed every
+  run without a word.
+- An identifier may now end in any zone's abbreviation, or in the numeric offset that zones without
+  one produce, including the hours-only form `America/Sao_Paulo` gives. Six places accepted only
+  `CET` and `CEST`, so outside Central Europe a run could not be selected with `--run` at all.
 - A completed final rerun is recorded on the run it was made from, as an entry appended to
   `final_reruns` naming its timestamp, synthesizer, model, published report, manifest, and
   completion time. The rerun manifest already named its source; nothing pointed the other way, so a
@@ -14,6 +25,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
   rewritten, because the run did fail. Entries accumulate, so re-synthesising one set of inputs with
   two models leaves both, and a `--force` rerun records nothing because it deliberately works
   without a source manifest.
+
+### Fixed
+
+- The newest run is chosen by the instant it started rather than by comparing identifiers as text.
+  A zone abbreviation does not order chronologically: `GMT` follows `IST` but sorts before it, so on
+  the night the clocks go back in Ireland `--rerun-final` without `--run` would silently synthesise
+  from the older run. Travel does the same without any transition — a run made three hours after
+  flying from Warsaw to New York carries an earlier clock time than the one before the flight.
+  Manifests already recorded `created_at` with a numeric offset, which names an instant exactly, and
+  that is what is compared now; runs written before the field existed still fall back to the
+  identifier.
 
 ### Changed
 

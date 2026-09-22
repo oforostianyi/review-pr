@@ -153,6 +153,22 @@ with and without `--purge-config`, and writes a machine-readable checklist to
 the throwaway or home directory, so the checklist can be attached to release notes. The exit status
 is non-zero when any step fails.
 
+## Timezone
+
+Every timestamp the orchestrator writes comes from one setting: the run identifier that names a run's directory and is passed back to `--run`, the times recorded in manifests and the run history, the prefix on each log line, and the dashboard clock.
+
+```json
+{
+  "timezone": "Europe/Warsaw"
+}
+```
+
+The value is an IANA zone name that must be installed in the system timezone database. Omit the key, and every timestamp follows the machine's own zone, which is the default. A name that is not installed is refused when the configuration loads and is quoted back: `TZ` never reports an unknown zone, it silently falls back to UTC, so a typo would otherwise rename every run without a word.
+
+A run identifier ends in whatever `date` prints for that zone. That is an abbreviation in most zones — `20260922-092256-CEST`, `20260922-100754-EDT` — but a zone without one prints a numeric offset instead, and some of those carry no minutes, so `America/Sao_Paulo` produces `20260922-110754--03` and `Asia/Kathmandu` produces `20260922-195254-+0545`. All three forms are valid identifiers and may be passed to `--run`. Changing the setting does not invalidate existing runs: an identifier written under the previous zone still resolves.
+
+Selecting the newest run does not depend on the identifier. A zone abbreviation does not order chronologically — `GMT` follows `IST` but sorts before it — so the largest identifier is not the newest run, and after a westward journey a later run carries an earlier clock time. Manifests record `created_at` with a numeric offset, which names an instant exactly, and that is what `--rerun-final` and the `findings` command compare when no run is given. Runs recorded before that field existed fall back to comparing identifiers.
+
 ## Execution concurrency and retry
 
 Primary reviews and cross-reviews run concurrently by default. Limit the number of reviewer processes that may run at once with:
@@ -756,7 +772,7 @@ After primary and cross-review phases have completed, re-run only the final synt
 review-pr --rerun-final 123
 ```
 
-By default, this selects the newest manifest-backed run with completed primary and cross-review phases for that repository and PR number. It is intentionally independent of the PR's current head commit. The repeated synthesis receives only the preserved cross-review reports; it does not receive primary reports or run any reviewer again. Select an exact source run with its Warsaw timestamp:
+By default, this selects the newest manifest-backed run with completed primary and cross-review phases for that repository and PR number. It is intentionally independent of the PR's current head commit. The repeated synthesis receives only the preserved cross-review reports; it does not receive primary reports or run any reviewer again. Select an exact source run with its identifier:
 
 ```bash
 review-pr --rerun-final --run 20260818-154838-CEST 123

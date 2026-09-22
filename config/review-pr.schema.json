@@ -64,6 +64,15 @@
       "default": "EN",
       "description": "Global output language for every review stage. Stage-specific entries under languages override this value."
     },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone name used for every timestamp the orchestrator writes: run identifiers, manifest times, log lines, and the dashboard clock. Omit it to follow the machine's own zone. The name must be installed in the system timezone database.",
+      "examples": [
+        "Europe/Warsaw",
+        "America/New_York",
+        "UTC"
+      ]
+    },
     "finalization": {
       "type": "object",
       "additionalProperties": false,
