@@ -7454,12 +7454,46 @@ start_dashboard() {
     printf '\n\033[?25l' >&2
     render_dashboard_snapshot false
     DASHBOARD_ACTIVE=true
-    (
-        while sleep "$STATUS_REFRESH_INTERVAL_SECONDS"; do
-            render_dashboard_snapshot true
-        done
-    ) &
+    dashboard_refresh_loop &
     DASHBOARD_PID=$!
+}
+
+# A frame is redrawn by moving the cursor up its own height, so the frame below
+# the cursor has to be whole. Killed in the middle of drawing one, the refresher
+# left the cursor inside the frame, and the redraw stop_dashboard does next moved
+# up from there and landed above it: the tail of the old frame stayed on screen,
+# below the error and the shell prompt. A frame takes milliseconds and the pause
+# between frames a second, so a stop landed inside a frame only now and then,
+# which is what made the corruption look random.
+#
+# TERM therefore asks the loop to stop instead of killing it where it stands. The
+# handler only raises a flag, which bash runs between commands, so the frame in
+# progress is finished first. Waiting on the pause as a child keeps that cheap:
+# a trap interrupts wait immediately, so an idle refresher still stops at once
+# rather than sitting out the rest of its interval.
+dashboard_refresh_loop() {
+    local stopping=false
+    local sleep_pid=""
+
+    # This runs in a background subshell. Clearing EXIT matters now that TERM is
+    # handled: the loop leaves through a normal exit, and an inherited EXIT trap
+    # would run the whole cleanup a second time. INT is ignored rather than reset,
+    # because a background job already has it ignored and Ctrl+C belongs to the
+    # foreground -- resetting it would put the frame back in reach of the signal
+    # this function exists to survive.
+    trap - EXIT
+    trap '' INT
+    trap 'stopping=true' TERM
+
+    while true; do
+        sleep "$STATUS_REFRESH_INTERVAL_SECONDS" &
+        sleep_pid=$!
+        wait "$sleep_pid" 2>/dev/null || true
+        [[ "$stopping" != true ]] || break
+        render_dashboard_snapshot true
+        [[ "$stopping" != true ]] || break
+    done
+    [[ -z "$sleep_pid" ]] || kill "$sleep_pid" 2>/dev/null || true
 }
 
 stop_dashboard() {
