@@ -4,6 +4,23 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- A completed final rerun is recorded on the run it was made from, as an entry appended to
+  `final_reruns` naming its timestamp, synthesizer, model, published report, manifest, and
+  completion time. The rerun manifest already named its source; nothing pointed the other way, so a
+  run whose final phase failed and was rescued afterwards read as a dead end — its status said
+  `failed` and nothing said where the report that replaced it went. That status is still never
+  rewritten, because the run did fail. Entries accumulate, so re-synthesising one set of inputs with
+  two models leaves both, and a `--force` rerun records nothing because it deliberately works
+  without a source manifest.
+
+### Changed
+
+- A release tag is tested on macOS as well. macOS runners were restricted to the default branch to
+  keep private-repository minutes down, which left the tag build — the one people install — as the
+  only build that skipped a platform, and 1.20.0 went out with a test suite that was broken there.
+
 ## [1.20.0] - 2026-09-22
 
 ### Added

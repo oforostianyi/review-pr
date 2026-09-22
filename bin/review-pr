@@ -3060,6 +3060,18 @@ repair_lone_json_escapes() {
     printf '%s' "$repaired"
 }
 
+# A repaired line is a line the model wrote wrongly. A stream that needed repairs
+# is not the same as one that parsed as written, and the count was being kept and
+# then discarded, so nothing distinguished them in the log.
+log_escape_repairs() {
+    local count=$1 phase=$2 agent=$3
+    local noun=escapes
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=escape
+    log "Repaired ${count} invalid JSON ${noun} in the ${phase} stream from ${agent}"
+}
+
 normalize_primary_ndjson_stream() {
     local input_file=$1
     local output_file=$2
@@ -3312,6 +3324,7 @@ process_primary_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_escape_repairs "$escape_repairs" primary "$agent"
     if ! jq -s '.' "$records_file" >"$records_array_file"; then
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -3635,6 +3648,7 @@ process_cross_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_escape_repairs "$escape_repairs" cross-review "$agent"
     jq -s '.' "$records_file" >"$records_array_file" || {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -4602,6 +4616,7 @@ process_final_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_escape_repairs "$escape_repairs" final "$FINAL_SYNTHESIZER"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     # Resolution records travel in the same stream but are validated against
     # the detected disputes, not as findings.
@@ -7681,17 +7696,26 @@ describe_manifest_incompatibility() {
     printf ''
 }
 
+atomic_json_update() {
+    local target=$1
+    local filter=$2
+    shift 2
+    local directory=${target%/*}
+    local temp_manifest
+
+    [[ "$directory" != "$target" ]] || directory=.
+    temp_manifest=$(mktemp "${directory}/.${target##*/}.update.XXXXXX")
+    TEMP_FILES+=("$temp_manifest")
+    if ! jq "$@" "$filter" "$target" >"$temp_manifest"; then
+        die "Could not update run manifest: ${target}"
+    fi
+    mv -- "$temp_manifest" "$target"
+}
+
 atomic_manifest_update() {
     local filter=$1
     shift
-    local temp_manifest
-
-    temp_manifest=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-manifest-update.tmp.XXXXXX")
-    TEMP_FILES+=("$temp_manifest")
-    if ! jq "$@" "$filter" "$MANIFEST_FILE" >"$temp_manifest"; then
-        die "Could not update run manifest: ${MANIFEST_FILE}"
-    fi
-    mv -- "$temp_manifest" "$MANIFEST_FILE"
+    atomic_json_update "$MANIFEST_FILE" "$filter" "$@"
 }
 
 create_full_manifest() {
@@ -8958,12 +8982,47 @@ create_rerun_manifest() {
 }
 
 complete_rerun_manifest() {
+    local completed_at
+    completed_at=$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')
     atomic_manifest_update \
         '.final_status = "complete" |
          .comparison.status = (if .comparison.mode == "standalone" then "complete" else "skipped" end) |
          .status = "complete" |
          .completed_at = $completed_at' \
-        --arg completed_at "$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')"
+        --arg completed_at "$completed_at"
+    record_final_rerun_on_source_manifest "$completed_at"
+}
+
+# A rerun manifest names the run it was made from, but the source run knew
+# nothing about the rerun. A run whose final phase failed and was rescued later
+# therefore read as a dead end: its own status says "failed", which is true and
+# stays, and nothing said where the report that replaced it went. What makes the
+# source rescued is that a report was published for it, so a rerun that failed
+# its comparison after finishing the final is recorded too, with its own outcome,
+# and a rerun that never published a final leaves no trace. The pointer is
+# appended, so a source re-synthesised twice keeps both.
+record_final_rerun_on_source_manifest() {
+    local completed_at=${1:-$(TZ=Europe/Warsaw date '+%Y-%m-%dT%H:%M:%S%z')}
+
+    [[ -n "$SOURCE_MANIFEST" && -f "$SOURCE_MANIFEST" ]] || return 0
+    [[ "$(jq -r '.final_status // ""' "$MANIFEST_FILE")" == complete ]] || return 0
+    atomic_json_update "$SOURCE_MANIFEST" \
+        '.final_reruns = ((.final_reruns // []) + [{
+            timestamp: $timestamp,
+            status: $status,
+            synthesizer: $synthesizer,
+            model: $model,
+            final: $final,
+            manifest: $manifest,
+            completed_at: $completed_at
+        }])' \
+        --arg timestamp "$(jq -r '.timestamp // ""' "$MANIFEST_FILE")" \
+        --arg status "$(jq -r '.status // ""' "$MANIFEST_FILE")" \
+        --arg synthesizer "$(jq -r '.synthesizer // ""' "$MANIFEST_FILE")" \
+        --arg model "$(jq -r '.finalization.model // ""' "$MANIFEST_FILE")" \
+        --arg final "$(jq -r '.artifact // ""' "$MANIFEST_FILE")" \
+        --arg manifest "${MANIFEST_FILE##*/}" \
+        --arg completed_at "$completed_at"
 }
 
 fail_rerun_manifest() {
@@ -8982,6 +9041,7 @@ fail_rerun_manifest() {
          end' \
         --arg reason "$reason" \
         --arg stage "$stage"
+    record_final_rerun_on_source_manifest
 }
 
 validate_final_markdown() {

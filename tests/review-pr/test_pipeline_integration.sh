@@ -249,6 +249,21 @@ run_full_success_case() {
     [[ -n "$rerun_manifest" ]] || fail 'artifact-only final rerun did not create a separate manifest'
     pass 'artifact-only final rerun creates a separate manifest'
 
+    # The rerun manifest names its source, but nothing pointed the other way: a run
+    # whose final phase failed and was later rescued read as a dead end.
+    assert_eq 1 "$(jq '.final_reruns | length' "$manifest")" \
+        'the source run records the rerun that was made from it'
+    assert_eq "$(jq -r '.timestamp' "$rerun_manifest")" "$(jq -r '.final_reruns[0].timestamp' "$manifest")" \
+        'the record names the rerun by its own timestamp'
+    assert_eq 'complete' "$(jq -r '.final_reruns[0].status' "$manifest")" \
+        'the record carries the outcome of the rerun'
+    assert_eq "${rerun_manifest##*/}" "$(jq -r '.final_reruns[0].manifest' "$manifest")" \
+        'the record points at the manifest that holds the rest'
+    assert_eq "$(jq -r '.artifact' "$rerun_manifest")" "$(jq -r '.final_reruns[0].final' "$manifest")" \
+        'the record points at the report the rerun published'
+    assert_eq 'complete' "$(jq -r '.status.pipeline' "$manifest")" \
+        'recording a rerun does not rewrite what the source run itself did'
+
     forced_rerun_status=0
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_FAKE_GH_LOG="$gh_log" \
@@ -259,6 +274,8 @@ run_full_success_case() {
         'a forced final rerun finds the cross-reviews of a run kept in its own work directory'
     assert_false 'a forced final rerun does not report the cross-reviews as missing' \
         grep -q 'needs at least two completed cross-review reports' "$case_dir/forced-rerun-stderr.log"
+    assert_eq 1 "$(jq '.final_reruns | length' "$manifest")" \
+        'a forced rerun, which deliberately ignores the manifest, records nothing in it'
 
     legacy_manifest_temp="${manifest}.legacy.tmp"
     jq 'del(.artifacts.repository_facts, .artifacts.changed_lines)' "$manifest" >"$legacy_manifest_temp"

@@ -780,6 +780,8 @@ Previous final reports are never overwritten; a new result is written as:
 
 Every new full run records a `*-manifest.json` with its branches, commits, reviewers, repository-facts pair, other artifacts, and phase statuses. Final-only reruns have a separate manifest recording `input_mode: artifact_only_cross_reviews`, the source manifest, and exact cross-review/facts inputs. Prefer manifest-backed reruns; `--force` exists only as an explicit compatibility path for older artifacts.
 
+A completed rerun is also recorded on the run it was made from, as one entry appended to `final_reruns` with the rerun's timestamp, synthesizer, model, published report, manifest, and completion time. Without it a run whose final phase failed and was rescued afterwards read as a dead end: the rerun manifest named its source, and nothing pointed the other way. The source run's own `status` is never rewritten — that run did fail, and the entry says where the report that replaced it went, not that the failure did not happen. Entries accumulate, so re-synthesising the same inputs with two models leaves both. A `--force` rerun records nothing, because it deliberately works without a source manifest.
+
 ## Resume an interrupted run
 
 Resume a failed full run by supplying its timestamp without `--rerun-final`:

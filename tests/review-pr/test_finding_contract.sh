@@ -60,8 +60,12 @@ saved_raw=${PRIMARY_RAW_OUTPUTS[codex]}
 saved_findings=${PRIMARY_FINDINGS_OUTPUTS[codex]}
 PRIMARY_RAW_OUTPUTS[codex]=$escape_raw
 PRIMARY_FINDINGS_OUTPUTS[codex]=$escape_findings
-assert_true 'a lone backslash inside a string does not fail the phase' \
-    process_primary_ndjson_output "$escape_input" codex
+escape_log="$test_root/escape-repair.log"
+escape_status=0
+process_primary_ndjson_output "$escape_input" codex 2>"$escape_log" || escape_status=$?
+assert_eq 0 "$escape_status" 'a lone backslash inside a string does not fail the phase'
+assert_file_contains "$escape_log" 'Repaired 2 invalid JSON escapes in the primary stream from codex' \
+    'a repaired line is announced instead of being counted in silence'
 assert_file_contains "$escape_findings" 'GuzzleHttp' \
     'the repaired record keeps the text the model wrote'
 assert_eq '2' "$(jq -r '.finding_count' "$escape_findings")" \

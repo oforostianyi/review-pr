@@ -339,4 +339,61 @@ assert_eq "$REPORT_DIR/work" \
     "$(resolve_run_work_dir 20260101-000000-CEST)" \
     'a run whose manifest sits directly in work keeps the flat layout'
 
+# A source run can be re-synthesised more than once — comparing two models on the
+# same inputs is exactly that — so the pointer back to the source has to collect
+# the reruns rather than keep only the last one.
+rerun_case="$suite_root/final-rerun-record"
+mkdir -p -- "$rerun_case"
+SOURCE_MANIFEST="$rerun_case/source-manifest.json"
+jq -n '{status: {final: "failed", pipeline: "failed"}}' >"$SOURCE_MANIFEST"
+
+record_rerun_fixture() {
+    local timestamp=$1 model=$2 completed_at=$3
+    local status=${4:-complete} final_status=${5:-complete}
+
+    MANIFEST_FILE="$rerun_case/rerun-${timestamp}-manifest.json"
+    jq -n \
+        --arg timestamp "$timestamp" \
+        --arg model "$model" \
+        --arg status "$status" \
+        --arg final_status "$final_status" \
+        '{timestamp: $timestamp, synthesizer: "pi-local", finalization: {model: $model},
+          status: $status, final_status: $final_status,
+          artifact: ("report-" + $timestamp + ".md")}' >"$MANIFEST_FILE"
+    record_final_rerun_on_source_manifest "$completed_at"
+}
+
+record_rerun_fixture 20260922-001052-CEST dirk@iq3_s '2026-09-22T00:21:20+0200'
+assert_eq 1 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'the first rerun is recorded on the run it came from'
+assert_eq 'dirk@iq3_s' "$(jq -r '.final_reruns[0].model' "$SOURCE_MANIFEST")" \
+    'the record names the model that produced the replacement'
+assert_eq 'report-20260922-001052-CEST.md' "$(jq -r '.final_reruns[0].final' "$SOURCE_MANIFEST")" \
+    'the record names the report the rerun published'
+
+record_rerun_fixture 20260922-084036-CEST dirk@iq3_xxs '2026-09-22T08:52:57+0200'
+assert_eq 2 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a second rerun is appended rather than replacing the first'
+assert_eq 'dirk@iq3_s dirk@iq3_xxs' "$(jq -r '[.final_reruns[].model] | join(" ")' "$SOURCE_MANIFEST")" \
+    'the reruns stay in the order they were made'
+assert_eq 'failed' "$(jq -r '.status.pipeline' "$SOURCE_MANIFEST")" \
+    'what the source run itself did is never rewritten'
+
+# What makes a source run rescued is that a report was published for it. A rerun
+# whose comparison failed after the final succeeded published one; a rerun whose
+# final failed published nothing and leaves no trace.
+record_rerun_fixture 20260922-120000-CEST dirk@iq3_s '2026-09-22T12:10:00+0200' failed complete
+assert_eq 3 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a rerun that published its final but failed the comparison is still recorded'
+assert_eq 'failed' "$(jq -r '.final_reruns[2].status' "$SOURCE_MANIFEST")" \
+    'the record reports the outcome of the rerun rather than assuming success'
+
+record_rerun_fixture 20260922-130000-CEST dirk@iq3_s '2026-09-22T13:10:00+0200' failed failed
+assert_eq 3 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a rerun that never published a final report is not recorded'
+
+SOURCE_MANIFEST=""
+assert_true 'a forced rerun with no source manifest records nothing and does not fail' \
+    record_final_rerun_on_source_manifest '2026-09-22T09:00:00+0200'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
