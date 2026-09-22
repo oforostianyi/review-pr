@@ -18,7 +18,7 @@ printf '#!/bin/sh\nprintf "%%s\\n" "--append-system-prompt <text>" "--thinking <
 for stub in claude codex; do
     printf '#!/bin/sh\nexit 0\n' >"$test_root/bin/$stub"
 done
-chmod 0755 -- "$test_root/bin/pi" "$test_root/bin/claude" "$test_root/bin/codex"
+chmod 0755 "$test_root/bin/pi" "$test_root/bin/claude" "$test_root/bin/codex"
 export PATH="$test_root/bin:$PATH"
 
 config_file="$test_root/config.json"
