@@ -4,19 +4,6 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
-### Fixed
-
-- A failing phase no longer leaves a broken table on the terminal. The live frame is redrawn by
-  moving the cursor up its own height, which assumes the frame below it is whole, and the background
-  refresher was killed wherever the signal found it. Caught in the middle of drawing, it left the
-  cursor inside the frame, so the redraw that follows moved up from there, landed above the frame and
-  covered only part of the old one — its tail stayed on screen, below the error and the shell prompt.
-  A frame takes milliseconds and the pause between frames a second, so a stop landed inside one only
-  now and then, which is what made the damage look random. The refresher is now asked to stop rather
-  than killed where it stands: the handler raises a flag, bash runs it between commands, and the
-  frame in progress is finished first. It still stops at once when idle, because the pause is waited
-  on as a child and a trap interrupts the wait immediately.
-
 ## [1.21.0] - 2026-09-22
 
 ### Added
@@ -43,6 +30,16 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A failing phase no longer leaves a broken table on the terminal. The live frame is redrawn by
+  moving the cursor up its own height, which assumes the frame below it is whole, and the background
+  refresher was killed wherever the signal found it. Caught in the middle of drawing, it left the
+  cursor inside the frame, so the redraw that follows moved up from there, landed above the frame and
+  covered only part of the old one — its tail stayed on screen, below the error and the shell prompt.
+  A frame takes milliseconds and the pause between frames a second, so a stop landed inside one only
+  now and then, which is what made the damage look random. The refresher is now asked to stop rather
+  than killed where it stands: the handler raises a flag, bash runs it between commands, and the
+  frame in progress is finished first. It still stops at once when idle, because the pause is waited
+  on as a child and a trap interrupts the wait immediately.
 - The newest run is chosen by the instant it started rather than by comparing identifiers as text.
   A zone abbreviation does not order chronologically: `GMT` follows `IST` but sorts before it, so on
   the night the clocks go back in Ireland `--rerun-final` without `--run` would silently synthesise
