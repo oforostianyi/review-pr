@@ -10,6 +10,17 @@ test_root=$(portable_mktemp_dir review-pr-config)
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p -- "$test_root/repository" "$test_root/reviews"
 
+# --show-config requires the CLI of every enabled built-in adapter. The runners are
+# not installed everywhere the suite runs, so inert stand-ins answer for them; only
+# Pi is asked about its flags.
+mkdir -p -- "$test_root/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "--append-system-prompt <text>" "--thinking <level>"\n' >"$test_root/bin/pi"
+for stub in claude codex; do
+    printf '#!/bin/sh\nexit 0\n' >"$test_root/bin/$stub"
+done
+chmod 0755 -- "$test_root/bin/pi" "$test_root/bin/claude" "$test_root/bin/codex"
+export PATH="$test_root/bin:$PATH"
+
 config_file="$test_root/config.json"
 jq -n \
     --arg repository "$test_root/repository" \
@@ -69,11 +80,7 @@ assert_file_contains "$show_output" 'alpha: label=Alpha model=mock-alpha effort=
 pi_thinking_config="$test_root/pi-thinking.json"
 pi_thinking_output="$test_root/pi-thinking-show-config.txt"
 jq '.agents.pi.enabled = true | .agents.pi.effort = "high" | .synthesizer = "pi" | .finalization.effort = "xhigh"' "$config_file" >"$pi_thinking_config"
-# Enabling Pi makes --show-config require the pi command; an inert stand-in suffices here.
-mkdir -p -- "$test_root/bin"
-printf '#!/bin/sh\nprintf "%%s\\n" "--append-system-prompt <text>" "--thinking <level>"\n' >"$test_root/bin/pi"
-chmod 0755 "$test_root/bin/pi"
-PATH="$test_root/bin:$PATH" "$repo_root/bin/review-pr" --config "$pi_thinking_config" --show-config >"$pi_thinking_output" 2>&1 \
+"$repo_root/bin/review-pr" --config "$pi_thinking_config" --show-config >"$pi_thinking_output" 2>&1 \
     || fail "a Pi thinking level must be accepted as effort: $(tail -n 2 "$pi_thinking_output")"
 assert_file_contains "$pi_thinking_output" "pi: label=Pi model=local-model effort=high" \
     'the Pi thinking level is shown as the agent effort'
