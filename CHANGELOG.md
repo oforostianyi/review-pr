@@ -19,6 +19,10 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- The dashboard documentation matched an older layout. The `Agent` column is 27 characters, not 29,
+  since the retry counter took two of them, and the retry status the counter produces — `RETRYING[2]`
+  in place of `RUNNING` — was not described at all. `README.md` still announced two ways to obtain the
+  package after a third, downloading a published release, was added in 1.19.0.
 - A lone backslash inside a string no longer throws away a finished stream. JSON gives a backslash
   one job, so a backslash before a character that starts no escape can only have meant a literal
   backslash; the orchestrator doubles it and parses the line again. Reviewing PHP makes this the

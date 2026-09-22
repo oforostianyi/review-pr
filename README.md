@@ -217,7 +217,7 @@ The configured path must be absolute.
 
 ## Get the package
 
-`review-pr` is distributed as a source checkout, not as a binary. There are two
+`review-pr` is distributed as a source checkout, not as a binary. There are three
 ways to reach an installable tree, and the first one is enough for most people.
 
 ### From a checkout
