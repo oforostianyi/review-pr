@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-09-22
+
 ### Added
 
 - `timezone` names the zone every timestamp is written in: the run identifier that names a run's
