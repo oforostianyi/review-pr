@@ -354,9 +354,9 @@ Edit the installed `config.json`. A hosted-agent-only setup can be as small as:
   "reviews_directory": "/absolute/path/to/review-pr-output",
   "reporting": {
     "finding_contract": {
-      "primary": "markdown",
-      "cross_review": "markdown",
-      "final": "markdown"
+      "primary": "ndjson-v1",
+      "cross_review": "ndjson-v1",
+      "final": "ndjson-v1"
     },
     "comparison_sections": {
       "cross_review": "none",
@@ -366,9 +366,28 @@ Edit the installed `config.json`. A hosted-agent-only setup can be as small as:
 }
 ```
 
+### Several agents on one CLI
+
+An agent's key is a label, not a choice of program. `type` names the built-in adapter that runs it — `claude`, `codex` or `pi` — and defaults to the key, so a configuration whose agents are called `claude`, `codex` and `pi` needs no `type` at all. Naming it lets one CLI serve several agents with different models, which the key alone could not express: a local Pi beside a hosted one, or two Claude models at different efforts, in a single review.
+
+```json
+{
+  "agents": {
+    "pi-local": { "type": "pi",     "model": "dirk-qwen3.8-27b@iq3_s",        "max_tool_calls": 300 },
+    "pi-cloud": { "type": "pi",     "model": "qwen-token-plan/qwen3.8-flash", "max_tool_calls": 120 },
+    "opus":     { "type": "claude", "model": "claude-opus-5",  "effort": "high",   "enabled": true },
+    "sonnet":   { "type": "claude", "model": "claude-sonnet-5", "effort": "medium", "enabled": true }
+  },
+  "reviewers": ["pi-local", "pi-cloud", "opus", "sonnet"],
+  "synthesizer": "opus"
+}
+```
+
+The adapter decides which executable must be installed, how reasoning effort is spelled, whether `max_tool_calls` is accepted, and whether an event stream is kept for diagnosis. The key keeps everything else: artifacts are named after it, so agents sharing an adapter never collide. A review skill is looked up by key first and by type second, so a new agent inherits its adapter's skill until it is given one of its own. `runner` and `command` still take precedence over `type`.
+
 Pi is not present in the distributed default pipeline, so a clean installation only needs Claude and Codex. Add Pi later if wanted; set `"enabled": false` to keep its configuration while excluding it from a run. A profile or repository may name an agent skill (for example, `"pi": "php-code-review"`), but no absolute skill path is required or validated and Pi is never passed a hardcoded `--skill` path. Leaving Pi's model empty makes Pi use its currently configured default provider/model.
 
-`reporting.finding_contract.primary`, `cross_review`, and `final` accept `markdown` (the backward-compatible default) or opt-in `ndjson-v1`. Structured cross-review requires structured primary findings and `comparison_sections.cross_review: "none"`; structured final synthesis additionally requires both earlier stages to be structured and `comparison_sections.final` to be `none` or `standalone`. Primary agents return atomic records, cross-reviewers classify canonical primary refs, and the finalizer classifies canonical cross-review refs. The orchestrator validates completeness, provenance, severity, and exact changed-line anchors, derives transitive primary provenance itself, preserves `work/*-raw.ndjson`, publishes canonical `work/*-findings.json`, and renders localized Markdown deterministically. A structurally repairable response receives one content-stable schema-repair pass; cross and final repair additionally freeze classification, severity, provenance, and rejection-presentation decisions. A cross-review or final stream that simply stopped before answering every required source ref is continued instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with those records unchanged. Invalid structured output never falls back to Markdown. Resume uses the modes saved in the manifest, and final reruns reuse canonical cross-review sidecars. The installed `review-pr-findings-v1.schema.json` documents the portable record shape.
+`reporting.finding_contract.primary`, `cross_review`, and `final` accept `markdown` or `ndjson-v1`. A configuration that names neither keeps `markdown`, so existing installations are untouched; the distributed example runs `ndjson-v1` in all three stages, which is what a fresh installation therefore gets. Structured cross-review requires structured primary findings and `comparison_sections.cross_review: "none"`; structured final synthesis additionally requires both earlier stages to be structured and `comparison_sections.final` to be `none` or `standalone`. Primary agents return atomic records, cross-reviewers classify canonical primary refs, and the finalizer classifies canonical cross-review refs. The orchestrator validates completeness, provenance, severity, and exact changed-line anchors, derives transitive primary provenance itself, preserves `work/*-raw.ndjson`, publishes canonical `work/*-findings.json`, and renders localized Markdown deterministically. A structurally repairable response receives one content-stable schema-repair pass; cross and final repair additionally freeze classification, severity, provenance, and rejection-presentation decisions. A cross-review or final stream that simply stopped before answering every required source ref is continued instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with those records unchanged. Invalid structured output never falls back to Markdown. Resume uses the modes saved in the manifest, and final reruns reuse canonical cross-review sidecars. The installed `review-pr-findings-v1.schema.json` documents the portable record shape.
 
 `reporting.comparison_sections.cross_review` accepts `none` or `inline`; `final` accepts `none`, `inline`, or `standalone`. The distributed default keeps cross-reviews compact and generates the extended Sources, reviewer matrix, Agreements/Disagreements, review-depth, conclusion, and agreed-actions material as a separate `<review-stem>-comparison.md` after the core final report. This reduces final-output pressure for local models. The deprecated `include_comparison_sections` boolean remains compatible (`true` = inline/inline, `false` = none/none).
 

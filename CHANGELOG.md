@@ -51,6 +51,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Changed
 
+- `README.md` explains that an agent's key is a label and `type` names the adapter that runs it, with
+  a worked configuration of two Pi agents and two Claude agents. The capability shipped in 1.20.0 and
+  was described only in the reference, which is not where someone meeting the tool first looks. Its
+  example configuration also showed the `markdown` contract while the distributed one has run
+  `ndjson-v1` since 1.20.0, so a fresh installation did not match what the front page showed.
 - A release tag is tested on macOS as well. macOS runners were restricted to the default branch to
   keep private-repository minutes down, which left the tag build — the one people install — as the
   only build that skipped a platform, and 1.20.0 went out with a test suite that was broken there.
