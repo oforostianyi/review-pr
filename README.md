@@ -1,6 +1,6 @@
 # review-pr
 
-`review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.19.0`.
+`review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.20.0`.
 
 The public core is repository- and language-agnostic. Repository-specific profiles, prompts, and
 review skills belong in user configuration or separately distributed team overlays.
@@ -228,7 +228,7 @@ development line; a tag is a released version:
 ```bash
 git clone git@github.com:oforostianyi/review-pr.git "$HOME/src/review-pr"
 cd "$HOME/src/review-pr"
-git checkout v1.19.0        # or stay on main for the development version
+git checkout v1.20.0        # or stay on main for the development version
 ```
 
 The checkout is directly installable — skip to **Install** and run `./install.sh`
@@ -247,8 +247,8 @@ It writes two files into `dist/` and refuses to build when `VERSION` and
 `bin/review-pr` disagree or when the private-data audit finds anything:
 
 ```text
-dist/review-pr-1.19.0.tar.gz
-dist/review-pr-1.19.0.tar.gz.sha256
+dist/review-pr-1.20.0.tar.gz
+dist/review-pr-1.20.0.tar.gz.sha256
 ```
 
 Copy both to the target machine. `REVIEW_PR_DIST_DIR=<path>` writes them
@@ -260,7 +260,7 @@ Tagged releases carry the same two files, built and checked by CI from the tagge
 commit, so a target machine needs neither a clone nor a build:
 
 ```bash
-gh release download v1.19.0 --repo oforostianyi/review-pr --pattern 'review-pr-*'
+gh release download v1.20.0 --repo oforostianyi/review-pr --pattern 'review-pr-*'
 ```
 
 ## Install
@@ -276,10 +276,10 @@ installer. Verifying is the point of shipping the `.sha256` beside it — a
 truncated download otherwise fails much later and much less clearly:
 
 ```bash
-sha256sum -c review-pr-1.19.0.tar.gz.sha256   # Linux
-# or: shasum -a 256 -c review-pr-1.19.0.tar.gz.sha256  # macOS
-tar -xzf review-pr-1.19.0.tar.gz
-cd review-pr-1.19.0
+sha256sum -c review-pr-1.20.0.tar.gz.sha256   # Linux
+# or: shasum -a 256 -c review-pr-1.20.0.tar.gz.sha256  # macOS
+tar -xzf review-pr-1.20.0.tar.gz
+cd review-pr-1.20.0
 ./install.sh --repo "$HOME/Review" --reviews-dir "$HOME/review-pr"
 ```
 
