@@ -115,7 +115,8 @@ localized; enums, IDs, provenance, and validation controls are not.
 Final schema repair is bounded separately from semantic synthesis. It may repair transport or
 record metadata only after all decision records are safely parseable, and keeps classification,
 severity, cross-review refs, derived primary provenance, anchors, and substantive fields stable.
-Failure preserves the original and repair responses and publishes no canonical final report.
+Failure preserves the original and repair responses; a final report is published only from records
+that pass the contract, whether whole or salvaged.
 
 ## Accepted dispute-resolution design (opt-in `resolution` records)
 
@@ -355,9 +356,12 @@ keys remain language-independent.
   or trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
   completion record are repairable. A finding that lacks only `existing_feedback` is repairable
   too: the baseline records `{"state":"unknown","thread_ids":[]}`, which states honestly that the
-  model did not report thread coverage. Broken JSON-looking records, unknown record types,
-  duplicate completion records, and other missing substantive finding fields are ineligible because
-  recovery would require guessing.
+  model did not report thread coverage. A JSON-looking record the model finished writing but
+  mis-punctuated -- a stray bracket closing a string as if it were an array -- is left out of the
+  baseline and handed back to the repair pass, which sees the broken record in the rejected draft and
+  writes it again. A record torn off mid-token, unknown record types, duplicate completion records,
+  and other missing substantive finding fields remain ineligible because recovery would require
+  guessing what was cut.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,
@@ -387,6 +391,18 @@ keys remain language-independent.
   finding, repeats a kept `source_id`, or answers an unlisted ref is rejected, and the run falls
   back to the ordinary whole-review retry. At most one continuation runs per attempt, and it
   replaces the repair pass for that attempt rather than adding to it.
+- When every recovery above has failed, a salvage pass runs before the phase is abandoned. Each
+  record is put to the same contract on its own; the ones that pass are published and the ones that
+  do not are dropped. The terminal `complete` record is rebuilt around what survived, and the
+  coverage check is relaxed from equality to containment, so a salvaged stream may answer fewer
+  source refs than it was given but never an unknown one. A phase fails only when no record survives.
+- Salvage is a loss, and it is recorded as one rather than absorbed. The console names the phase, the
+  reason the recovery failed, and what was dropped; the manifest gains a `salvage_losses` entry with
+  the unreadable line count, the dropped `source_id`s, and the number of unanswered refs; and the
+  published review carries the same fact among its verification limitations. There is deliberately no
+  ceiling on how much may be dropped: by the time salvage runs, every agent has already been paid
+  for, so refusing to publish would discard the surviving work as well as the broken part. A reader
+  who never opens a log still sees what the review does not contain.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

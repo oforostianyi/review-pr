@@ -174,6 +174,13 @@ FINDINGS_EXPORT_SCOPE=confirmed
 FINAL_FINDINGS_EXPORT_OUTPUT=""
 FINAL_ATTEMPT_RETRYABLE=false
 FINDING_CONTRACT_FAILURE_REASON=""
+NDJSON_BASELINE_DIRTY_RECORDS=0
+NDJSON_ALLOW_PARTIAL_COVERAGE=false
+NDJSON_SALVAGE_MODE=false
+NDJSON_SALVAGE_DROPPED_IDS=()
+NDJSON_SALVAGE_UNPARSEABLE_LINES=0
+NDJSON_SALVAGE_MISSING_REFS=0
+NDJSON_SALVAGE_DROPPED_RESOLUTIONS=false
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
 CONFIG_EXPLICIT=false
@@ -3525,6 +3532,10 @@ process_primary_ndjson_output() {
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
                 || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
+                    NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
+                    continue
+                fi
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
@@ -3537,6 +3548,10 @@ process_primary_ndjson_output() {
         return 1
     fi
     mv -- "$records_array_file" "$records_file"
+    if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings primary "$records_file" "$agent"; then
+        FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
+        return 1
+    fi
     if ! validate_primary_ndjson_records "$records_file" "$canonical_file" "$agent"; then
         detail=$(describe_ndjson_validation_failure primary "$records_file" "$agent")
         FINDING_CONTRACT_FAILURE_REASON="schema_or_completeness_validation_failed${detail:+: $detail}"
@@ -3640,7 +3655,8 @@ validate_cross_ndjson_records() {
     [[ -s "$CHANGED_LINE_MAP_FILE" && -s "$expected_refs_file" ]] || return 1
     jq -e --arg agent "$agent" \
         --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
-        --slurpfile expected_refs "$expected_refs_file" '
+        --slurpfile expected_refs "$expected_refs_file" \
+        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" '
         def string_array:
             type == "array" and all(.[]; type == "string");
         def exact_keys($allowed):
@@ -3718,7 +3734,9 @@ validate_cross_ndjson_records() {
         (all(.[0:-1][]; valid_finding)) and
         (.[-1].finding_count == (length - 1)) and
         (([.[0:-1][].source_id] | unique | length) == (length - 1)) and
-        (([.[0:-1][].source_refs[]] | unique_by(.agent, .source_id) | sort_by(.agent, .source_id)) == $expected_refs[0])
+        (([.[0:-1][].source_refs[]] | unique_by(.agent, .source_id) | sort_by(.agent, .source_id)) as $seen |
+         if $allow_partial_coverage then (($seen - $expected_refs[0]) | length) == 0
+         else $seen == $expected_refs[0] end)
     ' "$records_file" >/dev/null || return 1
 
     jq --arg agent "$agent" --slurpfile expected_refs "$expected_refs_file" '{
@@ -3849,6 +3867,10 @@ process_cross_ndjson_output() {
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
                 || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
+                    NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
+                    continue
+                fi
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
@@ -3862,6 +3884,10 @@ process_cross_ndjson_output() {
     }
     mv -- "$records_array_file" "$records_file"
     repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
+    if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings cross "$records_file" "$agent" "$expected_refs_file"; then
+        FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
+        return 1
+    fi
     if ! validate_cross_ndjson_records "$records_file" "$canonical_file" "$agent" "$expected_refs_file"; then
         detail=$(describe_ndjson_validation_failure cross "$records_file" "$agent" "$expected_refs_file")
         FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
@@ -3951,7 +3977,8 @@ validate_final_ndjson_records() {
     [[ -s "$CHANGED_LINE_MAP_FILE" && -s "$expected_refs_file" ]] || return 1
     jq -e \
         --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
-        --slurpfile expected_refs "$expected_refs_file" '
+        --slurpfile expected_refs "$expected_refs_file" \
+        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" '
         def string_array:
             type == "array" and all(.[]; type == "string");
         def exact_keys($allowed):
@@ -4027,8 +4054,10 @@ validate_final_ndjson_records() {
         (all(.[0:-1][]; valid_finding)) and
         (.[-1].finding_count == (length - 1)) and
         (([.[0:-1][].source_id] | unique | length) == (length - 1)) and
-        (([.[0:-1][].source_refs[]] | unique_by(.agent, .source_id) | sort_by(.agent, .source_id)) ==
-         ([$expected_refs[0][] | {agent, source_id}] | sort_by(.agent, .source_id)))
+        (([.[0:-1][].source_refs[]] | unique_by(.agent, .source_id) | sort_by(.agent, .source_id)) as $seen |
+         ([$expected_refs[0][] | {agent, source_id}] | sort_by(.agent, .source_id)) as $expected |
+         if $allow_partial_coverage then (($seen - $expected) | length) == 0
+         else $seen == $expected end)
     ' "$records_file" >/dev/null || return 1
 
     jq --slurpfile expected_refs "$expected_refs_file" '
@@ -4307,6 +4336,15 @@ collect_orchestrator_diagnostics() {
           (if $map_available then empty else rec("changed_line_map_unavailable"; "run"; null; null; "no RIGHT-side changed-line map was recorded for this run"; []) end),
           (if ($ancestry | IN("measurement_failed", "commit_unavailable")) then rec("repository_facts_measurement_failed"; "run"; null; null; ("reference ancestry: " + $ancestry); []) else empty end),
           (if $rerun then rec("checkout_unavailable"; "run"; null; null; "artifact-only final rerun: no repository checkout, measurements were not executed"; []) else empty end),
+          (($manifest.salvage_losses // [])[] | . as $loss |
+            rec("salvage_dropped_records"; "phase"; $loss.phase; $loss.agent;
+                ([(if ($loss.unparseable_lines // 0) > 0 then (($loss.unparseable_lines | tostring) + " unreadable line(s)") else empty end),
+                  (if (($loss.dropped_findings // []) | length) > 0 then ((($loss.dropped_findings | length) | tostring) + " finding(s) that did not meet the contract") else empty end),
+                  (if ($loss.unanswered_refs // 0) > 0 then (($loss.unanswered_refs | tostring) + " source record(s) left unanswered") else empty end),
+                  (if ($loss.dropped_resolutions // false) then "the dispute resolution table" else empty end)]
+                 | join(", ")
+                 | . + (if ($loss.unanswered_refs // 0) > 0 then " -- this review is incomplete and a rerun would cover the gap" else "" end));
+                ($loss.dropped_findings // []))),
           (($manifest.attempt_failures // {}) | to_entries[] | .key as $phase | (.value // [])[] | . as $text |
             (if test(attempt_regex) then capture(attempt_regex) else {agent: null, reason: $text} end) as $m |
             ($m.reason // $text) as $reason |
@@ -4480,14 +4518,16 @@ render_final_findings_markdown() {
                              changed_line_map_unavailable: "Карта змінених рядків недоступна", repository_facts_measurement_failed: "Факти репозиторію не виміряні",
                              agent_attempt_timeout: "Спроба агента перевищила час", agent_attempt_output_limit: "Спроба агента досягла ліміту виводу", agent_attempt_invalid_output: "Спроба агента дала недійсний вивід", agent_attempt_failed: "Спроба агента не вдалася",
                              pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів", context_compacted: "Контекст стискався: вікно моделі переповнилось",
-                             measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна"}
+                             measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна",
+                             salvage_dropped_records: "Частину виводу моделі довелось відкинути"}
                         else
                             {github_review_threads_unavailable: "Review threads unavailable", github_review_threads_partial: "Review threads partial",
                              github_check_failed: "CI check failed", github_check_cancelled: "CI check cancelled", github_check_pending: "CI check pending", github_check_skipped: "CI check skipped",
                              changed_line_map_unavailable: "Changed-line map unavailable", repository_facts_measurement_failed: "Repository facts not measured",
                              agent_attempt_timeout: "Agent attempt timed out", agent_attempt_output_limit: "Agent attempt hit the output limit", agent_attempt_invalid_output: "Agent attempt produced invalid output", agent_attempt_failed: "Agent attempt failed",
                              pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked", context_compacted: "Context was compacted: the model window overflowed",
-                             measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable"}
+                             measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable",
+                             salvage_dropped_records: "Part of the model output had to be dropped"}
                         end) as $labels | ($labels[.type] // .type);
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
@@ -4792,6 +4832,135 @@ EOF
     } >"$prompt_file"
 }
 
+# The last step before a phase is given up on. Everything earlier tries to get a
+# clean stream out of the model; this asks a narrower question instead -- which of
+# these records stand up on their own? Each finding is put to the very same
+# contract, alone, and the ones that pass are kept. A review that quietly holds
+# less than it claims would be worse than the failure it replaces, so whatever is
+# dropped is named: in the console, in the manifest, and in the report itself.
+filter_valid_ndjson_findings() {
+    local phase=$1 records_file=$2 agent=$3 expected_refs_file=${4:-}
+    local probe_file probe_canonical kept_file complete_file
+    local total index record probe_status
+    local -a dropped=() candidates=()
+
+    new_temp_file "${phase}-salvage-probe"; probe_file=$NEW_TEMP_FILE
+    new_temp_file "${phase}-salvage-probe-canonical"; probe_canonical=$NEW_TEMP_FILE
+    new_temp_file "${phase}-salvage-kept"; kept_file=$NEW_TEMP_FILE
+    new_temp_file "${phase}-salvage-complete"; complete_file=$NEW_TEMP_FILE
+
+    # The stream's own terminal record, with whatever of it survived, so that a
+    # malformed summary cannot take the findings down with it.
+    jq '[.[] | select(.record == "complete")] | (.[0] // {}) |
+        {record: "complete", schema_version: 1, finding_count: 0,
+         summary: (if (.summary | type) == "string" then .summary else "" end),
+         verification_limitations: (if (.verification_limitations | type) == "array" and
+             all(.verification_limitations[]; type == "string") then .verification_limitations else [] end),
+         positive_evidence: (if (.positive_evidence | type) == "array" and
+             all(.positive_evidence[]; type == "string") then .positive_evidence else [] end)}' \
+        "$records_file" >"$complete_file" || return 1
+
+    mapfile -t candidates < <(jq -c '.[] | select(.record != "complete")' "$records_file")
+    total=${#candidates[@]}
+    printf '[]\n' >"$kept_file"
+    for (( index = 0; index < total; index++ )); do
+        record=${candidates[index]}
+        jq -n --argjson record "$record" --slurpfile complete "$complete_file" \
+            '[$record, ($complete[0] + {finding_count: 1})]' >"$probe_file" || return 1
+        probe_status=0
+        case "$phase" in
+            primary) validate_primary_ndjson_records "$probe_file" "$probe_canonical" "$agent" || probe_status=$? ;;
+            cross) validate_cross_ndjson_records "$probe_file" "$probe_canonical" "$agent" "$expected_refs_file" || probe_status=$? ;;
+            final) validate_final_ndjson_records "$probe_file" "$probe_canonical" "$expected_refs_file" || probe_status=$? ;;
+            *) return 1 ;;
+        esac
+        if (( probe_status == 0 )) && [[ "$phase" != final || -z "$(describe_diagnostic_only_findings "$probe_canonical")" ]]; then
+            jq --argjson record "$record" '. + [$record]' "$kept_file" >"$probe_file" && mv -- "$probe_file" "$kept_file"
+            continue
+        fi
+        dropped+=("$(jq -r --argjson index "$index" \
+            'if (.source_id | type) == "string" then .source_id else "record " + ($index | tostring) end' <<<"$record")")
+    done
+
+    (( ${#dropped[@]} == 0 )) || NDJSON_SALVAGE_DROPPED_IDS+=("${dropped[@]}")
+    (( $(jq 'length' "$kept_file") > 0 )) || return 1
+    if [[ -n "$expected_refs_file" && -s "$expected_refs_file" ]]; then
+        NDJSON_SALVAGE_MISSING_REFS=$(jq --slurpfile kept "$kept_file" \
+            '[.[] | {agent, source_id}] - [$kept[0][] | (.source_refs // [])[] | {agent, source_id}] | length' \
+            "$expected_refs_file")
+    fi
+    jq --slurpfile complete "$complete_file" \
+        '. + [$complete[0] + {finding_count: length}]' "$kept_file" >"$probe_file" || return 1
+    mv -- "$probe_file" "$records_file"
+}
+
+# Salvage is still a loss even when it rescues the run, so it is written down
+# where the run accounts for itself: the console as it happens, the manifest for
+# the record, and through the manifest the report's own verification limits -- so
+# a reader who never opens a log still sees what the review does not contain.
+run_ndjson_salvage() {
+    local phase=$1 agent=$2 output_file=$3 reason=${4:-}
+    local status=0
+
+    NDJSON_SALVAGE_MODE=true
+    NDJSON_ALLOW_PARTIAL_COVERAGE=true
+    NDJSON_SALVAGE_DROPPED_IDS=()
+    NDJSON_SALVAGE_UNPARSEABLE_LINES=0
+    NDJSON_SALVAGE_MISSING_REFS=0
+    NDJSON_SALVAGE_DROPPED_RESOLUTIONS=false
+    case "$phase" in
+        primary) process_primary_ndjson_output "$output_file" "$agent" || status=$? ;;
+        cross) process_cross_ndjson_output "$output_file" "$agent" || status=$? ;;
+        final) process_final_ndjson_output "$output_file" || status=$? ;;
+        *) status=1 ;;
+    esac
+    NDJSON_SALVAGE_MODE=false
+    NDJSON_ALLOW_PARTIAL_COVERAGE=false
+    (( status == 0 )) || return "$status"
+    record_salvage_losses "$phase" "$agent" "$reason"
+}
+
+record_salvage_losses() {
+    local phase=$1 agent=$2 reason=$3
+    local -a parts=()
+    local dropped_count=${#NDJSON_SALVAGE_DROPPED_IDS[@]} noun label
+
+    case "$phase" in
+        primary) label='primary review' ;;
+        cross) label='cross-review' ;;
+        *) label='final synthesis' ;;
+    esac
+
+    if (( NDJSON_SALVAGE_UNPARSEABLE_LINES > 0 )); then
+        noun=lines; (( NDJSON_SALVAGE_UNPARSEABLE_LINES != 1 )) || noun=line
+        parts+=("${NDJSON_SALVAGE_UNPARSEABLE_LINES} unreadable ${noun}")
+    fi
+    if (( dropped_count > 0 )); then
+        noun=findings; (( dropped_count != 1 )) || noun=finding
+        parts+=("${dropped_count} ${noun} that did not meet the contract ($(printf '%s, ' "${NDJSON_SALVAGE_DROPPED_IDS[@]}" | sed 's/, $//'))")
+    fi
+    if (( NDJSON_SALVAGE_MISSING_REFS > 0 )); then
+        noun=records; (( NDJSON_SALVAGE_MISSING_REFS != 1 )) || noun=record
+        parts+=("${NDJSON_SALVAGE_MISSING_REFS} source ${noun} left unanswered")
+    fi
+    [[ "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS" != true ]] || parts+=('the dispute resolution table')
+    (( ${#parts[@]} > 0 )) || return 0
+
+    log "Kept the ${label} output from ${agent:-the synthesizer}${reason:+ after ${reason}} and dropped $(printf '%s; ' "${parts[@]}" | sed 's/; $//')"
+    [[ -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]] || return 0
+    atomic_manifest_update \
+        '.salvage_losses = ((.salvage_losses // []) + [{
+            phase: $phase, agent: (if $agent == "" then null else $agent end),
+            unparseable_lines: $unreadable, dropped_findings: $dropped, unanswered_refs: $missing,
+            dropped_resolutions: $resolutions}])' \
+        --arg phase "$label" \
+        --arg agent "$agent" \
+        --argjson unreadable "$NDJSON_SALVAGE_UNPARSEABLE_LINES" \
+        --argjson dropped "$(json_string_array "${NDJSON_SALVAGE_DROPPED_IDS[@]}")" \
+        --argjson missing "$NDJSON_SALVAGE_MISSING_REFS" \
+        --argjson resolutions "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS"
+}
+
 process_final_ndjson_output() {
     local output_file=$1
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
@@ -4824,6 +4993,10 @@ process_final_ndjson_output() {
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
                 || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
+                    NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
+                    continue
+                fi
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
@@ -4841,6 +5014,10 @@ process_final_ndjson_output() {
         FINDING_CONTRACT_FAILURE_REASON=unexpected_resolution_records
         return 1
     fi
+    if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings final "$records_file" "" "$expected_refs_file"; then
+        FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
+        return 1
+    fi
     if ! validate_final_ndjson_records "$records_file" "$canonical_file" "$expected_refs_file"; then
         detail=$(describe_ndjson_validation_failure final "$records_file" '' "$expected_refs_file")
         FINDING_CONTRACT_FAILURE_REASON="schema_provenance_or_completeness_validation_failed${detail:+: $detail}"
@@ -4854,12 +5031,25 @@ process_final_ndjson_output() {
     if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
         build_final_disputes "$disputes_file" || { FINDING_CONTRACT_FAILURE_REASON=missing_canonical_cross_inputs; return 1; }
         if ! validate_final_resolutions "$resolutions_file" "$canonical_file" "$disputes_file" "$resolutions_canonical_file"; then
-            detail=$(describe_resolution_validation_failure "$resolutions_file" "$canonical_file" "$disputes_file")
-            FINDING_CONTRACT_FAILURE_REASON="dispute_resolution_validation_failed${detail:+: $detail}"
-            return 1
+            # Dropping a finding can leave the dispute it settled with nothing to
+            # point at. The dispute table helps a reader weigh the findings; it is
+            # not the findings, so it is let go rather than allowed to take them.
+            # When salvage removed nothing, though, the resolutions are wrong on
+            # their own account -- a confirmed finding resting on a dispute nobody
+            # measured -- and that is a claim about the code, not a misprint. It
+            # fails as it always did, because publishing it would overstate what
+            # the review actually established.
+            if [[ "$NDJSON_SALVAGE_MODE" != true ]] \
+                || (( ${#NDJSON_SALVAGE_DROPPED_IDS[@]} == 0 && NDJSON_SALVAGE_UNPARSEABLE_LINES == 0 )); then
+                detail=$(describe_resolution_validation_failure "$resolutions_file" "$canonical_file" "$disputes_file")
+                FINDING_CONTRACT_FAILURE_REASON="dispute_resolution_validation_failed${detail:+: $detail}"
+                return 1
+            fi
+            NDJSON_SALVAGE_DROPPED_RESOLUTIONS=true
+        else
+            attach_measurements "$resolutions_canonical_file"
+            FINAL_PROCESSED_RESOLUTIONS_FILE=$resolutions_canonical_file
         fi
-        attach_measurements "$resolutions_canonical_file"
-        FINAL_PROCESSED_RESOLUTIONS_FILE=$resolutions_canonical_file
     fi
     new_temp_file 'final-diagnostics'; diagnostics_file=$NEW_TEMP_FILE
     write_final_diagnostics "$canonical_file" "$diagnostics_file"
@@ -4871,12 +5061,34 @@ process_final_ndjson_output() {
     mv -- "$rendered_file" "$output_file"
 }
 
+log_baseline_dirty_records() {
+    local count=$NDJSON_BASELINE_DIRTY_RECORDS phase=$1
+    local noun=records
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=record
+    log "Left ${count} malformed ${phase} ${noun} out of the repair baseline for the model to write again"
+}
+
+# A JSON-looking line that does not parse is one of two different accidents. The
+# model either tore the record off mid-token, or finished it and mis-punctuated
+# it -- a stray bracket, a doubled brace. The torn one cannot be put back without
+# guessing what was cut, so it still refuses the repair. The finished one is left
+# out of the baseline and handed to the repair pass, which carries the rejected
+# draft in full: the model sees its own broken record and writes it again. A
+# record the repair does not bring back cannot vanish quietly, because the
+# stream's source-ref coverage is checked against the inputs either way.
+ndjson_line_is_terminated_record() {
+    [[ "$1" == \{* && "$1" == *\} ]]
+}
+
 build_final_repair_baseline() {
     local input_file=$1 baseline_file=$2 parsed_file line trimmed
     local object_count=0 saw_trailing_prose=false
 
     new_temp_file 'final-repair-parsed'; parsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"
+    NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
@@ -4888,7 +5100,11 @@ build_final_repair_baseline() {
             object_count=$((object_count + 1))
             continue
         fi
-        [[ "$trimmed" == \{* || "$trimmed" == \[* ]] && return 1
+        if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
+            ndjson_line_is_terminated_record "$trimmed" || return 1
+            NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            continue
+        fi
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
@@ -5068,6 +5284,7 @@ attempt_final_ndjson_repair() {
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi
+    log_baseline_dirty_records 'final synthesis'
     new_temp_file 'final-repair-prompt'; repair_prompt=$NEW_TEMP_FILE
     new_temp_file 'final-repair-output'; repair_output=$NEW_TEMP_FILE
     new_temp_file 'final-repair-log'; repair_log=$NEW_TEMP_FILE
@@ -5127,6 +5344,7 @@ build_cross_repair_baseline() {
 
     new_temp_file "cross-repair-parsed"; parsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"
+    NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
@@ -5138,7 +5356,11 @@ build_cross_repair_baseline() {
             object_count=$((object_count + 1))
             continue
         fi
-        [[ "$trimmed" == \{* || "$trimmed" == \[* ]] && return 1
+        if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
+            ndjson_line_is_terminated_record "$trimmed" || return 1
+            NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            continue
+        fi
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
@@ -5313,6 +5535,7 @@ attempt_cross_ndjson_repair() {
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi
+    log_baseline_dirty_records 'cross-review'
     new_temp_file "cross-${agent}-repair-prompt"; repair_prompt=$NEW_TEMP_FILE
     new_temp_file "cross-${agent}-repair-output"; repair_output=$NEW_TEMP_FILE
     new_temp_file "cross-${agent}-repair-log"; repair_log=$NEW_TEMP_FILE
@@ -5380,6 +5603,7 @@ build_primary_repair_baseline() {
 
     new_temp_file "primary-repair-parsed"; parsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"
+    NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
@@ -5392,10 +5616,12 @@ build_primary_repair_baseline() {
             continue
         fi
         # Plain transport prose can be removed safely. A JSON-looking line is
-        # an unparseable record whose substantive content cannot be recovered
-        # without guessing, so it is deliberately ineligible for repair.
+        # an unparseable record: kept out of the baseline when the model at
+        # least finished writing it, refused outright when it was torn off.
         if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
-            return 1
+            ndjson_line_is_terminated_record "$trimmed" || return 1
+            NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            continue
         fi
         if (( object_count > 0 )); then
             saw_trailing_prose=true
@@ -5534,6 +5760,7 @@ attempt_primary_ndjson_repair() {
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi
+    log_baseline_dirty_records 'primary review'
 
     new_temp_file "primary-${agent}-repair-prompt"; repair_prompt=$NEW_TEMP_FILE
     new_temp_file "primary-${agent}-repair-output"; repair_output=$NEW_TEMP_FILE
@@ -7690,6 +7917,7 @@ run_review_phase() {
     local failure_reason
     local stop_reason
     local cross_recovery
+    local recovery_reason=""
     local output_tokens
     local token_display
     local now
@@ -7805,9 +8033,13 @@ run_review_phase() {
                         "${phase_started_at[$agent]}"; then
                         read_token_usage "${TEMP_USAGE_FILES[$agent]}"
                         token_display=$TOKEN_USAGE_DISPLAY
+                    elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage primary "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
+                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                        token_display=$TOKEN_USAGE_DISPLAY
+                        printf 'ndjson-v1 schema repair failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
                     else
-                        failure_reason="invalid ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-                        printf 'ndjson-v1 schema repair failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                        failure_reason="invalid ndjson-v1 output (${recovery_reason})"
+                        printf 'ndjson-v1 schema repair failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
                     fi
                 fi
             fi
@@ -7826,9 +8058,13 @@ run_review_phase() {
                         "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
                         read_token_usage "${TEMP_USAGE_FILES[$agent]}"
                         token_display=$TOKEN_USAGE_DISPLAY
+                    elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage cross "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
+                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                        token_display=$TOKEN_USAGE_DISPLAY
+                        printf 'cross-review ndjson-v1 recovery failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
                     else
-                        failure_reason="invalid cross-review ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
-                        printf 'cross-review ndjson-v1 recovery failed: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                        failure_reason="invalid cross-review ndjson-v1 output (${recovery_reason})"
+                        printf 'cross-review ndjson-v1 recovery failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
                     fi
                 fi
             fi
@@ -8233,7 +8469,8 @@ create_full_manifest() {
             attempt_failures: {
                 primary: [],
                 cross_review: []
-            }
+            },
+            salvage_losses: []
         }' >"$temp_manifest"
     mv -- "$temp_manifest" "$MANIFEST_FILE"
 }
@@ -10051,6 +10288,7 @@ run_final_synthesis_attempt() {
     local attempt=$2
     local error_log
     local final_recovery
+    local recovery_reason=""
     local final_output
     local final_log
     local final_usage
@@ -10162,7 +10400,12 @@ run_final_synthesis_attempt() {
                 final_finished_at=$(date +%s)
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY
+            elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$final_output" "$recovery_reason"; then
+                final_finished_at=$(date +%s)
+                read_token_usage "$final_usage"
+                final_token_display=$TOKEN_USAGE_DISPLAY
             else
+                FINDING_CONTRACT_FAILURE_REASON=$recovery_reason
                 set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$(date +%s)" "$final_token_display"
                 preserve_error_log "$final_log" "$error_log"
                 preserve_agent_failure_artifacts "$FINAL_SYNTHESIZER" "$final_output" "$final_usage" "$final_usage_json" "$error_log" "final synthesis"

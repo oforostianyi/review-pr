@@ -1083,10 +1083,10 @@ run_cross_continuation_case() {
         test -e "$work_dir/${stem}-cross-gamma-error-schema-repair-attempt-1-source-raw.ndjson"
 }
 
-run_cross_continuation_failure_case() {
+run_cross_continuation_salvage_case() {
     local case_dir="$suite_root/cross-continuation-failure"
     local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
-    local checkout config="$case_dir/config.json" manifest work_dir stem
+    local checkout config="$case_dir/config.json" manifest work_dir stem report_dir
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
     checkout=$(make_repository "$case_dir")
@@ -1099,19 +1099,31 @@ run_cross_continuation_failure_case() {
     printf 'cross-ndjson-stops-early\n' >"$scenarios/gamma-cross-review"
     printf 'cross-ndjson-ignores-pending\n' >"$scenarios/gamma-cross-review-findings-continuation"
 
-    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
-        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
-        fail 'a continuation that re-answers an already answered ref must not publish a review'
-    fi
+    # A cross-review that stopped early and could not be continued used to take
+    # the entire run down with it, hours and four agents after the fact, and the
+    # reason lived only in a log. The phase now contributes what the model did
+    # write, and the shortfall is recorded where the review is actually read.
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a salvaged cross-review must still publish a review: $(tail -3 "$case_dir/stderr.log")"
     manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    report_dir=$(report_root_of "$work_dir")
     assert_file_contains "$case_dir/stderr.log" 'continuation_changed_kept_findings_or_remained_invalid' \
-        'the run reports why the continuation was refused'
+        'the run still says why the continuation itself was refused'
     assert_file_exists "$work_dir/${stem}-cross-gamma-error-continuation-attempt-1-invalid-raw.ndjson" \
         'the refused merged stream is preserved for inspection'
-    assert_file_not_exists "$work_dir/${stem}-cross-gamma-findings.json" \
-        'a refused continuation publishes no canonical cross-review findings'
-    assert_file_not_exists "$work_dir/${stem}-cross-gamma-raw.ndjson" \
-        'a refused continuation publishes no raw cross-review stream'
+    assert_file_exists "$work_dir/${stem}-cross-gamma-findings.json" \
+        'the salvaged cross-review publishes the findings it did produce'
+    assert_eq 'cross-review' "$(jq -r '.salvage_losses[0].phase' "$manifest")" \
+        'the manifest names the phase that had to be salvaged'
+    assert_eq gamma "$(jq -r '.salvage_losses[0].agent' "$manifest")" \
+        'and the agent whose output it was'
+    assert_true 'and counts the source records left unanswered' \
+        test "$(jq -r '.salvage_losses[0].unanswered_refs' "$manifest")" -gt 0
+    assert_file_contains "$case_dir/stderr.log" 'Kept the cross-review output' \
+        'the console says what was kept and what was dropped'
+    assert_file_contains "$report_dir/${stem}-final.md" 'Part of the model output had to be dropped' \
+        'and the published review carries the loss among its verification limits'
 }
 
 run_final_continuation_case() {
@@ -1583,7 +1595,6 @@ run_ndjson_unsafe_schema_repair_case() {
     local manifest
     local work_dir
     local stem
-    local rejected_source
     local rejected_repair
 
     mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
@@ -1604,30 +1615,36 @@ run_ndjson_unsafe_schema_repair_case() {
     printf '%s\n' 'ndjson-preamble' >"$scenarios/beta-primary-review"
     printf '%s\n' 'unsafe-ndjson-repair' >"$scenarios/beta-primary-findings-repair"
 
-    if PATH="$fake_bin:$PATH" \
+    # The repair rewrote a finding instead of reformatting it, so its output is
+    # thrown away as it always was. What changed is what happens next: the run no
+    # longer dies with it. Salvage falls back on the model's own first answer --
+    # here a perfectly good stream behind a line of prose -- and publishes that.
+    # The guard being tested is unchanged: the rewritten claim must not appear.
+    PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
         REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
         "$repo_root/bin/review-pr" --config "$config" 123 \
-        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
-        fail 'content-changing primary schema repair must fail closed'
-    fi
-    pass 'content-changing primary schema repair fails closed'
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a salvaged primary review must still publish: $(tail -3 "$case_dir/stderr.log")"
 
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
-    rejected_source=$(find "$work_dir" -type f -name '*primary-beta-error-partial-raw.ndjson' -print | sed -n '1p')
     rejected_repair=$(find "$work_dir" -type f -name '*primary-beta-error-schema-repair-attempt-1-invalid-raw.ndjson' -print | sed -n '1p')
-    [[ -n "$rejected_source" ]] || fail 'unsafe repair did not preserve the original response'
-    pass 'unsafe repair preserves the original response'
     [[ -n "$rejected_repair" ]] || fail 'unsafe repair did not preserve the repair response'
     pass 'unsafe repair preserves the rejected repair response'
     assert_file_contains "$rejected_repair" 'The repair rewrote the finding claim.' \
         'unsafe repair diagnostic exposes the changed substantive field'
-    assert_file_not_exists "$work_dir/${stem}-beta.md" \
-        'unsafe repair cannot publish primary Markdown'
-    assert_file_not_exists "$work_dir/${stem}-beta-findings.json" \
-        'unsafe repair cannot publish canonical findings'
+    assert_file_contains "$work_dir/${stem}-beta-raw.ndjson" 'Here is the requested structured review:' \
+        'the original response is kept whole, prose and all, as the published raw stream'
+    assert_file_exists "$work_dir/${stem}-beta-findings.json" \
+        'the salvaged primary review publishes the findings the model first wrote'
+    assert_false 'and the claim the repair rewrote is nowhere in them' \
+        grep -Fq 'The repair rewrote the finding claim.' "$work_dir/${stem}-beta-findings.json"
+    assert_eq 'primary review' "$(jq -r '.salvage_losses[0].phase' "$manifest")" \
+        'the manifest records that the primary review had to be salvaged'
+    assert_eq 1 "$(jq -r '.salvage_losses[0].unparseable_lines' "$manifest")" \
+        'and counts the line of prose it could not read'
 }
 
 run_ndjson_resume_case() {
@@ -1727,26 +1744,30 @@ run_ndjson_unsafe_final_repair_case() {
     printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
     printf '%s\n' unsafe-final-ndjson-repair >"$scenarios/alpha-final-findings-repair"
 
-    if PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
-        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"; then
-        fail 'content-changing final schema repair must fail closed'
-    fi
-    pass 'content-changing final schema repair fails closed'
+    # The repair changed decisions instead of reformatting them, so it is thrown
+    # away exactly as before. The run continues on the synthesizer's own first
+    # answer -- a good stream behind a line of prose -- because losing a finished
+    # final synthesis over its preamble costs everything the run already spent.
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a salvaged final synthesis must still publish: $(tail -3 "$case_dir/stderr.log")"
     manifest=$(latest_manifest "$reviews")
     work_dir=${manifest%/*}
     stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
-    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
-        'unsafe final repair cannot publish human Markdown'
-    assert_file_not_exists "$work_dir/${stem}-final-findings.json" \
-        'unsafe final repair cannot publish canonical findings'
-    assert_file_not_exists "$work_dir/${stem}-final-raw.ndjson" \
-        'unsafe final repair cannot publish canonical raw NDJSON'
-    assert_file_exists "$work_dir/${stem}-final-error-schema-repair-source-raw.ndjson" \
-        'unsafe final repair preserves the original rejected response'
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'the salvaged final synthesis publishes the report the model first wrote'
+    assert_file_exists "$work_dir/${stem}-final-findings.json" \
+        'and its canonical findings'
+    assert_false 'while the decisions the repair rewrote are nowhere in them' \
+        grep -Fq '"classification":"UNCERTAIN"' "$work_dir/${stem}-final-findings.json"
     assert_file_exists "$work_dir/${stem}-final-error-schema-repair-invalid-raw.ndjson" \
         'unsafe final repair preserves the content-changing repair response'
     assert_file_contains "$case_dir/stderr.log" 'repair_changed_decisions_provenance_or_content' \
-        'unsafe final repair reports its stability violation'
+        'unsafe final repair still reports its stability violation'
+    assert_eq 'final synthesis' "$(jq -r '.salvage_losses[0].phase' "$manifest")" \
+        'the manifest records that the final synthesis had to be salvaged'
+    assert_eq 1 "$(jq -r '.salvage_losses[0].unparseable_lines' "$manifest")" \
+        'and counts the line of prose it could not read'
 }
 
 run_full_success_case
@@ -1755,7 +1776,7 @@ run_ndjson_cross_case
 run_dispute_resolution_case
 run_dispute_resolution_failure_case
 run_cross_continuation_case
-run_cross_continuation_failure_case
+run_cross_continuation_salvage_case
 run_final_continuation_case
 run_final_retry_case
 run_final_no_retry_case

@@ -1098,4 +1098,79 @@ preamble="$test_root/preamble-source.ndjson"
 } >"$preamble"
 assert_invalid_contract prose-preamble invalid_json_line_1 "$preamble"
 
+# A JSON-looking line that does not parse is not one accident but two. The model
+# either stopped mid-token, or finished the record and mis-punctuated it -- one
+# stray bracket on the longest record of a stream whose other forty-five were
+# perfect. The first cannot be put back without inventing what was cut; the
+# second is exactly what the repair pass exists for.
+assert_true 'a record the model finished writing is recognised as terminated' \
+    ndjson_line_is_terminated_record '{"record":"finding","recommendation":"text."]}'
+assert_false 'a record torn off mid-token is not' \
+    ndjson_line_is_terminated_record '{"record":"finding","claim":"half a sen'
+assert_false 'and neither is transport prose' \
+    ndjson_line_is_terminated_record 'Here is the requested review:'
+
+baseline_valid=$(head -n 1 -- "$test_dir/fixtures/primary-findings-valid.ndjson")
+baseline_complete=$(tail -n 1 -- "$test_dir/fixtures/primary-findings-valid.ndjson")
+baseline_dirty='{"record":"finding","schema_version":1,"source_id":"F-009","recommendation":"text."],"classification":null}'
+baseline_torn='{"record":"finding","schema_version":1,"source_id":"F-009","claim":"half a sen'
+
+printf '%s\n%s\n%s\n' "$baseline_valid" "$baseline_dirty" "$baseline_complete" >"$test_root/baseline-dirty.ndjson"
+printf '%s\n%s\n%s\n' "$baseline_valid" "$baseline_torn" "$baseline_complete" >"$test_root/baseline-torn.ndjson"
+REPORT_STEM=fixture-baseline
+assert_true 'a stream with one mis-punctuated record still yields a repair baseline' \
+    build_primary_repair_baseline "$test_root/baseline-dirty.ndjson" "$test_root/baseline-dirty.md"
+assert_eq 1 "$NDJSON_BASELINE_DIRTY_RECORDS" \
+    'and the record it could not read is counted, not silently forgotten'
+assert_false 'a stream torn off mid-record is still refused outright' \
+    build_primary_repair_baseline "$test_root/baseline-torn.ndjson" "$test_root/baseline-torn.md"
+
+# Salvage: the step before a phase is abandoned. Every record is put to the same
+# contract on its own, and whatever stands is kept. The run has already been paid
+# for by the time this matters, so refusing to publish what survived would throw
+# away the good work along with the bad.
+salvage_input="$test_root/salvage-primary.ndjson"
+printf '%s\n%s\n%s\n' "$baseline_valid" "$baseline_dirty" "$baseline_complete" >"$salvage_input"
+REPORT_STEM=fixture-salvage
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-salvage-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-salvage-codex-findings.json"
+assert_false 'an unreadable record still fails the contract on the ordinary path' \
+    process_primary_ndjson_output "$salvage_input" codex
+assert_eq invalid_json_line_2 "$FINDING_CONTRACT_FAILURE_REASON" \
+    'and names the line it could not read'
+
+cp -- "$test_dir/fixtures/primary-findings-valid.ndjson" "$salvage_input"
+python3 - "$salvage_input" <<'PYTHON'
+import sys
+path = sys.argv[1]
+lines = [line for line in open(path, encoding='utf-8').read().split('\n') if line.strip()]
+# F-002 keeps every key but loses its severity, so it fails the schema while the
+# rest of the stream stays perfectly good.
+lines = [line.replace('"severity":"P2"', '"severity":"catastrophic"') if '"F-002"' in line else line
+         for line in lines]
+open(path, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+PYTHON
+REPORT_STEM=fixture-salvage-schema
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-salvage-schema-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-salvage-schema-codex-findings.json"
+assert_false 'a record that breaks the schema fails the ordinary path too' \
+    process_primary_ndjson_output "$salvage_input" codex
+assert_true 'but salvage keeps the records that stand on their own' \
+    run_ndjson_salvage primary codex "$salvage_input"
+assert_eq 1 "$(jq '.findings | length' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'the salvaged artifact holds the finding that was well formed'
+assert_eq F-001 "$(jq -r '.findings[0].source_id' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'and it is the one the model wrote correctly'
+assert_eq F-002 "${NDJSON_SALVAGE_DROPPED_IDS[0]}" \
+    'the dropped finding is named, so the loss can be read back'
+assert_eq 1 "$(jq '.finding_count' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'and the terminal count is corrected to what the stream actually carries'
+
+printf 'not a record at all\n' >"$test_root/salvage-empty.ndjson"
+REPORT_STEM=fixture-salvage-empty
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-salvage-empty-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-salvage-empty-codex-findings.json"
+assert_false 'salvage refuses when nothing in the stream survives' \
+    run_ndjson_salvage primary codex "$test_root/salvage-empty.ndjson"
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
