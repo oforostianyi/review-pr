@@ -12,6 +12,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
   default anyway, and Codex answers HTTP 400, which would have failed the phase. A value that merely
   resembles it, such as `automatic`, is still refused.
 
+### Changed
+
+- The model reference in `README.md` is a 2026-09-23 snapshot and gained the models both vendors
+  released this week, `claude-opus-5-5` and `gpt-6-sol`. It also gained a Pi row, which the table
+  could not describe before: `pi --list-models` reports the provider, context window, maximum output
+  and whether a model takes a thinking level at all, per account, so it is authoritative where the
+  other rows are a snapshot. That last column matters — `dirk-qwen3.8-27b@iq3_s` supports a thinking
+  level and `@iq3_xxs` does not, though they are one model at two quantisations. Artificial Analysis
+  is linked as the other half of the question: the table says what a CLI accepts, not which model is
+  worth the tokens.
+
 ### Fixed
 
 - The portable copy of a configured skill is found by agent key and then by adapter type, the way the

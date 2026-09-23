@@ -195,13 +195,21 @@ See the [official Cursor CLI installation guide](https://docs.cursor.com/en/cli/
 
 ## Current model reference
 
-This table is a convenience snapshot checked on 2026-09-01. Providers can change model availability, names, and account entitlements without a `review-pr` release; use each vendor's linked documentation and the CLI's own selector as the source of truth before pinning a model.
+This table is a convenience snapshot checked on 2026-09-23. Providers can change model availability, names, and account entitlements without a `review-pr` release; use each vendor's linked documentation and the CLI's own selector as the source of truth before pinning a model.
 
 | CLI | Model IDs / slugs in the current reference | How to verify current availability |
 | --- | --- | --- |
-| Claude Code | `claude-fable-5`, `claude-mythos-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` | [Anthropic model status](https://docs.anthropic.com/en/docs/about-claude/model-deprecations) and `claude --model <id>`; a subscription or organization may expose only a subset. |
-| Codex | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex-spark` | [OpenAI Docs model selector](https://learn.chatgpt.com/docs/models) or Codex's `/model`; the visible selection depends on the account and plan. |
+| Claude Code | `claude-opus-5-5`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` | [Anthropic model status](https://docs.anthropic.com/en/docs/about-claude/model-deprecations) and `claude --model <id>`; a subscription or organization may expose only a subset. |
+| Codex | `gpt-6-sol`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex-spark` | [OpenAI Docs model selector](https://learn.chatgpt.com/docs/models) or Codex's `/model`; the visible selection depends on the account and plan. |
 | Google Antigravity (`agy`) | `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, `gemini-3.6-flash-high`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-low`, `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium` | Run `agy models`. The official [headless CLI documentation](https://antigravity.google/docs/cli/headless/) lists supported flags and examples; results vary by account and configured provider. |
+
+| Pi | `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.6-flash` from a hosted provider; any local build the runtime serves, for example `dirk-qwen3.8-27b@iq3_s` | Run `pi --list-models [search]`. It prints the provider, context window, maximum output, and whether the model supports a thinking level, for exactly the providers that account has configured. |
+
+Pi is the one CLI whose catalogue is machine-readable per account, so `pi --list-models` is authoritative where the other rows are a snapshot. It also answers the question the table cannot: a model is only worth an `effort` if its `thinking` column says `yes`. `dirk-qwen3.8-27b@iq3_s` supports one and `@iq3_xxs` does not, though both are the same model at different quantisations.
+
+Pi's thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Every adapter also accepts `auto`, which sends no level at all.
+
+[Artificial Analysis](https://artificialanalysis.ai) compares these models on independent benchmarks, price and speed, which is the missing half of the picture: this table says what a CLI will accept, not which of them is worth the tokens for a review.
 
 The Antigravity list above is from `agy models` on the maintainer's Antigravity CLI 1.1.23 account on the stated date, not a guarantee that every account receives every model.
 
