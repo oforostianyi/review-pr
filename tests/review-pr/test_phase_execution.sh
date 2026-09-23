@@ -278,6 +278,18 @@ FINALIZATION_MODEL=''
 assert_eq '--effort high' "$(agent_effort_arguments claude high | paste -sd ' ' -)" 'Claude receives its effort as --effort'
 assert_eq '-c model_reasoning_effort="medium"' "$(agent_effort_arguments codex medium | paste -sd ' ' -)" 'Codex receives its effort as a reasoning override'
 assert_eq '--thinking xhigh' "$(agent_effort_arguments pi xhigh | paste -sd ' ' -)" 'Pi receives its effort as a thinking level'
+
+# Neither CLI accepts "auto": claude warns and falls back to its default, codex
+# answers 400. Passing nothing is what "let the model decide" already meant, so
+# `auto` is the word for that and not a value to forward.
+assert_eq '' "$(agent_effort_arguments claude auto | paste -sd ' ' -)" \
+    'an auto effort sends no flag to Claude rather than a word it rejects'
+assert_eq '' "$(agent_effort_arguments codex auto | paste -sd ' ' -)" \
+    'an auto effort sends no reasoning override to Codex'
+assert_eq '' "$(agent_effort_arguments pi auto | paste -sd ' ' -)" \
+    'an auto effort sends no thinking level to Pi'
+assert_eq '' "$(agent_effort_arguments claude '' | paste -sd ' ' -)" \
+    'an empty effort still sends nothing, which is what auto is a name for'
 assert_eq '' "$(agent_effort_arguments pi '' | paste -sd ' ' -)" 'an empty Pi effort adds no thinking flag'
 assert_eq '' "$(agent_effort_arguments custom high | paste -sd ' ' -)" 'other agents receive no effort flag'
 

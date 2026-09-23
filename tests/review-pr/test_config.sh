@@ -372,4 +372,24 @@ jq '.timezone = "../../etc/passwd"' "$config_file" >"$traversing_timezone"
 assert_file_contains <(config_error "$traversing_timezone") 'timezone' \
     'a timezone that is a path rather than a zone name is refused'
 
+# "auto" is accepted for every built-in adapter as the name for "send no effort
+# and let the CLI decide", which an empty string already did.
+auto_effort="$test_root/auto-effort.json"
+jq '.agents = {
+        "claude": {"label": "Claude", enabled: true, type: "claude", model: "m", effort: "auto"},
+        "codex": {"label": "Codex", enabled: true, type: "codex", model: "m", effort: "auto"},
+        "pi": {"label": "Pi", enabled: true, type: "pi", model: "m", effort: "auto"}
+    } | .reviewers = ["claude", "codex", "pi"] | .synthesizer = "codex"
+    | .finalization = {"model": "", "effort": "auto"}' "$config_file" >"$auto_effort"
+assert_true 'auto is accepted as an effort for every built-in adapter' \
+    "$repo_root/bin/review-pr" --config "$auto_effort" --show-config
+assert_file_contains <("$repo_root/bin/review-pr" --config "$auto_effort" --show-config) 'Final effort: auto' \
+    'the setting is reported as configured rather than silently blanked'
+
+still_invalid="$test_root/still-invalid-effort.json"
+jq '.agents.claude = {"label": "Claude", enabled: true, type: "claude", model: "m", effort: "automatic"}
+    | .reviewers = ["claude", "alpha", "beta"]' "$config_file" >"$still_invalid"
+assert_file_contains <(config_error "$still_invalid") 'automatic' \
+    'a value that merely looks like auto is still rejected'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- `effort` accepts `auto` for every built-in adapter, meaning what an empty effort already meant: no
+  flag is sent and the CLI uses its own default. It is a name for that rather than a value passed on,
+  because neither CLI takes it — `claude --effort auto` warns that the value is unknown and uses its
+  default anyway, and Codex answers HTTP 400, which would have failed the phase. A value that merely
+  resembles it, such as `automatic`, is still refused.
+
 ### Fixed
 
 - The portable copy of a configured skill is found by agent key and then by adapter type, the way the

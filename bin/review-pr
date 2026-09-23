@@ -683,9 +683,9 @@ load_config() {
 describe_configuration_problems() {
     jq -r '
         def known_efforts($type):
-            if $type == "claude" then ["low", "medium", "high", "xhigh", "max"]
-            elif $type == "codex" then ["none", "low", "medium", "high", "xhigh", "max"]
-            elif $type == "pi" then ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+            if $type == "claude" then ["auto", "low", "medium", "high", "xhigh", "max"]
+            elif $type == "codex" then ["auto", "none", "low", "medium", "high", "xhigh", "max"]
+            elif $type == "pi" then ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
             else null end;
         def enum_problem($where; $value; $allowed):
             if $value == null then empty
@@ -791,11 +791,11 @@ die_with_configuration_problems() {
             type == "string" or
             (type == "array" and all(.[]; type == "string"));
         def valid_claude_effort:
-            . == "" or IN("low", "medium", "high", "xhigh", "max");
+            . == "" or . == "auto" or IN("low", "medium", "high", "xhigh", "max");
         def valid_codex_effort:
-            . == "" or IN("none", "low", "medium", "high", "xhigh", "max");
+            . == "" or . == "auto" or IN("none", "low", "medium", "high", "xhigh", "max");
         def valid_pi_thinking:
-            . == "" or IN("off", "minimal", "low", "medium", "high", "xhigh", "max");
+            . == "" or . == "auto" or IN("off", "minimal", "low", "medium", "high", "xhigh", "max");
         # The agent key is a label the reader chooses; `type` names the adapter that
         # runs it, so two agents may share one CLI with different models. An agent
         # without `type` keeps the old meaning, where the key was the adapter.
@@ -1589,7 +1589,11 @@ agent_effort_arguments() {
     local agent=$1
     local effort=$2
 
-    [[ -n "$effort" ]] || return 0
+    # Neither CLI accepts "auto" as a level: claude warns and falls back to its
+    # default, codex answers 400. Sending no flag at all is what "let the model
+    # decide" already meant, so auto is a name for that rather than a value to
+    # forward.
+    [[ -n "$effort" && "$effort" != auto ]] || return 0
     case "$(agent_type "$agent")" in
         claude) printf '%s\n' --effort "$effort" ;;
         codex) printf '%s\n' -c "model_reasoning_effort=\"${effort}\"" ;;

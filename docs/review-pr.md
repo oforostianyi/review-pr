@@ -242,6 +242,8 @@ already run with tools disabled.
 
 ## Built-in agents, models, and reasoning effort
 
+`effort` may also be `auto`, which means the same as leaving it empty: no effort flag is sent and the CLI uses its own default. It is a name for that, not a value forwarded to the provider — neither CLI accepts `auto` as a level. `claude --effort auto` warns that the value is unknown and falls back to its default, and Codex answers the request with HTTP 400.
+
 `claude`, `codex`, and `pi` are built-in adapters. The agent key names the agent; `type` names the adapter that runs it and defaults to the key, so a configuration that calls its agents `claude`, `codex`, and `pi` needs no `type` and behaves exactly as before. Naming the adapter explicitly lets several agents share one CLI with different models:
 
 ```json
