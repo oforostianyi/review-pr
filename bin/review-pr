@@ -364,6 +364,46 @@ is_run_timestamp() {
     [[ "$1" =~ ^${RUN_TIMESTAMP_PATTERN}$ ]]
 }
 
+# `last` saves copying an identifier out of a directory listing; it always means
+# the newest run of the pull request being asked about, never the last run of some
+# other one.
+is_run_selector() {
+    [[ "$1" == last ]] || is_run_timestamp "$1"
+}
+
+# The newest run of one review, decided by the instant its manifest recorded rather
+# than by the identifier as text -- a zone abbreviation does not sort
+# chronologically, and after a westward journey a later run carries an earlier
+# clock time. Runs older than that field fall back to the identifier.
+resolve_latest_run_identifier() {
+    local report_dir=$1 review_id=$2
+    local manifest identifier instant
+    local latest='' latest_rank=-1 latest_value=-1
+    local rank value
+
+    [[ -d "$report_dir" ]] || return 0
+    while IFS= read -r manifest; do
+        [[ -f "$manifest" && ! -L "$manifest" ]] || continue
+        identifier=$(jq -r '.timestamp // ""' "$manifest" 2>/dev/null)
+        is_run_timestamp "$identifier" || continue
+        instant=$(timestamp_to_epoch "$(jq -r '.created_at // ""' "$manifest" 2>/dev/null)") || instant=''
+        if [[ -n "$instant" ]]; then
+            rank=1
+            value=$instant
+        else
+            rank=0
+            value=$((10#${identifier%%-[A-Za-z+-]*}))
+        fi
+        if (( rank > latest_rank )) || (( rank == latest_rank && value > latest_value )); then
+            latest=$identifier
+            latest_rank=$rank
+            latest_value=$value
+        fi
+    done < <(find -P "$report_dir" -type f -name "${review_id}-*-manifest.json" ! -name '*-final-rerun-*')
+
+    printf '%s' "$latest"
+}
+
 # A zone abbreviation does not order chronologically -- GMT follows IST but sorts
 # before it -- so the largest identifier is not the newest run. Manifests record
 # created_at with a numeric offset, which names an instant exactly; this turns one
@@ -455,7 +495,7 @@ select_final_findings_artifact() {
 
     while IFS= read -r candidate; do
         [[ -f "$candidate" && ! -L "$candidate" ]] || continue
-        if [[ -n "$run_selector" && "${candidate##*/}" != *"-${run_selector}-"* ]]; then
+        if [[ -n "$run_selector" && "$run_selector" != last && "${candidate##*/}" != *"-${run_selector}-"* ]]; then
             continue
         fi
 
@@ -10640,7 +10680,7 @@ fi
 if [[ "$FINDINGS_MODE" == true ]]; then
     (( $# == 1 )) || die "findings takes a single pull-request number"
     [[ "$RERUN_FINAL" == false && "$FORCE_RERUN" == false ]] || die "findings cannot be combined with --rerun-final or --force"
-    [[ -z "$RUN_SELECTOR" ]] || is_run_timestamp "$RUN_SELECTOR" || die "Invalid run timestamp: ${RUN_SELECTOR}"
+    [[ -z "$RUN_SELECTOR" ]] || is_run_selector "$RUN_SELECTOR" || die "Invalid run timestamp: ${RUN_SELECTOR}"
     export_review_findings "$FINDINGS_INCLUDE"
     exit 0
 fi
@@ -10655,7 +10695,7 @@ fi
 if [[ "$FORCE_RERUN" == true && -z "$RUN_SELECTOR" ]]; then
     die "--force requires an exact source run via --run <timestamp>"
 fi
-if [[ -n "$RUN_SELECTOR" ]] && ! is_run_timestamp "$RUN_SELECTOR"; then
+if [[ -n "$RUN_SELECTOR" ]] && ! is_run_selector "$RUN_SELECTOR"; then
     die "Invalid run timestamp: ${RUN_SELECTOR}"
 fi
 
@@ -10772,6 +10812,18 @@ LEGACY_EXTERNAL_REVIEWS_ROOT=$REVIEWS_ROOT
 LEGACY_REVIEWS_ROOT="${REVIEW_REPO}/docs/reviews"
 REPORT_DIR="${ACTIVE_REVIEWS_ROOT}/${REVIEW_ID}"
 REPORT_STEM="${REVIEW_ID}-${TIMESTAMP}"
+
+# `last` becomes a concrete identifier here, once the review directory is known and
+# before anything looks a run up, so every path below sees the same selector a
+# person would have typed. The run it resolved to is logged, because a command that
+# silently picks its own target is one a reader cannot check.
+if [[ "$RUN_SELECTOR" == last ]]; then
+    RUN_SELECTOR=$(resolve_latest_run_identifier "$REPORT_DIR" "$REVIEW_ID")
+    [[ -n "$RUN_SELECTOR" ]] \
+        || RUN_SELECTOR=$(resolve_latest_run_identifier "${LEGACY_EXTERNAL_REVIEWS_ROOT}/${REVIEW_ID}" "$REVIEW_ID")
+    [[ -n "$RUN_SELECTOR" ]] || die "PR #${PR_NUMBER} has no recorded run to select with --run last"
+    log "Selected the most recent run of PR #${PR_NUMBER}: ${RUN_SELECTOR}"
+fi
 
 mkdir -p -- "$REVIEWS_ROOT"
 resolved_reviews_root=$(canonical_existing_path "$REVIEWS_ROOT")

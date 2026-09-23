@@ -774,7 +774,7 @@ After primary and cross-review phases have completed, re-run only the final synt
 review-pr --rerun-final 123
 ```
 
-By default, this selects the newest manifest-backed run with completed primary and cross-review phases for that repository and PR number. It is intentionally independent of the PR's current head commit. The repeated synthesis receives only the preserved cross-review reports; it does not receive primary reports or run any reviewer again. Select an exact source run with its identifier:
+By default, this selects the newest manifest-backed run with completed primary and cross-review phases for that repository and PR number. It is intentionally independent of the PR's current head commit. The repeated synthesis receives only the preserved cross-review reports; it does not receive primary reports or run any reviewer again. `--run last` selects the most recent full run of that pull request, so an identifier never has to be copied out of a directory listing. It resolves before anything is looked up and the run it chose is logged, so a reader can see which one was meant. A re-synthesis is never the answer: a resume and a final rerun both work from a full run. Select an exact source run with its identifier instead:
 
 ```bash
 review-pr --rerun-final --run 20260818-154838-CEST 123

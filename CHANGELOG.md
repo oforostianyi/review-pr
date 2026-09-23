@@ -6,6 +6,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- `--run last` selects the most recent full run of the pull request, for a resume, a `--rerun-final`
+  and `findings` alike, so an identifier no longer has to be copied out of a directory listing. It is
+  resolved once, before anything looks a run up, and the chosen run is logged — a command that picks
+  its own target silently is one a reader cannot check. "Most recent" is decided by the instant the
+  manifest recorded, not by the identifier as text, so it survives a timezone change like every other
+  selection now does. A re-synthesis is never the answer, because a resume and a final rerun both work
+  from a full run.
+
 - `effort` accepts `auto` for every built-in adapter, meaning what an empty effort already meant: no
   flag is sent and the CLI uses its own default. It is a name for that rather than a value passed on,
   because neither CLI takes it — `claude --effort auto` warns that the value is unknown and uses its
