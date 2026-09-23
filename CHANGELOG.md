@@ -4,6 +4,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- The prompt claims precedence over a configured skill for the output format, not only for
+  persistence and safety. A skill is review methodology, but the ones written for this project also
+  carry a Markdown report template and a verdict vocabulary of their own, and the wrapper granted the
+  prompt authority over neither. A reviewer that follows the skill's format drops the fields only the
+  contract defines: on PR 29024 one emitted cross-review records in the final phase's shape with no
+  `source_refs` at all. The wrapper now says the response format, its structure, its field names and
+  its classification words come from the prompt alone, and that a layout the skill prescribes applies
+  to running that skill directly.
+
 ## [1.21.0] - 2026-09-22
 
 ### Added

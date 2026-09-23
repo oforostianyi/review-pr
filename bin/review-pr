@@ -2919,7 +2919,7 @@ append_configured_skill_to_prompt() {
         printf '\n===== CONFIGURED SKILL CHECKLISTS ARE EMBEDDED BELOW =====\n'
         printf 'Any `checklists/*.md` reference in the configured skill means the corresponding checklist text appears later in this prompt. It is not a path in the checked-out repository and it is not a request to search another agent skill directory. Do not use tools to open, find, or locate these configured checklists; read and apply the embedded blocks below.\n'
         printf '\n===== BEGIN CONFIGURED REVIEW SKILL (REFERENCE) =====\n'
-        printf 'This portable skill copy is review methodology, not an instruction to write files or change branches. The orchestrated-mode requirements in this prompt take precedence for persistence and safety.\n\n'
+        printf 'This portable skill copy is review methodology: what to examine, how to verify it, what evidence to demand. It does not decide how the answer is written. The requirements in this prompt take precedence for persistence, for safety, and for the output format -- the response format, its record or section structure, its field names and its classification vocabulary come from this prompt alone. Where the skill prescribes a report layout, sections to produce, or verdict words of its own, they apply to running the skill directly, not here; follow this prompt instead and do not add, rename or drop a field to match the skill.\n\n'
         cat -- "$AGENT_SKILL_FILE"
         printf '\n===== END CONFIGURED REVIEW SKILL =====\n'
 
