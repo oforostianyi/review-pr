@@ -44,6 +44,7 @@ export default function reviewPrPiGuard(pi) {
     let executed = 0;
     let blocked = 0;
     let budgetBlocked = 0;
+    let consecutiveDuplicates = 0;
     let terminated = false;
 
     const log = (event, extra) => {
@@ -61,14 +62,28 @@ export default function reviewPrPiGuard(pi) {
 
         if (seen.has(key)) {
             blocked += 1;
-            log("duplicate_blocked", { tool, calls: executed, blocked });
+            consecutiveDuplicates += 1;
+            // Being told the result is already in context does not always stop a
+            // model, and this branch used to return before any termination check,
+            // so a loop of one repeated call ran until the agent's wall-clock
+            // timeout. Only an unbroken run of repeats is fatal: an occasional
+            // re-read between real calls is ordinary and resets the count.
+            const terminate = consecutiveDuplicates > OVERFLOW_ALLOWANCE;
+            if (terminate && !terminated) {
+                terminated = true;
+                log("terminated", { tool, calls: executed, blocked });
+            } else {
+                log("duplicate_blocked", { tool, calls: executed, blocked });
+            }
             return {
                 block: true,
+                terminate,
                 reason:
                     `review-pr tool guard: this exact ${tool} call was already executed earlier in this session and its result is already in your context. ` +
                     "Do not repeat inspections. Continue the review with the evidence you already have and produce the required final output.",
             };
         }
+        consecutiveDuplicates = 0;
 
         if (maxToolCalls > 0 && executed >= maxToolCalls) {
             blocked += 1;

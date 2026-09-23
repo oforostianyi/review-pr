@@ -437,6 +437,59 @@ publish_findings_export() {
 # Locates the freshest published final synthesis for a pull request and renders
 # it. Names carry their run timestamp, and an artifact-only rerun sorts after the
 # run it re-synthesized, so the last name is the freshest.
+# Picks the final-findings artifact a reader means by "the findings for this PR":
+# the most recently produced one. A re-synthesis is named after the run it was made
+# from, so ordering the file names as text ranked it by that older source run --
+# a rerun of Monday's run lost to Tuesday's ordinary report, and the agent sent to
+# fix the findings received a list that had already been superseded. The manifest
+# beside each artifact records when it was produced, with an offset, so that is
+# what decides; the timestamp in the name is the fallback for runs older than that
+# field.
+select_final_findings_artifact() {
+    local search_root=$1 pr_number=$2 run_selector=$3
+    local candidate selected='' manifest instant identifier
+    # A recorded instant and a bare identifier are different scales, so the rank
+    # keeps them apart: an artifact with a manifest always outranks one without,
+    # and within each group the larger value is the later synthesis.
+    local candidate_rank candidate_value selected_rank=-1 selected_value=-1
+
+    while IFS= read -r candidate; do
+        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+        if [[ -n "$run_selector" && "${candidate##*/}" != *"-${run_selector}-"* ]]; then
+            continue
+        fi
+
+        manifest=${candidate%-findings.json}-manifest.json
+        [[ -f "$manifest" ]] || manifest=${candidate%-final-findings.json}-manifest.json
+        instant=''
+        if [[ -f "$manifest" && ! -L "$manifest" ]]; then
+            instant=$(timestamp_to_epoch "$(jq -r '.created_at // ""' "$manifest" 2>/dev/null)") || instant=''
+        fi
+
+        if [[ -n "$instant" ]]; then
+            candidate_rank=1
+            candidate_value=$instant
+        else
+            # The last identifier in the name is when this synthesis ran: for a
+            # rerun that is the rerun itself, not the run it was made from.
+            identifier=$(grep -oE "$RUN_TIMESTAMP_PATTERN" <<<"${candidate##*/}" | tail -n 1)
+            identifier=${identifier%%-[A-Za-z+-]*}
+            candidate_rank=0
+            candidate_value=$((10#${identifier//-/}))
+        fi
+
+        if (( candidate_rank > selected_rank )) \
+            || (( candidate_rank == selected_rank && candidate_value > selected_value )); then
+            selected=$candidate
+            selected_rank=$candidate_rank
+            selected_value=$candidate_value
+        fi
+    done < <(find -P "$search_root" -type f \
+        \( -name "${pr_number}-*-final-findings.json" -o -name "${pr_number}-*-final-rerun-*-findings.json" \) | sort)
+
+    printf '%s' "$selected"
+}
+
 export_review_findings() {
     local scope=$1
     local slug search_root candidate selected='' run
@@ -447,14 +500,7 @@ export_review_findings() {
     [[ -d "$search_root" && ! -L "$search_root" ]] \
         || die "No reviews have been stored for ${GITHUB_REPOSITORY} under ${REVIEWS_ROOT}"
 
-    while IFS= read -r candidate; do
-        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
-        if [[ -n "$RUN_SELECTOR" && "${candidate##*/}" != *"-${RUN_SELECTOR}-"* ]]; then
-            continue
-        fi
-        selected=$candidate
-    done < <(find -P "$search_root" -type f \
-        \( -name "${PR_NUMBER}-*-final-findings.json" -o -name "${PR_NUMBER}-*-final-rerun-*-findings.json" \) | sort)
+    selected=$(select_final_findings_artifact "$search_root" "$PR_NUMBER" "$RUN_SELECTOR")
 
     if [[ -z "$selected" ]]; then
         if [[ -n "$RUN_SELECTOR" ]]; then
@@ -4063,6 +4109,13 @@ measurement_command_policy() {
         elif (all(.[]; type == "string" and length > 0) | not) then "unsafe_argument"
         elif ((.[0] | IN($allow[])) | not) then "not_allowlisted"
         elif any(.[1:][]; startswith("/") or startswith("~") or . == ".." or startswith("../") or contains("/../") or endswith("/..")) then "unsafe_argument"
+        # An option carries its value after an equals sign, so the checks above see
+        # only the flag: `--output=/etc/x` begins with a dash, not a slash. The
+        # value is examined on its own, or a measurement could read outside the
+        # checkout through any option that takes a path.
+        elif any(.[1:][]; startswith("-") and contains("=") and ((split("=")[1:] | join("=")) | startswith("/") or startswith("~") or . == ".." or startswith("../") or contains("/../") or endswith("/.."))) then "unsafe_argument"
+        # And no measurement writes a file, whatever the path looks like.
+        elif any(.[1:][]; . == "--output" or startswith("--output=")) then "unsafe_argument"
         elif .[0] == "rg" and any(.[1:][]; startswith("--pre")) then "unsafe_argument"
         elif .[0] == "git" and any(.[1:][]; startswith("-c") or . == "-C" or startswith("--exec-path") or startswith("--git-dir") or startswith("--work-tree") or startswith("--config-env") or startswith("--namespace")) then "unsafe_argument"
         elif .[0] == "git" and (((.[1] // "") | IN($git_ok[])) | not) then "git_subcommand_not_allowlisted"
@@ -6439,6 +6492,22 @@ expand_configured_command() {
     (( ${#EXPANDED_COMMAND[@]} > 0 )) || die "Configured command expanded to no arguments"
 }
 
+# Every phase that produces or corrects the final answer, including the comparison
+# written from it. The finalization model and effort apply to all of them, and
+# under --rerun-final all of them are artifact-only. Keying that on the two obvious
+# names left a continuation or a repair running on the agent's own model and, in a
+# rerun, inside the checkout -- reaching for source the same prompt tells it not to
+# read, and failing outright once that checkout has moved on.
+is_final_phase() {
+    case "$1" in
+        'final synthesis' | 'comparison synthesis' | 'final findings continuation' | \
+        'final findings repair' | 'final anchor repair')
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 run_configured_command_in_worktree() {
     local agent=$1
     local phase=$2
@@ -6473,7 +6542,7 @@ run_configured_command_in_worktree() {
             "${EXPANDED_COMMAND[@]}" <"$prompt_file"
         return
     fi
-    if [[ "$RERUN_FINAL" == true && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) ]]; then
+    if [[ "$RERUN_FINAL" == true ]] && is_final_phase "$phase"; then
         expand_configured_command "$command_template" "$prompt_file" "$model" "$effort" "$phase" "$REPORT_DIR"
         cd "$REPORT_DIR"
         env \
@@ -6709,13 +6778,13 @@ start_agent() {
     local -a codex_repository_arguments=()
     local -a EXPANDED_COMMAND=()
 
-    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && -n "$FINALIZATION_MODEL" ]]; then
+    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && -n "$FINALIZATION_MODEL" ]] && is_final_phase "$phase"; then
         model=$FINALIZATION_MODEL
     fi
-    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) && "$FINALIZATION_EFFORT_CONFIGURED" == true ]]; then
+    if [[ ( "$CONTRACT_TEST_MODE" != true || "$agent" == "$FINAL_SYNTHESIZER" ) && "$FINALIZATION_EFFORT_CONFIGURED" == true ]] && is_final_phase "$phase"; then
         effort=$FINALIZATION_EFFORT
     fi
-    if [[ "$RERUN_FINAL" == true && ( "$phase" == "final synthesis" || "$phase" == "comparison synthesis" ) ]]; then
+    if [[ "$RERUN_FINAL" == true ]] && is_final_phase "$phase"; then
         agent_working_directory=$REPORT_DIR
         artifact_only=true
     fi

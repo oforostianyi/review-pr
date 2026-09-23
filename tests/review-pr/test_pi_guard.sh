@@ -83,6 +83,30 @@ assert_eq 'null' "$(jq -c '.results[4]' <<<"$dedupe_result")" \
 assert_eq '2' "$(jq -s '[.[] | select(.event == "duplicate_blocked")] | length' "$dedupe_log")" \
     'the guard log records every blocked duplicate'
 
+# A model that keeps repeating one call is not going to stop being told. The
+# duplicate branch returned before the termination check, so such a loop ran until
+# the agent's own timeout -- an hour, in a configuration that disables it per call.
+# Isolated duplicates are normal, so only a consecutive run of them terminates.
+loop_log="$test_root/duplicate-loop.ndjson"
+loop_script=$(jq -nc '[{tool: "bash", input: {command: "echo once"}}]
+    + [range(0; 14) | {tool: "bash", input: {command: "echo once"}}]')
+loop_result=$(run_guard 100 "$loop_log" "$loop_script")
+assert_eq 'false' "$(jq -r '.results[5].terminate // false' <<<"$loop_result")" \
+    'a handful of repeats is still only blocked, never fatal'
+assert_eq 'true' "$(jq -r '.results[14].terminate // false' <<<"$loop_result")" \
+    'a model looping on one call is terminated instead of running to the timeout'
+assert_eq '1' "$(jq -s '[.[] | select(.event == "terminated")] | length' "$loop_log")" \
+    'the termination is recorded once'
+
+# An occasional repeat in a long review must not accumulate toward that end.
+spaced_log="$test_root/duplicate-spaced.ndjson"
+spaced_script=$(jq -nc '[range(0; 30) | if . % 2 == 0 then {tool: "bash", input: {command: ("echo " + (. | tostring))}} else {tool: "bash", input: {command: "echo repeat"}} end]')
+spaced_result=$(run_guard 100 "$spaced_log" "$spaced_script")
+assert_eq '0' "$(jq -s '[.[] | select(.event == "terminated")] | length' "$spaced_log")" \
+    'duplicates separated by real work never terminate the agent'
+assert_eq 'false' "$(jq -r '[.results[] | .terminate // false] | any' <<<"$spaced_result")" \
+    'and no single one of them is fatal'
+
 budget_log="$test_root/budget.ndjson"
 budget_script=$(jq -nc '[range(0; 16) | {tool: "bash", input: {command: ("echo " + (. | tostring))}}]')
 budget_result=$(run_guard 3 "$budget_log" "$budget_script")

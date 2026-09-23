@@ -825,6 +825,22 @@ assert_eq 'unsafe_argument' "$(measurement_command_policy '["rg","--pre","sh","n
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","../outside.txt"]')" 'parent-directory paths are refused'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","/etc/hosts"]')" 'absolute paths are refused'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","-c","core.pager=sh","show","HEAD"]')" 'git configuration overrides are refused'
+# The absolute-path guard read the whole argument, and an option carries its path
+# after an equals sign, so `--output=/etc/x` began with a dash and passed. A
+# measurement is supposed to read the checkout, and this one wrote anywhere the
+# process could.
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","diff","--output=/tmp/written.txt"]')" \
+    'an option that redirects output to an absolute path is refused'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","diff","--output=inside.txt"]')" \
+    'and it is refused for a relative path too, because a measurement never writes'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","log","--output=../escape.txt"]')" \
+    'the same option is refused on every git subcommand'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["rg","--file=/etc/patterns"]')" \
+    'an absolute path after an equals sign is refused whatever the option'
+assert_eq 'allowed' "$(measurement_command_policy '["git","diff","--stat=200"]')" \
+    'an option whose value is not a path is still allowed'
+assert_eq 'allowed' "$(measurement_command_policy '["rg","--max-count=3","needle","sample.txt"]')" \
+    'and so is an ordinary numeric option'
 assert_eq 'empty_command' "$(measurement_command_policy '[]')" 'an empty command is refused'
 assert_eq 'empty_command' "$(measurement_command_policy 'null')" 'a null command is refused'
 

@@ -563,6 +563,7 @@
     "claudeEffort": {
       "enum": [
         "",
+        "auto",
         "low",
         "medium",
         "high",
@@ -587,6 +588,7 @@
       "description": "Pi thinking level passed as --thinking; empty keeps the model's current default.",
       "enum": [
         "",
+        "auto",
         "off",
         "minimal",
         "low",
@@ -599,6 +601,7 @@
     "codexEffort": {
       "enum": [
         "",
+        "auto",
         "none",
         "low",
         "medium",

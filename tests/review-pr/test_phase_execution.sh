@@ -469,4 +469,16 @@ assert_true 'without a recorded instant the identifier still decides' \
 assert_true 'the first candidate seen is always newer than nothing' \
     manifest_is_newer "$newest_case/warsaw.json" 20260922-140000-CEST '' ''
 
+# The finalization model and the artifact-only rule were keyed on two phase names,
+# but a final answer that is continued, schema-repaired or anchor-repaired runs
+# under a name of its own. Those passes fell back to the agent's own model and, in
+# a --rerun-final, to the checkout -- reaching for code the same prompt forbids
+# them to read, and failing outright once the checkout has moved on.
+for phase in 'final synthesis' 'comparison synthesis' 'final findings continuation' 'final findings repair' 'final anchor repair'; do
+    assert_true "the finalization settings cover the $phase phase" is_final_phase "$phase"
+done
+for phase in 'primary review' 'cross-review' 'primary findings repair' 'cross-review findings repair' 'cross-review findings continuation'; do
+    assert_false "they do not reach the $phase phase" is_final_phase "$phase"
+done
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

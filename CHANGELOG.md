@@ -25,6 +25,28 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A measurement can no longer write a file. The policy refused an absolute path, but read the whole
+  argument, and an option carries its path after an equals sign — `--output=/etc/x` begins with a
+  dash, so it passed. The value after an equals sign is now examined on its own, and `--output` is
+  refused whatever it points at, because a measurement reads the checkout and never writes. Reachable
+  only with `reporting.execute_measurements = true`, which is off by default.
+- A continued or repaired final answer keeps the finalization model, the finalization effort and, in
+  a `--rerun-final`, artifact-only mode. Those three were keyed on the phase names `final synthesis`
+  and `comparison synthesis`, and a continuation, a schema repair or an anchor repair runs under a
+  name of its own, so each fell back to the agent's own model and reached into the checkout for source
+  the same prompt forbids it to read — and would fail outright once that checkout had moved on.
+- `findings` exports the most recent synthesis. A re-synthesis is named after the run it was made
+  from, so ordering the candidates as text ranked it by that older source run: a rerun of Monday's run
+  lost to Tuesday's ordinary report, and the agent sent to fix the findings received a list that had
+  already been superseded. The manifest beside each artifact records when it was produced, and that is
+  what decides now.
+- The Pi tool guard ends a model that loops on one call. The duplicate branch returned before the
+  termination check, so repeats were blocked forever and the attempt ran to the agent's wall-clock
+  timeout — an hour, where the per-call timeout is disabled. Only an unbroken run of repeats is fatal;
+  an occasional re-read between real calls is ordinary and resets the count.
+- The published schema accepts `auto` wherever the orchestrator does. Added to the validator without
+  the schema, it left a working configuration marked as an error by every editor.
+
 - The portable copy of a configured skill is found by agent key and then by adapter type, the way the
   skill name itself is resolved. It was found by key alone, so an agent given a key of its own ran
   without the skill its configuration named: the instruction still said to use it, and the whole text
