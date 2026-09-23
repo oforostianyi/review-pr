@@ -2866,6 +2866,7 @@ agent_skill_instruction() {
     local agent=$1
     local skill_name
     local candidate_skill_file
+    local skill_owner
 
     AGENT_SKILL_FILE=""
 
@@ -2874,11 +2875,19 @@ agent_skill_instruction() {
         if [[ -n "$skill_name" ]]; then
             AGENT_SKILL_INSTRUCTION="Use the configured code-review skill named ${skill_name} if it is available in your current installation."
             if [[ "$skill_name" =~ ^[A-Za-z0-9._-]+$ && -n "$CONFIG_DIRECTORY" ]]; then
-                candidate_skill_file="${CONFIG_DIRECTORY}/skills/${agent}/${skill_name}/SKILL.md"
-                if [[ -f "$candidate_skill_file" && ! -L "$candidate_skill_file" && -r "$candidate_skill_file" ]]; then
-                    AGENT_SKILL_FILE=$candidate_skill_file
-                    AGENT_SKILL_INSTRUCTION+=" A portable copy bundled with this review-pr configuration is supplied below."
-                fi
+                # The skill name is resolved by key and then by adapter type, so the
+                # copy embedded in the prompt is looked up the same way. Finding it
+                # by key alone left an agent with a key of its own running without
+                # the skill its configuration names -- same name in the instruction,
+                # the whole text missing from the prompt.
+                for skill_owner in "$agent" "$(agent_type "$agent")"; do
+                    candidate_skill_file="${CONFIG_DIRECTORY}/skills/${skill_owner}/${skill_name}/SKILL.md"
+                    if [[ -f "$candidate_skill_file" && ! -L "$candidate_skill_file" && -r "$candidate_skill_file" ]]; then
+                        AGENT_SKILL_FILE=$candidate_skill_file
+                        AGENT_SKILL_INSTRUCTION+=" A portable copy bundled with this review-pr configuration is supplied below."
+                        break
+                    fi
+                done
             fi
         else
             AGENT_SKILL_INSTRUCTION="No code-review skill is configured for this agent in this repository/profile; apply the repository instructions available to you."

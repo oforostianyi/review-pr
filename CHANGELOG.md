@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The portable copy of a configured skill is found by agent key and then by adapter type, the way the
+  skill name itself is resolved. It was found by key alone, so an agent given a key of its own ran
+  without the skill its configuration named: the instruction still said to use it, and the whole text
+  was missing from the prompt. A four-agent run showed the cost -- two Pi agents, meant to differ only
+  by model, received prompts 22KB apart, and the comparison measured the missing skill rather than the
+  models.
+
 ### Changed
 
 - The prompt claims precedence over a configured skill for the output format, not only for
