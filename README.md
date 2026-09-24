@@ -421,6 +421,13 @@ left out and why, the manifest gains an `agent_losses` entry, and the published 
 reviewer among its verification limitations. Resuming the run does not retry a reviewer the quorum
 already set aside.
 
+The finalizer does not review the pull request a second time. Cross-review has already checked each
+finding against the code, so the finalizer checks in proportion to the stakes: it settles a factual
+dispute against the source, checks the premise of any P0 or P1 it publishes even when every
+reviewer agrees, and takes undisputed P2 and P3 findings, and disputes about severity alone, from
+the reports. The resolution table records a severity judgment as `manual`, so it shows what was
+actually measured.
+
 Final synthesis is the one phase nobody can stand in for, so it takes a fallback instead of a
 quorum. When the synthesizer has used up its attempts, `finalization.fallback_synthesizer` takes the
 same inputs and tries again with a prompt built for it. It must be an enabled agent other than the

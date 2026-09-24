@@ -209,6 +209,18 @@ run_full_success_case() {
     assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" \
         'Existing-feedback rule:' \
         'final synthesizer receives the duplicate-feedback rule'
+    # Cross-review has already checked every finding against the code. The
+    # finalizer is told where checking again is the work -- a factual dispute, the
+    # premise of a P0 or P1 -- and where it is only duplication.
+    assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" \
+        'Verify in proportion to what is at stake, not everything again.' \
+        'the finalizer is told to check in proportion to the stakes'
+    assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" \
+        'agreement is not evidence' \
+        'and that reviewers who agree can still share one blind spot'
+    assert_false 'a run with its checkout is not told the source is only what the reports quote' \
+        grep -Fq 'artifact-only rerun the source is the code the reports quote' \
+            "$capture/final-synthesis-alpha-attempt-1.prompt"
 
     # Finding out what ran last night should not mean reading through review
     # directories. One appended line per launch and per outcome, next to the
@@ -245,6 +257,8 @@ run_full_success_case() {
     rerun_final_prompt=$(find "$capture" -type f -name 'final-synthesis-alpha-attempt-1.prompt' -print | sort | tail -n 1)
     assert_file_contains "$rerun_final_prompt" '===== BEGIN AUTHORITATIVE REPOSITORY FACTS =====' \
         'artifact-only final rerun reuses preserved repository facts'
+    assert_file_contains "$rerun_final_prompt" 'In this artifact-only rerun the source is the code the reports quote' \
+        'an artifact-only rerun is told its only source is the code the reports quote'
     rerun_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sed -n '1p')
     [[ -n "$rerun_manifest" ]] || fail 'artifact-only final rerun did not create a separate manifest'
     pass 'artifact-only final rerun creates a separate manifest'
@@ -1039,6 +1053,8 @@ run_dispute_resolution_case() {
     assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'a disputed run completes with resolution records'
     assert_file_contains "$final_prompt" '===== BEGIN REQUIRED RESOLUTIONS =====' 'the finalizer receives the detected disputes'
     assert_file_contains "$final_prompt" '"dispute_id":"dispute:alpha:r01"' 'the disputed primary finding is listed by its stable id'
+    assert_file_contains "$final_prompt" 'In its resolution record that is verification_method manual' \
+        'a severity judgment is recorded as manual, so the table says what was actually measured'
     assert_file_exists "$work_dir/${stem}-final-resolutions.json" 'the run publishes a resolutions sidecar'
     assert_eq '1' "$(jq '.resolutions | length' "$work_dir/${stem}-final-resolutions.json")" 'one resolution per detected dispute'
     assert_eq "${stem}-final-resolutions.json" "$(jq -r '.artifacts.final_resolutions' "$manifest")" 'the manifest records the resolutions sidecar'

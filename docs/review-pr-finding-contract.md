@@ -438,6 +438,17 @@ keys remain language-independent.
   loss is recorded as an `agent_losses` entry and among the review's verification limitations, and
   a resumed run does not retry a reviewer the quorum set aside. `"quorum": "all"` restores the
   earlier behaviour of stopping on any failure.
+- The finalizer checks in proportion to the stakes rather than reviewing the pull request a second
+  time, because cross-review has already checked each finding against the code. It settles a
+  factual or mixed dispute against the source, since counting reviewers settles nothing; it checks
+  the premise of any CONFIRMED P0 or P1 it publishes even when every reviewer agrees, since
+  reviewers read the same code, description and skill and can share a blind spot; it weighs the
+  reports' own arguments for a dispute about severity alone and records that as
+  `verification_method: manual`; and it takes an undisputed P2 or P3 from the reports as it stands.
+  The rule exists because, left to judgement, a strong finalizer re-read the code for all eleven
+  disputes on one PR -- seven of them about severity alone -- while a weak one may read it for none.
+  In an artifact-only rerun the source is the code the reports quote, so `source` there means
+  quoted code rather than a fresh read of the checkout.
 - Final synthesis has no quorum because it has one author. When the synthesizer has used up its
   attempts, `finalization.fallback_synthesizer` receives the same inputs under a prompt built for
   it and gets the same attempts. The swap is recorded as `final_fallback` in the manifest and among
