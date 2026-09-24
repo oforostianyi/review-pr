@@ -3403,19 +3403,57 @@ log_escape_repairs() {
 # second out of five findings of six, salvage dropped all five, and the review
 # went out with one. Both are filled in here, without a model and aloud; any
 # other missing key still fails its record, because it would have to be made up.
+# The same goes for an existing_feedback the contract does not define, such as
+# a state of its own ("existing-review-body", on ListingSyncer 953) or a
+# confirmed thread with no thread id: it is recorded as unknown, and what the
+# model wrote is kept, in the language of the report, among the finding's
+# verification limitations, so the reader still sees what it tried to say.
+readonly EXISTING_FEEDBACK_JQ_DEFS='
+    def valid_existing_feedback:
+        type == "object" and ((keys - ["state", "thread_ids"]) | length) == 0 and
+        has("state") and has("thread_ids") and
+        (.state | IN("new", "confirmed-existing", "historical", "unknown")) and
+        (.thread_ids | type == "array" and all(.[]; type == "string" and length > 0) and (unique | length) == length) and
+        (if .state == "new" then (.thread_ids | length) == 0
+         elif (.state == "confirmed-existing" or .state == "historical") then (.thread_ids | length) > 0
+         else true end);
+'
+
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3
-    local filled_file feedback=0 flags=0 noun
+    local filled_file feedback=0 undefined=0 flags=0 noun language
 
+    case "$phase" in
+        primary) language=$PRIMARY_REVIEW_LANGUAGE ;;
+        cross) language=$CROSS_REVIEW_LANGUAGE ;;
+        *) language=$FINALIZATION_LANGUAGE ;;
+    esac
     feedback=$(jq '[.[] | select(.record == "finding" and (has("existing_feedback") | not))] | length' "$records_file" 2>/dev/null) || return 0
+    undefined=$(jq "$EXISTING_FEEDBACK_JQ_DEFS"'
+        [.[] | select(.record == "finding" and has("existing_feedback") and (.existing_feedback | valid_existing_feedback | not))] | length' \
+        "$records_file" 2>/dev/null) || return 0
     if [[ "$phase" == final ]]; then
         flags=$(jq '[.[] | select(.record == "finding" and (has("include_in_rejected_summary") | not))] | length' "$records_file" 2>/dev/null) || return 0
     fi
-    (( feedback + flags > 0 )) || return 0
+    (( feedback + undefined + flags > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
-    jq --arg phase "$phase" 'map(
+    jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS"'
+        def undefined_note($value):
+            if $language == "UA" then
+                "Наявний відгук модель описала як " + ($value | tojson) + ", чого контракт не передбачає; записано як unknown."
+            else
+                "Existing feedback was reported as " + ($value | tojson) + ", which the contract does not define; it is recorded as unknown."
+            end;
+        map(
         if .record == "finding" then
             (if has("existing_feedback") then . else . + {existing_feedback: {state: "unknown", thread_ids: []}} end)
+            | (if (.existing_feedback | valid_existing_feedback) then . else
+                .existing_feedback as $value
+                | .existing_feedback = {state: "unknown",
+                    thread_ids: ([(($value | objects | .thread_ids) // [])[]? | strings | select(length > 0)] | unique)}
+                | (if (.verification_limitations | type) == "array"
+                   then .verification_limitations += [undefined_note($value)] else . end)
+               end)
             | (if $phase == "final" and (has("include_in_rejected_summary") | not)
                then . + {include_in_rejected_summary: false} else . end)
         else . end)' "$records_file" >"$filled_file" || return 0
@@ -3423,6 +3461,10 @@ fill_presentation_defaults() {
     if (( feedback > 0 )); then
         noun=findings; (( feedback != 1 )) || noun=finding
         log "Recorded existing_feedback as unknown for ${feedback} ${phase} ${noun}${agent:+ from ${agent}} that left it out"
+    fi
+    if (( undefined > 0 )); then
+        noun=findings; (( undefined != 1 )) || noun=finding
+        log "Recorded existing_feedback as unknown for ${undefined} ${phase} ${noun}${agent:+ from ${agent}} whose value the contract does not define"
     fi
     if (( flags > 0 )); then
         noun=findings; (( flags != 1 )) || noun=finding
@@ -6291,6 +6333,15 @@ readonly CROSS_FINDING_KEYS='record, schema_version, source_id, source_refs, tit
 readonly FINAL_FINDING_KEYS='record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary'
 readonly RESOLUTION_RECORD_KEYS='record, schema_version, dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations'
 readonly COMPLETE_RECORD_KEYS='record, schema_version, finding_count, summary, verification_limitations, positive_evidence'
+# The closed value sets, as the validators enforce them; test_finding_contract
+# checks each against the validator source.
+readonly SEVERITY_VALUES='P0, P1, P2, P3'
+readonly CLASSIFICATION_VALUES='CONFIRMED, REJECTED, UNCERTAIN'
+readonly FEEDBACK_STATE_VALUES='new, confirmed-existing, historical, unknown'
+readonly DISPUTE_KIND_VALUES='factual, severity, mixed'
+readonly RESOLUTION_STATUS_VALUES='resolved, uncertain, not_applicable'
+readonly VERIFICATION_METHOD_VALUES='source, command, test, repository_rule, runtime, manual'
+readonly BASIS_VALUES='explicit_repository_rule, skill_rule, inferred_convention, general_engineering'
 
 # The last thing a structured phase prompt says. The key lists sit in the middle
 # of a long prompt, under the skill, its checklists and the repository facts, and
@@ -6315,6 +6366,19 @@ append_record_checklist_to_prompt() {
             printf -- '- resolution, when a REQUIRED RESOLUTIONS block is present: %s\n' "$RESOLUTION_RECORD_KEYS"
         fi
         printf -- '- complete: %s\n' "$COMPLETE_RECORD_KEYS"
+        printf 'A field with a closed set of values takes one of them exactly; a value of your own, however apt, is rejected.\n'
+        if [[ "$phase" == primary ]]; then
+            printf -- '- classification: null. severity: %s, or null.\n' "$SEVERITY_VALUES"
+        else
+            printf -- '- classification: %s. severity: %s for CONFIRMED, null for REJECTED and UNCERTAIN.\n' "$CLASSIFICATION_VALUES" "$SEVERITY_VALUES"
+        fi
+        printf -- '- anchor.kind: changed-line, pr-level.\n'
+        printf -- '- existing_feedback.state: %s. confirmed-existing and historical name at least one thread_id, new names none; feedback that is none of these is unknown.\n' "$FEEDBACK_STATE_VALUES"
+        if [[ "$phase" == final && "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
+            printf -- '- dispute_kind: %s. resolution_status: %s.\n' "$DISPUTE_KIND_VALUES" "$RESOLUTION_STATUS_VALUES"
+            printf -- '- verification_method: %s -- how the dispute was checked.\n' "$VERIFICATION_METHOD_VALUES"
+            printf -- '- basis: %s -- the kind of rule the decision rests on, never how it was checked.\n' "$BASIS_VALUES"
+        fi
         if [[ "$phase" == primary ]]; then
             printf 'In this review title, claim, failure_scenario, recommendation and category are never empty. A finding with no fix to propose still has a recommendation: say what to check, measure or decide.\n'
         fi

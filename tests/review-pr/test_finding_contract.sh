@@ -1242,10 +1242,50 @@ replace_first_literal '"contributing_agents":["codex"]' '"contributing_agents":[
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$foreign_provenance"
 assert_invalid_contract foreign-primary-provenance 'schema_or_completeness_validation_failed: finding[F-001].contributing_agents' "$foreign_provenance"
 
+# A confirmed thread with no thread id, or a state the contract does not have,
+# is feedback nobody can check: it is recorded as unknown, and what the model
+# wrote is kept among the finding's verification limitations.
 missing_thread_id="$test_root/missing-thread-id.ndjson"
 replace_first_literal '"state":"new","thread_ids":[]' '"state":"confirmed-existing","thread_ids":[]' \
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
-assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
+REPORT_STEM=fixture-missing-thread-id
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-missing-thread-id-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-missing-thread-id-codex-findings.json"
+assert_true 'a confirmed thread with no thread id no longer costs the finding' \
+    process_primary_ndjson_output "$missing_thread_id" codex
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'it is recorded as unknown'
+assert_true 'and what the model wrote is kept among the verification limitations' \
+    grep -q 'was reported as {\\"state\\":\\"confirmed-existing\\"' "${PRIMARY_FINDINGS_OUTPUTS[codex]}"
+own_state="$test_root/own-feedback-state.ndjson"
+replace_first_literal '"state":"new","thread_ids":[]' '"state":"existing-review-body","thread_ids":[]' \
+    <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$own_state"
+REPORT_STEM=fixture-own-feedback-state
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-findings.json"
+PRIMARY_REVIEW_LANGUAGE=UA
+assert_true 'a feedback state of the model'"'"'s own is accepted the same way' \
+    process_primary_ndjson_output "$own_state" codex
+assert_true 'with the note in the language of the report' \
+    grep -q 'Наявний відгук модель описала як' "${PRIMARY_FINDINGS_OUTPUTS[codex]}"
+PRIMARY_REVIEW_LANGUAGE=EN
+
+# The closing checklist lists every closed value set as the validators hold it,
+# so the model reads the exact choices last, and the lists cannot drift apart.
+for value_set in "$SEVERITY_VALUES" "$CLASSIFICATION_VALUES" "$FEEDBACK_STATE_VALUES" "$DISPUTE_KIND_VALUES" \
+    "$RESOLUTION_STATUS_VALUES" "$VERIFICATION_METHOD_VALUES" "$BASIS_VALUES"; do
+    literal="IN($(sed 's/\([^, ][^,]*\)/"\1"/g' <<<"$value_set"))"
+    assert_true "the validators enforce exactly ${value_set}" grep -Fq -- "$literal" "$repo_root/bin/review-pr"
+done
+DISPUTE_RESOLUTION_ENABLED=true
+checklist_final="$test_root/checklist-final.txt"
+: >"$checklist_final"
+append_record_checklist_to_prompt "$checklist_final" final
+assert_file_contains "$checklist_final" "- basis: ${BASIS_VALUES} -- the kind of rule the decision rests on, never how it was checked." \
+    'the final checklist tells basis apart from how a dispute was checked'
+assert_file_contains "$checklist_final" "- verification_method: ${VERIFICATION_METHOD_VALUES}" \
+    'and names every verification method'
+DISPUTE_RESOLUTION_ENABLED=false
 
 # The closing checklist restates the key lists where a model reads them last, so
 # a list that drifted from what the validators accept would teach the very

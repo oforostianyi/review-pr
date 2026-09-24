@@ -379,9 +379,12 @@ keys remain language-independent.
   continuation pass, described below, which republishes them only as part of a merged stream that
   passes the full contract.
 - Every structured phase prompt ends with a `BEFORE YOU SEND` block that restates the keys of each
-  record the phase may emit. The lists appear earlier in the contract too, but that is mid-prompt,
-  under the skill and the repository facts, and a model that answers after dozens of tool calls may
-  rebuild a record from memory and drop a key. Valid fixtures are tested against the same lists.
+  record the phase may emit and every closed value set -- classification, severity, anchor kind,
+  feedback state and, for resolutions, dispute kind, status, verification method and basis, with
+  basis told apart from how a dispute was checked. The lists appear earlier in the contract too, but
+  that is mid-prompt, under the skill and the repository facts, and a model that answers after
+  dozens of tool calls may rebuild a record from memory, drop a key or coin a value. Valid fixtures
+  are tested against the key lists, and the value sets against the validators' own.
 - Prose ahead of the first record is dropped before validation, without a model: an announcement
   such as "Here is the review:", or the progress notes Codex sends before tool calls, which arrive
   as agent messages of their own and are joined with the answer. The console counts the lines; the
@@ -392,7 +395,10 @@ keys remain language-independent.
   transport prose, fences, record/schema metadata, and a missing or malformed terminal completion
   record are repairable. Two keys that only say how a finding is presented are not failed on at all:
   a finding without `existing_feedback` gets `{"state":"unknown","thread_ids":[]}`, which states
-  honestly that the model did not report thread coverage, and a final finding without
+  honestly that the model did not report thread coverage -- and so does one whose `existing_feedback`
+  the contract does not define, a state of the model's own or a confirmed thread without a thread
+  id, with what the model wrote kept among the finding's verification limitations in the language
+  of the report -- and a final finding without
   `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
   Both are filled in before validation, without a model, and the console says so, as is a key a
   `complete` record carries that the contract does not define, which is dropped. Any other missing
