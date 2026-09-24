@@ -802,18 +802,23 @@ run_ndjson_cross_case() {
     assert_file_exists "$alpha_report" 'structured cross-review publishes deterministic Markdown'
     assert_eq 'cross-review' "$(jq -r '.phase' "$alpha_findings")" \
         'cross-review sidecar records its phase'
-    assert_eq 'beta:beta:F-001' "$(jq -r '.input_refs[0] | .agent + ":" + .source_id' "$alpha_findings")" \
-        'cross-review sidecar preserves namespaced primary provenance'
+    assert_eq 'beta:r02' "$(jq -r '.input_refs[0] | .agent + ":" + .source_id' "$alpha_findings")" \
+        'cross-review sidecar preserves namespaced primary provenance, by the handle the reviewer was given'
     assert_eq "${stem}-cross-alpha-raw.ndjson" "$(jq -r '.artifacts.cross_review_raw.alpha' "$manifest")" \
         'manifest points to cross-review raw output'
     assert_eq "${stem}-cross-alpha-findings.json" "$(jq -r '.artifacts.cross_review_findings.alpha' "$manifest")" \
         'manifest points to canonical cross-review findings'
     assert_file_contains "$alpha_report" '### [CONFIRMED/P1] Fixture changed-line defect' \
         'cross-review Markdown is rendered from canonical classifications'
-    assert_file_contains "$alpha_prompt" '"source_id": "beta:F-001"' \
+    assert_file_contains "$alpha_prompt" '===== BEGIN CANONICAL PRIMARY FINDINGS: beta =====' \
         'structured cross-review receives the other canonical primary report'
     assert_false 'structured cross-review does not receive its own canonical primary report' \
-        grep -Fq -- '"source_id": "alpha:F-001"' "$alpha_prompt"
+        grep -Fq -- '===== BEGIN CANONICAL PRIMARY FINDINGS: alpha =====' "$alpha_prompt"
+    # A reviewer given a long descriptive id rewrote it into a shorter one, and one
+    # given two ids for a record may copy either. The record it is handed carries
+    # only its short handle; the author's own id stays with the author.
+    assert_false "the author's own id never reaches the reviewer" \
+        grep -Fq -- 'beta:F-001' "$alpha_prompt"
     assert_file_contains "$alpha_prompt" 'BEGIN RIGHT-SIDE CHANGED-LINE MAP' \
         'structured cross-review receives the authoritative changed-line map'
     # The terminal record's arrays hold plain strings. Saying so is what keeps a
@@ -828,15 +833,23 @@ run_ndjson_cross_case() {
             $0 == end {inside = 0}
             inside' "$1"
     }
-    assert_eq 'beta beta:F-001' \
+    assert_eq 'beta r02' \
         "$(prompt_block "$capture/cross-review-alpha-attempt-1.prompt" 'CANONICAL PRIMARY FINDINGS: beta' \
             | jq -r '.findings[0].record_ref | .agent + " " + .source_id')" \
         'a cross-reviewer is handed the ready-made ref for each supplied primary record'
-    assert_eq 'alpha alpha:C-001' \
+    assert_eq 'r02' \
+        "$(prompt_block "$capture/cross-review-alpha-attempt-1.prompt" 'CANONICAL PRIMARY FINDINGS: beta' \
+            | jq -r '.findings[0].source_id')" \
+        'and the record itself shows the same handle as its id, never a second one'
+    assert_eq 'null' \
+        "$(prompt_block "$capture/cross-review-alpha-attempt-1.prompt" 'CANONICAL PRIMARY FINDINGS: beta' \
+            | jq -c '.findings[0].ref_id')" \
+        'the bookkeeping field that holds the handle is not shown'
+    assert_eq 'alpha x01' \
         "$(prompt_block "$capture/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: alpha' \
             | jq -r '.findings[0].record_ref | .agent + " " + .source_id')" \
         'the finalizer is handed the ready-made ref for each supplied cross-review record'
-    assert_eq 'beta beta:F-001' \
+    assert_eq 'beta r02' \
         "$(prompt_block "$capture/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: alpha' \
             | jq -r '.findings[0].primary_provenance[0] | .agent + " " + .source_id')" \
         'upstream provenance stays visible and stays distinct from the ref to cite'
@@ -871,7 +884,7 @@ run_ndjson_cross_case() {
         'the manifest records the findings export'
     assert_eq final-synthesis "$(jq -r '.phase' "$final_findings")" \
         'final sidecar records its phase'
-    assert_eq 'alpha:alpha:F-001,beta:beta:F-001' "$(jq -r '[.findings[0].primary_refs[] | .agent + ":" + .source_id] | join(",")' "$final_findings")" \
+    assert_eq 'alpha:r01,beta:r02' "$(jq -r '[.findings[0].primary_refs[] | .agent + ":" + .source_id] | join(",")' "$final_findings")" \
         'final sidecar derives transitive primary provenance from cross-review refs'
     assert_eq "${stem}-final-raw.ndjson" "$(jq -r '.artifacts.final_raw' "$manifest")" \
         'manifest points to final raw output'
@@ -887,7 +900,7 @@ run_ndjson_cross_case() {
         grep -Fq -- '### [CONFIRMED/P1]' "$final_prompt"
     assert_file_contains "$final_prompt" '===== BEGIN REQUIRED SOURCE REFS =====' \
         'structured final synthesis receives the explicit list of required source refs'
-    assert_file_contains "$final_prompt" '{"agent":"alpha","source_id":"alpha:C-001"}' \
+    assert_file_contains "$final_prompt" '{"agent":"alpha","source_id":"x01"}' \
         'the required refs name every canonical cross-review record exactly'
     assert_file_contains "$final_prompt" '"primary_provenance"' \
         'cross-review records are presented with their primary refs renamed to provenance'
@@ -895,8 +908,8 @@ run_ndjson_cross_case() {
         grep -Fq -- '"source_refs":' "$final_prompt"
     assert_file_contains "$alpha_prompt" '===== BEGIN REQUIRED SOURCE REFS =====' \
         'structured cross-review receives the explicit list of required source refs'
-    assert_file_contains "$alpha_prompt" '{"agent":"beta","source_id":"beta:F-001"}' \
-        'the cross-review required refs name every peer primary finding exactly'
+    assert_file_contains "$alpha_prompt" '{"agent":"beta","source_id":"r02"}' \
+        'the cross-review required refs name every peer primary finding exactly, by handle'
     assert_false 'structured cross-review does not forward Markdown-oriented config prompt instructions' \
         grep -Fq -- 'Start with exactly this table' "$alpha_prompt"
     assert_file_contains "$alpha_prompt" 'the caller through which it is reachable belong in evidence' \
@@ -1025,7 +1038,7 @@ run_dispute_resolution_case() {
     final_prompt="$capture/final-synthesis-alpha-attempt-1.prompt"
     assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'a disputed run completes with resolution records'
     assert_file_contains "$final_prompt" '===== BEGIN REQUIRED RESOLUTIONS =====' 'the finalizer receives the detected disputes'
-    assert_file_contains "$final_prompt" '"dispute_id":"dispute:alpha:alpha:F-001"' 'the disputed primary finding is listed by its stable id'
+    assert_file_contains "$final_prompt" '"dispute_id":"dispute:alpha:r01"' 'the disputed primary finding is listed by its stable id'
     assert_file_exists "$work_dir/${stem}-final-resolutions.json" 'the run publishes a resolutions sidecar'
     assert_eq '1' "$(jq '.resolutions | length' "$work_dir/${stem}-final-resolutions.json")" 'one resolution per detected dispute'
     assert_eq "${stem}-final-resolutions.json" "$(jq -r '.artifacts.final_resolutions' "$manifest")" 'the manifest records the resolutions sidecar'
@@ -1252,7 +1265,7 @@ run_dispute_resolution_failure_case() {
     fi
     pass 'a CONFIRMED finding over an unmeasured factual dispute fails final synthesis'
     manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
-    assert_file_contains "$case_dir/stderr.log" 'dispute_resolution_validation_failed: resolution[dispute:alpha:alpha:F-001].confirmed_over_unresolved_factual' \
+    assert_file_contains "$case_dir/stderr.log" 'dispute_resolution_validation_failed: resolution[dispute:alpha:r01].confirmed_over_unresolved_factual' \
         'the failure names the count-over-measurement violation'
     assert_file_not_exists "$work_dir/${stem}-final-resolutions.json" 'no resolutions sidecar is published for an invalid final'
     assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" 'no final report is published for an invalid final'
@@ -1768,6 +1781,129 @@ run_ndjson_unsafe_final_repair_case() {
         'the manifest records that the final synthesis had to be salvaged'
     assert_eq 1 "$(jq -r '.salvage_losses[0].unparseable_lines' "$manifest")" \
         'and counts the line of prose it could not read'
+    # The final is rendered by the pass that salvages it, before that pass writes
+    # the loss to the manifest. Read from the manifest alone, the one report whose
+    # loss matters most would be the one that said nothing about it.
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'Part of the model output had to be dropped' \
+        'and the salvaged final itself says what it dropped'
+    assert_eq 1 "$(jq '[.salvage_losses[] | select(.phase == "final synthesis")] | length' "$manifest")" \
+        'recorded once, not again when the manifest is written after publishing'
+}
+
+# Shared setup for the quorum and fallback cases: three mock reviewers, a fresh
+# repository, and a scenario directory the caller fills in.
+prepare_quorum_case() {
+    local case_dir=$1 body=$2
+    QUORUM_REVIEWS="$case_dir/reviews" QUORUM_BIN="$case_dir/bin"
+    QUORUM_SCENARIOS="$case_dir/scenarios" QUORUM_CAPTURE="$case_dir/captured-prompts"
+    QUORUM_CONFIG="$case_dir/config.json"
+    mkdir -p -- "$case_dir" "$QUORUM_REVIEWS" "$QUORUM_BIN" "$QUORUM_SCENARIOS" "$QUORUM_CAPTURE"
+    QUORUM_CHECKOUT=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$QUORUM_CHECKOUT" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY=$body
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$QUORUM_CONFIG" "$QUORUM_CHECKOUT" "$QUORUM_REVIEWS"
+    jq '.reporting.dispute_resolution = false | .reporting.findings_export = "off"' "$QUORUM_CONFIG" >"$QUORUM_CONFIG.tmp"
+    mv -- "$QUORUM_CONFIG.tmp" "$QUORUM_CONFIG"
+    ln -s "$test_dir/fake-gh.sh" "$QUORUM_BIN/gh"
+}
+
+run_quorum_case() {
+    local case_dir=$1
+    PATH="$QUORUM_BIN:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$QUORUM_SCENARIOS" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$QUORUM_CAPTURE" \
+        "$repo_root/bin/review-pr" --config "$QUORUM_CONFIG" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
+}
+
+# The case that cost 29031 its final: every primary review and all but one
+# cross-review finished, and one reviewer failed. Two reviewers are still enough
+# for every finding to be checked by someone other than its author.
+run_quorum_cross_case() {
+    local case_dir="$suite_root/quorum-cross" manifest work_dir stem
+
+    prepare_quorum_case "$case_dir" 'Fixture quorum cross-review.'
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/gamma-cross-review"
+    run_quorum_case "$case_dir" \
+        || fail "one failed cross-reviewer out of three must not stop the run: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$QUORUM_REVIEWS"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'the final is written from the cross-reviews that finished'
+    assert_eq 'cross-review gamma' "$(jq -r '.agent_losses[0] | .phase + " " + .agent' "$manifest")" \
+        'the manifest names the reviewer the run went on without'
+    assert_file_contains "$case_dir/stderr.log" 'Continuing without gamma for the cross-review' \
+        'the console says who was left out'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'A reviewer dropped out of the run' \
+        'and the published review says so among its verification limits'
+    assert_false "the finalizer is not handed a cross-review that does not exist" \
+        grep -Fq -- 'CANONICAL CROSS-REVIEW FINDINGS: gamma' "$QUORUM_CAPTURE/final-synthesis-alpha-attempt-1.prompt"
+    assert_file_contains "$QUORUM_CAPTURE/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: beta' \
+        'while the ones that finished are all there'
+}
+
+# A reviewer that fails its primary review has no findings for anyone to check,
+# so it takes no part in cross-review and its report is not handed round.
+run_quorum_primary_case() {
+    local case_dir="$suite_root/quorum-primary" manifest work_dir stem
+
+    prepare_quorum_case "$case_dir" 'Fixture quorum primary review.'
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/gamma-primary-review"
+    run_quorum_case "$case_dir" \
+        || fail "one failed primary reviewer out of three must not stop the run: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$QUORUM_REVIEWS"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_eq 'primary review gamma' "$(jq -r '.agent_losses[0] | .phase + " " + .agent' "$manifest")" \
+        'the loss is recorded against the primary review'
+    assert_file_not_exists "$QUORUM_CAPTURE/cross-review-gamma-attempt-1.prompt" \
+        'a reviewer with no primary report is not asked to cross-review'
+    assert_false 'and no other reviewer is handed its missing report' \
+        grep -Fq -- 'CANONICAL PRIMARY FINDINGS: gamma' "$QUORUM_CAPTURE/cross-review-alpha-attempt-1.prompt"
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'the run still reaches a published final'
+}
+
+# With one reviewer left, its own findings would have nobody to check them and
+# would drop out of the final unseen. That is the one loss the run refuses.
+run_quorum_below_case() {
+    local case_dir="$suite_root/quorum-below" manifest work_dir stem
+
+    prepare_quorum_case "$case_dir" 'Fixture below quorum.'
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/beta-cross-review"
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/gamma-cross-review"
+    if run_quorum_case "$case_dir"; then
+        fail 'a single finished cross-review must stop the run'
+    fi
+    pass 'a single finished cross-review stops the run'
+    manifest=$(latest_manifest "$QUORUM_REVIEWS"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_contains "$case_dir/stderr.log" 'the quorum is 2' \
+        'the console says the quorum was not met'
+    assert_file_not_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'and no final is published from one reviewer'
+}
+
+# Final synthesis is the one phase nobody can stand in for, so a different agent
+# takes it over once the synthesizer has used up its attempts.
+run_fallback_synthesis_case() {
+    local case_dir="$suite_root/fallback-synthesis" manifest work_dir stem
+
+    prepare_quorum_case "$case_dir" 'Fixture fallback synthesis.'
+    jq '.finalization.fallback_synthesizer = "beta" | .finalization.fallback_model = "mock-strong"' "$QUORUM_CONFIG" >"$QUORUM_CONFIG.tmp"
+    mv -- "$QUORUM_CONFIG.tmp" "$QUORUM_CONFIG"
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/alpha-final-synthesis"
+    run_quorum_case "$case_dir" \
+        || fail "a failed synthesizer with a fallback configured must still publish: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$QUORUM_REVIEWS"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'the fallback writes the final'
+    assert_eq 'alpha beta mock-strong' "$(jq -r '.final_fallback | .from + " " + .to + " " + .model' "$manifest")" \
+        'the manifest records who failed, who took over, and on which model'
+    assert_file_exists "$QUORUM_CAPTURE/final-synthesis-beta-attempt-1.prompt" \
+        'the fallback is given a prompt of its own'
+    assert_file_contains "$QUORUM_CAPTURE/final-synthesis-beta-attempt-1.prompt" 'Synthesizer: Beta (beta)' \
+        'built for it, not the one made for the synthesizer that failed'
+    assert_file_contains "$case_dir/stderr.log" 'handing it to Beta on mock-strong' \
+        'the console says the synthesis was handed over'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'The final synthesis was written by the fallback agent' \
+        'and the published review says who actually wrote it'
 }
 
 run_full_success_case
@@ -1777,6 +1913,10 @@ run_dispute_resolution_case
 run_dispute_resolution_failure_case
 run_cross_continuation_case
 run_cross_continuation_salvage_case
+run_quorum_cross_case
+run_quorum_primary_case
+run_quorum_below_case
+run_fallback_synthesis_case
 run_final_continuation_case
 run_final_retry_case
 run_final_no_retry_case

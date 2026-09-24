@@ -401,6 +401,47 @@ Pi is not present in the distributed default pipeline, so a clean installation o
 
 Pi output is extracted from its final assistant `message_end` event. If Pi reports `stopReason: length`, the run fails with an explicit output-token-limit reason and preserves normalized usage, raw JSONL events, and any partial Markdown next to the error log. Increasing the model's configured `maxTokens` can resolve a genuinely truncated response; splitting comparison content into the standalone report often reduces the required final-output size.
 
+## When a reviewer or the synthesizer fails
+
+A reviewer that fails a phase no longer takes the whole run with it. A primary or cross-review phase
+goes on while at least `execution.quorum` reviewers finish it; the default is 2. Two is the floor
+rather than a preference: every finding is checked by everyone except its author, so with one
+reviewer left its own findings would have nobody to check them and would drop out of the final
+unseen. A quorum below 2 is refused. Set `"quorum": "all"` to stop the run on any failure, as
+earlier versions did.
+
+```json
+"execution": {"max_concurrency": 4, "quorum": 2, "retry": {"max_attempts": 2, "delay_seconds": 10}}
+```
+
+A reviewer that fails its primary review takes no part in cross-review, and its missing report is
+not handed to anyone. One that fails only its cross-review stays a primary source: the others still
+checked its findings. Either way the loss is recorded rather than absorbed. The console says who was
+left out and why, the manifest gains an `agent_losses` entry, and the published review lists the
+reviewer among its verification limitations. Resuming the run does not retry a reviewer the quorum
+already set aside.
+
+Final synthesis is the one phase nobody can stand in for, so it takes a fallback instead of a
+quorum. When the synthesizer has used up its attempts, `finalization.fallback_synthesizer` takes the
+same inputs and tries again with a prompt built for it. It must be an enabled agent other than the
+synthesizer; a stronger model is the point.
+
+```json
+"synthesizer": "pi",
+"finalization": {"model": "qwen-token-plan/qwen3.8-flash", "fallback_synthesizer": "claude", "fallback_model": "claude-opus-5-5"}
+```
+
+The comparison phase stays with the fallback once it has taken over. The manifest records the swap
+as `final_fallback`, and the review names who actually wrote it.
+
+Between phases every record travels under a short handle instead of the id its author chose:
+`r01`, `r02`, … for primary findings, `x01`, … for cross-review records, `s01`, … for the final. A
+reviewer handed a 66-character descriptive id rewrote it into a shorter one and so answered
+findings under names nobody had sent it. Numbering runs on across every reviewer of a phase --
+claude's findings `r01`–`r03`, codex's from `r04` -- so each handle names exactly one record, which
+is what still lets a mislabelled agent key be corrected. The letters stay clear of the `P0`–`P3`
+severity scale. The author's own id stays on the record in the canonical sidecar and the raw stream.
+
 ## Resume a failed run
 
 Use the timestamp already printed by the failed run to continue it without repeating successful reviewers:

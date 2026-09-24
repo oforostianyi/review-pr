@@ -181,6 +181,16 @@ NDJSON_SALVAGE_DROPPED_IDS=()
 NDJSON_SALVAGE_UNPARSEABLE_LINES=0
 NDJSON_SALVAGE_MISSING_REFS=0
 NDJSON_SALVAGE_DROPPED_RESOLUTIONS=false
+AGENT_QUORUM=2
+SOURCE_HANDLES_ENABLED=true
+FALLBACK_SYNTHESIZER=""
+FALLBACK_MODEL=""
+FALLBACK_EFFORT=""
+FALLBACK_EFFORT_CONFIGURED=false
+FALLBACK_SYNTHESIS_USED=false
+declare -a PRIMARY_AGENTS=()
+declare -a CROSS_AGENTS=()
+declare -a FINAL_PROMPT_ARGUMENTS=()
 CONFIG_FILE=${REVIEW_PR_CONFIG:-$DEFAULT_CONFIG_FILE}
 CONFIG_DIRECTORY=""
 CONFIG_EXPLICIT=false
@@ -345,7 +355,7 @@ render_findings_export() {
             findings: ([.findings[]
                 | select(.classification as $classification | $wanted | index($classification))
                 | {
-                    id: .source_id,
+                    id: (.ref_id // .source_id),
                     classification,
                     severity,
                     category,
@@ -813,6 +823,18 @@ describe_configuration_problems() {
                     then "only \($enabled) of the listed reviewers \(if $enabled == 1 then "is" else "are" end) enabled; a cross-review needs two enabled reviewers"
                     else empty end
              else empty end),
+            (if (.execution.quorum // null) == null then empty
+             elif .execution.quorum == "all" then empty
+             elif (.execution.quorum | type) == "number" and (.execution.quorum | floor) == .execution.quorum and .execution.quorum >= 2 then empty
+             else "execution.quorum is \(.execution.quorum | tojson); it must be a whole number of at least 2, or \"all\" -- with one reviewer left, its own findings would have nobody to check them"
+             end),
+            ((.finalization.fallback_synthesizer // null) as $fallback
+             | if $fallback == null then empty
+               elif ($config.agents | has($fallback)) | not then "finalization.fallback_synthesizer \($fallback | tojson) has no entry under agents"
+               elif $fallback == $config.synthesizer then "finalization.fallback_synthesizer is the synthesizer itself; a fallback has to be a different agent"
+               elif ($config.agents[$fallback] | if type == "object" and has("enabled") then .enabled else true end) != true
+               then "finalization.fallback_synthesizer \($fallback | tojson) is disabled; the agent that takes over a failed synthesis must be enabled"
+               else empty end),
             (if (.synthesizer | type) != "string" then "synthesizer must be an agent key"
              elif ($config.agents | has($config.synthesizer)) | not then "synthesizer \(.synthesizer | tojson) has no entry under agents"
              elif ($config.agents[.synthesizer] | if type == "object" and has("enabled") then .enabled else true end) != true
@@ -946,7 +968,10 @@ die_with_configuration_problems() {
         (if has("finalization") then
             (.finalization |
                 type == "object" and
-                ((keys - ["effort", "language", "model"]) | length == 0) and
+                ((keys - ["effort", "fallback_effort", "fallback_model", "fallback_synthesizer", "language", "model"]) | length == 0) and
+                (if has("fallback_synthesizer") then (.fallback_synthesizer | type == "string" and test("^[A-Za-z0-9._-]+$")) else true end) and
+                (if has("fallback_model") then (.fallback_model | type == "string") else true end) and
+                (if has("fallback_effort") then (.fallback_effort | type == "string") else true end) and
                 (if has("model") then (.model | type == "string") else true end) and
                 (if has("effort") then (.effort | type == "string") else true end) and
                 (if has("language") then (.language | type == "string" and valid_language) else true end))
@@ -1022,7 +1047,12 @@ die_with_configuration_problems() {
         (if has("execution") then
             (.execution |
                 type == "object" and
-                ((keys - ["max_concurrency", "retry"]) | length == 0) and
+                ((keys - ["max_concurrency", "quorum", "retry"]) | length == 0) and
+                (if has("quorum") then
+                    (.quorum as $quorum |
+                        ($quorum == "all") or
+                        (($quorum | type == "number") and ($quorum | floor == $quorum) and $quorum >= 2))
+                 else true end) and
                 (if has("max_concurrency") then
                     (.max_concurrency as $concurrency |
                         ($concurrency | type == "number") and
@@ -1092,6 +1122,11 @@ die_with_configuration_problems() {
         (. as $config |
             ($config.agents[$config.synthesizer] | if type == "object" and has("enabled") then .enabled else true end) == true) and
         (. as $config
+         | ($config.finalization.fallback_synthesizer // null) as $fallback
+         | $fallback == null or
+           (($config.agents | has($fallback)) and $fallback != $config.synthesizer and
+            (($config.agents[$fallback] | if type == "object" and has("enabled") then .enabled else true end) == true))) and
+        (. as $config
          | (($config.agents[$config.synthesizer].type // $config.synthesizer)) as $synthesizer_type
          | (($config.finalization.effort // "") | valid_effort_for($synthesizer_type)))
     '
@@ -1132,6 +1167,10 @@ die_with_configuration_problems() {
     FINALIZATION_MODEL=$(jq -r '.finalization.model // ""' "$CONFIG_FILE")
     FINALIZATION_EFFORT=$(jq -r '.finalization.effort // ""' "$CONFIG_FILE")
     FINALIZATION_EFFORT_CONFIGURED=$(jq -r 'if (.finalization | type) == "object" then (.finalization | has("effort")) else false end' "$CONFIG_FILE")
+    FALLBACK_SYNTHESIZER=$(jq -r '.finalization.fallback_synthesizer // ""' "$CONFIG_FILE")
+    FALLBACK_MODEL=$(jq -r '.finalization.fallback_model // ""' "$CONFIG_FILE")
+    FALLBACK_EFFORT=$(jq -r '.finalization.fallback_effort // ""' "$CONFIG_FILE")
+    FALLBACK_EFFORT_CONFIGURED=$(jq -r 'if (.finalization | type) == "object" then (.finalization | has("fallback_effort")) else false end' "$CONFIG_FILE")
     GLOBAL_REVIEW_LANGUAGE=$(jq -r '.language // .finalization.language // "EN"' "$CONFIG_FILE")
     PRIMARY_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.primary // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
     CROSS_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.cross_review // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
@@ -1193,6 +1232,7 @@ die_with_configuration_problems() {
     MAX_CONCURRENCY=$(jq -r '.execution.max_concurrency // 0' "$CONFIG_FILE")
     RETRY_MAX_ATTEMPTS=$(jq -r '.execution.retry.max_attempts // 1' "$CONFIG_FILE")
     RETRY_DELAY_SECONDS=$(jq -r '.execution.retry.delay_seconds // 0' "$CONFIG_FILE")
+    AGENT_QUORUM=$(jq -r '.execution.quorum // 2' "$CONFIG_FILE")
 
     config_value=$(jq -r '.prompts.cross_review // "" | if type == "array" then join("\n") else . end' "$CONFIG_FILE")
     if [[ -n "$config_value" ]]; then
@@ -3164,6 +3204,12 @@ show_configuration() {
         fi
     fi
     printf 'Final effort: %s (%s)\n' "$final_effort" "$final_effort_source"
+    if [[ -n "$FALLBACK_SYNTHESIZER" ]]; then
+        printf 'Fallback synthesizer: %s model=%s\n' "$FALLBACK_SYNTHESIZER" \
+            "${FALLBACK_MODEL:-${AGENT_MODELS[$FALLBACK_SYNTHESIZER]:-(CLI default)}}"
+    else
+        printf 'Fallback synthesizer: (none)\n'
+    fi
     if [[ -n "$REVIEW_PR_TIMEZONE" ]]; then
         printf 'Timezone: %s (%s)\n' "$REVIEW_PR_TIMEZONE" "$(review_pr_date '+%Z')"
     else
@@ -3181,6 +3227,11 @@ show_configuration() {
         printf 'Max concurrency: %s\n' "$MAX_CONCURRENCY"
     fi
     printf 'Review attempts: %s\n' "$RETRY_MAX_ATTEMPTS"
+    if [[ "$AGENT_QUORUM" == all ]]; then
+        printf 'Reviewer quorum: all (any failed reviewer stops the run)\n'
+    else
+        printf 'Reviewer quorum: %s (a phase goes on while at least this many reviewers finish)\n' "$AGENT_QUORUM"
+    fi
     printf 'Retry delay: %ss\n' "$RETRY_DELAY_SECONDS"
     printf 'Status mode: %s\n' "$STATUS_MODE"
     printf 'Status color: %s\n' "$STATUS_COLOR_MODE"
@@ -3628,20 +3679,23 @@ repair_ndjson_source_ref_agents() {
 build_cross_expected_refs() {
     local reviewer=$1
     local output_file=$2
-    local agent
-    local -a input_files=()
+    local agent handles_file
+    local -a input_files=() sources=()
 
-    for agent in "${REVIEW_AGENTS[@]}"; do
+    survivor_agents primary sources
+    for agent in "${sources[@]}"; do
         [[ "$agent" == "$reviewer" ]] && continue
         [[ -s "${PRIMARY_FINDINGS_OUTPUTS[$agent]:-}" ]] || return 1
         input_files+=("${PRIMARY_FINDINGS_OUTPUTS[$agent]}")
     done
     (( ${#input_files[@]} > 0 )) || return 1
-    jq -s '
+    new_temp_file "cross-expected-handles"; handles_file=$NEW_TEMP_FILE
+    phase_handle_map primary "$handles_file"
+    jq -s --slurpfile handles "$handles_file" '
         [ .[] as $report |
           $report.agent as $agent |
           $report.findings[] |
-          {agent: $agent, source_id: .source_id}
+          {agent: $agent, source_id: ($handles[0][$agent + " " + .source_id] // .source_id)}
         ] | sort_by(.agent, .source_id)
     ' "${input_files[@]}" >"$output_file"
 }
@@ -3909,21 +3963,24 @@ process_cross_ndjson_output() {
 
 build_final_expected_refs() {
     local output_file=$1
-    local agent
-    local -a input_files=()
+    local agent handles_file
+    local -a input_files=() sources=()
 
-    for agent in "${REVIEW_AGENTS[@]}"; do
+    survivor_agents cross sources
+    for agent in "${sources[@]}"; do
         [[ -s "${CROSS_FINDINGS_OUTPUTS[$agent]:-}" ]] || return 1
         input_files+=("${CROSS_FINDINGS_OUTPUTS[$agent]}")
     done
     (( ${#input_files[@]} > 0 )) || return 1
-    jq -s '
+    new_temp_file "final-expected-handles"; handles_file=$NEW_TEMP_FILE
+    phase_handle_map cross "$handles_file"
+    jq -s --slurpfile handles "$handles_file" '
         [ .[] as $report |
           $report.agent as $agent |
           $report.findings[] |
           {
             agent: $agent,
-            source_id: .source_id,
+            source_id: ($handles[0][$agent + " " + .source_id] // .source_id),
             primary_refs: (.source_refs | unique_by(.agent, .source_id) | sort_by(.agent, .source_id))
           }
         ] | sort_by(.agent, .source_id)
@@ -3932,10 +3989,11 @@ build_final_expected_refs() {
 
 build_final_disputes() {
     local output_file=$1
-    local agent
-    local -a input_files=()
+    local agent handles_file
+    local -a input_files=() sources=()
 
-    for agent in "${REVIEW_AGENTS[@]}"; do
+    survivor_agents cross sources
+    for agent in "${sources[@]}"; do
         [[ -s "${CROSS_FINDINGS_OUTPUTS[$agent]:-}" ]] || return 1
         input_files+=("${CROSS_FINDINGS_OUTPUTS[$agent]}")
     done
@@ -3943,13 +4001,15 @@ build_final_disputes() {
     # A dispute is a primary finding whose cross-review records disagree in
     # classification, or agree on CONFIRMED with different severities. The
     # id is derived from the primary ref so it is stable across attempts.
-    jq -s '
+    new_temp_file "final-dispute-handles"; handles_file=$NEW_TEMP_FILE
+    phase_handle_map cross "$handles_file"
+    jq -s --slurpfile handles "$handles_file" '
         [ .[] as $report |
           $report.findings[] as $finding |
           $finding.source_refs[] |
           {
             primary: {agent: .agent, source_id: .source_id},
-            cross: {agent: $report.agent, source_id: $finding.source_id,
+            cross: {agent: $report.agent, source_id: ($handles[0][$report.agent + " " + $finding.source_id] // $finding.source_id),
                     classification: $finding.classification, severity: $finding.severity}
           }
         ]
@@ -4071,7 +4131,8 @@ validate_final_ndjson_records() {
             contract: "ndjson-v1", schema_version: 1, phase: "final-synthesis", complete: true,
             finding_count: .[-1].finding_count,
             input_refs: [$expected_refs[0][] | {agent, source_id}],
-            findings: [.[0:-1][] as $finding | $finding + {primary_refs: primary_refs_for($finding.source_refs)}],
+            findings: ([.[0:-1][] as $finding | $finding + {primary_refs: primary_refs_for($finding.source_refs)}]
+                | to_entries | map(.value + {ref_id: ("s" + (if .key < 9 then "0" else "" end) + ((.key + 1) | tostring))})),
             summary: .[-1].summary,
             verification_limitations: .[-1].verification_limitations,
             positive_evidence: .[-1].positive_evidence
@@ -4298,6 +4359,25 @@ pi_guard_usage_object() {
 collect_orchestrator_diagnostics() {
     local output_file=$1
     local manifest_json='{}' resolutions_json='null' usage_records='[]' map_available=true rerun=false usage_path
+    local pending_salvage='[]'
+
+    # The final is rendered by the very pass that salvages it, before that pass
+    # has written its loss to the manifest -- it is written only once the report
+    # is published, so a salvage that fails leaves nothing behind. Read from the
+    # manifest alone, a salvaged final would say nothing about what it dropped.
+    if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
+        pending_salvage=$(jq -cn \
+            --arg agent "${FINAL_SYNTHESIZER:-}" \
+            --argjson unreadable "$NDJSON_SALVAGE_UNPARSEABLE_LINES" \
+            --argjson dropped "$(json_string_array "${NDJSON_SALVAGE_DROPPED_IDS[@]}")" \
+            --argjson missing "$NDJSON_SALVAGE_MISSING_REFS" \
+            --argjson resolutions "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS" '
+            if $unreadable > 0 or ($dropped | length) > 0 or $missing > 0 or $resolutions
+            then [{phase: "final synthesis", agent: (if $agent == "" then null else $agent end),
+                   unparseable_lines: $unreadable, dropped_findings: $dropped,
+                   unanswered_refs: $missing, dropped_resolutions: $resolutions}]
+            else [] end')
+    fi
 
     [[ -z "${MANIFEST_FILE:-}" || ! -s "$MANIFEST_FILE" ]] || manifest_json=$(cat -- "$MANIFEST_FILE")
     [[ -z "${FINAL_PROCESSED_RESOLUTIONS_FILE:-}" || ! -s "$FINAL_PROCESSED_RESOLUTIONS_FILE" ]] || resolutions_json=$(cat -- "$FINAL_PROCESSED_RESOLUTIONS_FILE")
@@ -4319,6 +4399,7 @@ collect_orchestrator_diagnostics() {
         --argjson manifest "$manifest_json" \
         --argjson rerun "$rerun" \
         --argjson resolutions "$resolutions_json" \
+        --argjson pending_salvage "$pending_salvage" \
         --argjson usage "$usage_records" '
         def rec($type; $scope; $phase; $agent; $detail; $refs):
             {type: $type, scope: $scope, phase: $phase, agent: $agent, detail: $detail, refs: $refs};
@@ -4336,7 +4417,14 @@ collect_orchestrator_diagnostics() {
           (if $map_available then empty else rec("changed_line_map_unavailable"; "run"; null; null; "no RIGHT-side changed-line map was recorded for this run"; []) end),
           (if ($ancestry | IN("measurement_failed", "commit_unavailable")) then rec("repository_facts_measurement_failed"; "run"; null; null; ("reference ancestry: " + $ancestry); []) else empty end),
           (if $rerun then rec("checkout_unavailable"; "run"; null; null; "artifact-only final rerun: no repository checkout, measurements were not executed"; []) else empty end),
-          (($manifest.salvage_losses // [])[] | . as $loss |
+          (($manifest.final_fallback // null) | select(. != null) |
+            rec("final_synthesis_fallback"; "phase"; "final synthesis"; .to;
+                ("written by " + .to + (if .model == null then "" else " on " + .model end) +
+                 " after " + .from + " failed: " + (.reason // "unknown reason")); [])),
+          (($manifest.agent_losses // [])[] |
+            rec("reviewer_dropped"; "phase"; .phase; .agent;
+                ("the run went on without this reviewer: " + (.reason // "unknown reason")); [])),
+          ((($manifest.salvage_losses // []) + $pending_salvage)[] | . as $loss |
             rec("salvage_dropped_records"; "phase"; $loss.phase; $loss.agent;
                 ([(if ($loss.unparseable_lines // 0) > 0 then (($loss.unparseable_lines | tostring) + " unreadable line(s)") else empty end),
                   (if (($loss.dropped_findings // []) | length) > 0 then ((($loss.dropped_findings | length) | tostring) + " finding(s) that did not meet the contract") else empty end),
@@ -4519,7 +4607,8 @@ render_final_findings_markdown() {
                              agent_attempt_timeout: "Спроба агента перевищила час", agent_attempt_output_limit: "Спроба агента досягла ліміту виводу", agent_attempt_invalid_output: "Спроба агента дала недійсний вивід", agent_attempt_failed: "Спроба агента не вдалася",
                              pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів", context_compacted: "Контекст стискався: вікно моделі переповнилось",
                              measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна",
-                             salvage_dropped_records: "Частину виводу моделі довелось відкинути"}
+                             salvage_dropped_records: "Частину виводу моделі довелось відкинути",
+                             reviewer_dropped: "Рецензент випав із прогону", final_synthesis_fallback: "Фінальний синтез написав резервний агент"}
                         else
                             {github_review_threads_unavailable: "Review threads unavailable", github_review_threads_partial: "Review threads partial",
                              github_check_failed: "CI check failed", github_check_cancelled: "CI check cancelled", github_check_pending: "CI check pending", github_check_skipped: "CI check skipped",
@@ -4527,7 +4616,8 @@ render_final_findings_markdown() {
                              agent_attempt_timeout: "Agent attempt timed out", agent_attempt_output_limit: "Agent attempt hit the output limit", agent_attempt_invalid_output: "Agent attempt produced invalid output", agent_attempt_failed: "Agent attempt failed",
                              pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked", context_compacted: "Context was compacted: the model window overflowed",
                              measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable",
-                             salvage_dropped_records: "Part of the model output had to be dropped"}
+                             salvage_dropped_records: "Part of the model output had to be dropped",
+                             reviewer_dropped: "A reviewer dropped out of the run", final_synthesis_fallback: "The final synthesis was written by the fallback agent"}
                         end) as $labels | ($labels[.type] // .type);
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
@@ -5982,6 +6072,8 @@ EOF
 write_cross_prompt() {
     local reviewer=$1
     local prompt_file=$2
+    local -a cross_input_agents=()
+    local cross_handles_file
     local reviewer_label
     local report_label
     local report_path
@@ -6060,6 +6152,8 @@ ${AGENT_SKILL_INSTRUCTION} It remains authoritative only for review methodology.
 
 For every reported finding, classify it as exactly CONFIRMED, REJECTED, or UNCERTAIN. Detect duplicates, reject speculation and claims unsupported by the implementation, correct severity when needed, explain disagreements, and cite concrete file/line/code evidence for confirmed findings. Source code is the source of truth.
 
+Before you confirm a finding, look for the evidence against it, not only the evidence for it. Showing that the code does what the finding describes is half the check; the other half is whether it does so on purpose. Look for the behaviour declared in a docblock, an interface or response contract, a test that pins it, or the PR description. When it is declared, the finding stands only if it shows why the declared behaviour itself does harm: a consumer it breaks, a requirement it violates. Otherwise the finding mistakes a design decision for a defect. Reject it, or classify it UNCERTAIN when the harm cannot be shown from this PR, and say in evidence where the behaviour is declared.
+
 ${MIGRATION_VERIFICATION_INSTRUCTION}
 
 ${EXISTING_FEEDBACK_INSTRUCTION}
@@ -6080,7 +6174,10 @@ EOF
     append_configured_skill_to_prompt "$prompt_file"
     append_repository_facts_to_prompt "$prompt_file"
     if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
-        for input_agent in "${REVIEW_AGENTS[@]}"; do
+        survivor_agents primary cross_input_agents
+        new_temp_file "cross-prompt-handles-${reviewer}"; cross_handles_file=$NEW_TEMP_FILE
+        phase_handle_map primary "$cross_handles_file"
+        for input_agent in "${cross_input_agents[@]}"; do
             [[ "$input_agent" == "$reviewer" ]] && continue
             report_path=${PRIMARY_FINDINGS_OUTPUTS[$input_agent]}
             [[ -s "$report_path" ]] || die "Canonical primary findings are missing for structured cross-review: ${input_agent}"
@@ -6089,8 +6186,13 @@ EOF
                 # record_ref is the exact pair this reviewer must copy into
                 # source_refs. Supplying it removes the join between an id here
                 # and an agent key in the block header, which is where a reviewer
-                # mis-attributes a record.
-                jq '.agent as $owner | .findings |= map(. + {record_ref: {agent: $owner, source_id: .source_id}})' "$report_path"
+                # mis-attributes a record. The record shows only its short handle,
+                # never the author's own id alongside it: a model given a long
+                # descriptive id rewrites it into a shorter one, and a model given
+                # two ids for one record may copy either.
+                jq --slurpfile handles "$cross_handles_file" '.agent as $owner | .findings |= map(
+                        ($handles[0][$owner + " " + .source_id] // .source_id) as $handle
+                        | . + {source_id: $handle, record_ref: {agent: $owner, source_id: $handle}})' "$report_path"
                 printf '\n===== END CANONICAL PRIMARY FINDINGS: %s =====\n' "$input_agent"
             } >>"$prompt_file"
         done
@@ -6201,6 +6303,8 @@ write_final_diagnostics() {
 write_final_prompt() {
     local prompt_file=$1
     shift
+    local -a final_input_agents=()
+    local final_handles_file disputes_file limitations_file
     local synthesizer_label
     local dispute_contract_block=''
     local comparison_prompt_block
@@ -6328,27 +6432,35 @@ EOF
     append_repository_facts_to_prompt "$prompt_file"
     append_changed_line_map_to_prompt "$prompt_file"
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
-        for label in "${REVIEW_AGENTS[@]}"; do
+        survivor_agents cross final_input_agents
+        new_temp_file "final-prompt-handles"; final_handles_file=$NEW_TEMP_FILE
+        phase_handle_map cross "$final_handles_file"
+        for label in "${final_input_agents[@]}"; do
             report=${CROSS_FINDINGS_OUTPUTS[$label]:-}
             [[ -s "$report" ]] || die "Canonical cross-review findings are missing for structured final synthesis: ${label}"
             {
                 printf '\n===== BEGIN CANONICAL CROSS-REVIEW FINDINGS: %s =====\n' "$label"
-                # The finalizer references cross-review records by their own source_id.
+                # The finalizer references cross-review records by their handle.
                 # Their upstream primary refs are shown as provenance so a model cannot
                 # mistake them for the refs it must cover.
-                jq '.agent as $owner | .findings |= map(. + {record_ref: {agent: $owner, source_id: .source_id}, primary_provenance: .source_refs} | del(.source_refs))' "$report"
+                jq --slurpfile handles "$final_handles_file" '.agent as $owner | .findings |= map(
+                        ($handles[0][$owner + " " + .source_id] // .source_id) as $handle
+                        | . + {source_id: $handle, record_ref: {agent: $owner, source_id: $handle}, primary_provenance: .source_refs}
+                        | del(.source_refs))' "$report"
                 printf '\n===== END CANONICAL CROSS-REVIEW FINDINGS: %s =====\n' "$label"
             } >>"$prompt_file"
         done
         append_required_source_refs_to_prompt "$prompt_file" final
+        # Each path is held in a local at once: a builder may create temp files
+        # of its own, and the next new_temp_file inside it replaces NEW_TEMP_FILE.
         if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
-            new_temp_file 'final-disputes'
-            build_final_disputes "$NEW_TEMP_FILE" || die "Cannot detect cross-review disputes for final synthesis"
-            append_required_resolutions_to_prompt "$prompt_file" "$NEW_TEMP_FILE"
+            new_temp_file 'final-disputes'; disputes_file=$NEW_TEMP_FILE
+            build_final_disputes "$disputes_file" || die "Cannot detect cross-review disputes for final synthesis"
+            append_required_resolutions_to_prompt "$prompt_file" "$disputes_file"
         fi
-        new_temp_file 'known-limitations'
-        collect_orchestrator_diagnostics "$NEW_TEMP_FILE"
-        append_known_limitations_to_prompt "$prompt_file" "$NEW_TEMP_FILE"
+        new_temp_file 'known-limitations'; limitations_file=$NEW_TEMP_FILE
+        collect_orchestrator_diagnostics "$limitations_file"
+        append_known_limitations_to_prompt "$prompt_file" "$limitations_file"
     fi
     while [[ "$FINAL_FINDING_CONTRACT_MODE" != ndjson-v1 && $# -ge 2 ]]; do
         label=$1
@@ -8165,6 +8277,165 @@ run_review_phase() {
     fi
 }
 
+# Handles are numbered across every reviewer that finished a phase, in reviewer
+# order -- claude's findings r01..r03, codex's from r04 -- so each names exactly
+# one record: numbering each reviewer from r01 would give every reviewer an r01,
+# and the correction that repairs a mislabelled agent key relies on an id having
+# a single owner. They are derived, never stored. A resumed run must leave its
+# preserved artifacts byte for byte as they were, and deriving the handles from
+# the same reviewers and the same records gives the same handles every time. A
+# run recorded before handles existed keeps its reviewers' own ids throughout, so
+# resuming it cannot mix the two styles across cross-reviews of one finding.
+phase_handle_map() {
+    local kind=$1 output_file=$2 prefix agent file
+    local -a sources=() files=()
+
+    case "$kind" in
+        primary) prefix=r; survivor_agents primary sources ;;
+        cross) prefix=x; survivor_agents cross sources ;;
+        *) return 1 ;;
+    esac
+    for agent in "${sources[@]}"; do
+        if [[ "$kind" == primary ]]; then file=${PRIMARY_FINDINGS_OUTPUTS[$agent]:-}; else file=${CROSS_FINDINGS_OUTPUTS[$agent]:-}; fi
+        [[ -n "$file" && -s "$file" && ! -L "$file" ]] || continue
+        files+=("$file")
+    done
+    if (( ${#files[@]} == 0 )); then
+        printf '{}\n' >"$output_file"
+        return 0
+    fi
+    jq -s --arg prefix "$prefix" --argjson enabled "$SOURCE_HANDLES_ENABLED" '
+        [.[] | .agent as $agent | .findings[] | {agent: $agent, source_id}]
+        | to_entries
+        | map({key: (.value.agent + " " + .value.source_id),
+               value: (if $enabled
+                       then ((.key + 1) | tostring) as $n | $prefix + (if ($n | length) < 2 then "0" + $n else $n end)
+                       else .value.source_id end)})
+        | from_entries
+    ' "${files[@]}" >"$output_file"
+}
+
+report_is_complete() {
+    [[ -f "$1" && -s "$1" && ! -L "$1" ]]
+}
+
+# Who is still in the review, read from what is on disk rather than from what
+# the run remembers, so a fresh run and a resumed one are judged the same way.
+# A reviewer that finished its primary review but not its cross-review stays a
+# primary source: others checked its findings even though it checked nobody's.
+refresh_phase_survivors() {
+    local agent
+
+    PRIMARY_AGENTS=()
+    CROSS_AGENTS=()
+    for agent in "${REVIEW_AGENTS[@]}"; do
+        if report_is_complete "${PRIMARY_OUTPUTS[$agent]:-}"; then
+            PRIMARY_AGENTS+=("$agent")
+        fi
+    done
+    # Written with if, not &&: a reviewer without the artifact is the normal case
+    # before its phase has run, and the status of a failed && as the last command
+    # would become this function's, which errexit turns into the end of the run.
+    for agent in "${PRIMARY_AGENTS[@]}"; do
+        if report_is_complete "${CROSS_OUTPUTS[$agent]:-}"; then
+            CROSS_AGENTS+=("$agent")
+        fi
+    done
+}
+
+effective_quorum() {
+    local total=$1
+
+    if [[ "$AGENT_QUORUM" == all ]] || (( AGENT_QUORUM > total )); then
+        printf '%s' "$total"
+    else
+        printf '%s' "$AGENT_QUORUM"
+    fi
+}
+
+# One reviewer failing used to cost the whole run, however many others had
+# finished. On 29031 three cross-reviews and four primary reviews were done and
+# paid for when the fourth reviewer failed twice, and the final never started.
+# A phase now goes on while enough reviewers remain for every finding to still
+# be checked by someone other than its author -- two, at the least -- and the
+# ones that failed are named rather than quietly left out.
+phase_may_continue_without_failures() {
+    local kind=$1
+    local total survivors required
+
+    refresh_phase_survivors
+    case "$kind" in
+        primary) total=${#REVIEW_AGENTS[@]}; survivors=${#PRIMARY_AGENTS[@]} ;;
+        cross) total=${#PRIMARY_AGENTS[@]}; survivors=${#CROSS_AGENTS[@]} ;;
+        *) return 1 ;;
+    esac
+    required=$(effective_quorum "$total")
+    if (( survivors < required )); then
+        log "Only ${survivors} of ${total} reviewers finished the ${kind/cross/cross-review} phase; the quorum is ${required}, so the run stops here"
+        return 1
+    fi
+    record_agent_losses "$kind"
+}
+
+# A reviewer the quorum rule already set aside is not a gap to fill. Resuming
+# after a failed final must not spend another hour on a reviewer the run chose to
+# go on without, and would change the synthesis inputs if it did.
+agent_was_dropped() {
+    local phase=$1 agent=$2 manifest=${3:-${MANIFEST_FILE:-}}
+
+    [[ -n "$manifest" && -s "$manifest" ]] || return 1
+    jq -e --arg phase "$phase" --arg agent "$agent" \
+        'any((.agent_losses // [])[]; .phase == $phase and .agent == $agent)' "$manifest" >/dev/null
+}
+
+# The reviewers whose work feeds the next phase. Before a run has looked at its
+# own artifacts -- a unit test, a contract test -- that is everyone listed.
+survivor_agents() {
+    local kind=$1
+    local -n _survivor_out=$2
+
+    case "$kind" in
+        primary) _survivor_out=("${PRIMARY_AGENTS[@]}") ;;
+        *) _survivor_out=("${CROSS_AGENTS[@]}") ;;
+    esac
+    (( ${#_survivor_out[@]} > 0 )) || _survivor_out=("${REVIEW_AGENTS[@]}")
+}
+
+record_agent_losses() {
+    local kind=$1
+    local label entry agent reason short_reason attempts
+    local -a lost=()
+
+    case "$kind" in
+        primary) label='primary review' ;;
+        *) label='cross-review' ;;
+    esac
+    for entry in "${PHASE_FAILURES[@]}"; do
+        agent=${entry%% (*}
+        reason=${entry#"$agent"}
+        reason=${reason# (}
+        reason=${reason%)}
+        # A contract failure carries per-record diagnostics that can run to
+        # kilobytes; the console and the report get the kind of failure and the
+        # attempt count, and the manifest keeps the whole of it.
+        short_reason=$reason
+        if [[ "$reason" == *' ('* ]]; then
+            attempts=''
+            [[ "$reason" != *'; '*' attempts' ]] || attempts="; ${reason##*; }"
+            short_reason="${reason%% (*}${attempts}"
+        fi
+        lost+=("$(jq -cn --arg agent "$agent" --arg reason "$short_reason" --arg detail "$reason" \
+            '{agent: $agent, reason: $reason, detail: $detail}')")
+        log "Continuing without ${agent} for the ${label}: ${short_reason}"
+    done
+    (( ${#lost[@]} > 0 )) || return 0
+    [[ -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]] || return 0
+    atomic_manifest_update \
+        '.agent_losses = ((.agent_losses // []) + [$lost[] | {phase: $phase} + .])' \
+        --arg phase "$label" \
+        --argjson lost "$(printf '%s\n' "${lost[@]}" | jq -s '.')"
+}
+
 json_string_array() {
     jq -cn '$ARGS.positional' --args "$@"
 }
@@ -8411,6 +8682,7 @@ create_full_manifest() {
                     final: $final_finding_contract
                 },
                 dispute_resolution: $dispute_resolution,
+                source_handles: true,
                 comparison_sections: {
                     cross_review: $cross_comparison_mode,
                     final: $final_comparison_mode
@@ -8906,6 +9178,7 @@ load_artifact_source_run() {
 
     mapfile -t REVIEW_AGENTS < <(jq -r '.reviewers[]' "$SOURCE_MANIFEST")
     (( ${#REVIEW_AGENTS[@]} >= 2 )) || die "Selected run manifest has fewer than two reviewers"
+    SOURCE_HANDLES_ENABLED=$(jq -r 'if .reporting.source_handles == true then "true" else "false" end' "$SOURCE_MANIFEST")
     PRIMARY_OUTPUTS=()
     CROSS_OUTPUTS=()
     CROSS_FINDINGS_OUTPUTS=()
@@ -9086,6 +9359,7 @@ load_resume_run() {
 
     REPORT_STEM="${REVIEW_ID}-${SOURCE_TIMESTAMP}"
     MANIFEST_FILE=$SOURCE_MANIFEST
+    SOURCE_HANDLES_ENABLED=$(jq -r 'if .reporting.source_handles == true then "true" else "false" end' "$SOURCE_MANIFEST")
     manifest_contract=$(jq -r '.reporting.finding_contract.primary // "markdown"' "$SOURCE_MANIFEST")
     [[ "$manifest_contract" == markdown || "$manifest_contract" == ndjson-v1 ]] \
         || die "Selected run uses an unsupported primary finding contract: ${manifest_contract}"
@@ -9205,6 +9479,7 @@ load_source_run() {
 
     mapfile -t REVIEW_AGENTS < <(jq -r '.reviewers[]' "$SOURCE_MANIFEST")
     (( ${#REVIEW_AGENTS[@]} >= 2 )) || die "Selected run manifest has fewer than two reviewers"
+    SOURCE_HANDLES_ENABLED=$(jq -r 'if .reporting.source_handles == true then "true" else "false" end' "$SOURCE_MANIFEST")
     REPORT_STEM="${REVIEW_ID}-${SOURCE_TIMESTAMP}"
     PRIMARY_OUTPUTS=()
     CROSS_OUTPUTS=()
@@ -9214,8 +9489,14 @@ load_source_run() {
         die 'Structured final synthesis requires a source run with structured cross-review findings'
     fi
 
+    CROSS_AGENTS=()
     for manifest_agent in "${REVIEW_AGENTS[@]}"; do
         [[ "$manifest_agent" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid reviewer in selected run manifest: ${manifest_agent}"
+        if agent_was_dropped 'primary review' "$manifest_agent" "$SOURCE_MANIFEST" \
+            || agent_was_dropped 'cross-review' "$manifest_agent" "$SOURCE_MANIFEST"; then
+            continue
+        fi
+        CROSS_AGENTS+=("$manifest_agent")
         expected_file="${REPORT_STEM}-cross-${manifest_agent}.md"
         configured_file=$(jq -r --arg agent "$manifest_agent" '.artifacts.cross_review[$agent] // ""' "$SOURCE_MANIFEST")
         [[ "$configured_file" == "$expected_file" ]] || die "Unexpected cross-review artifact in selected run manifest for ${manifest_agent}"
@@ -10083,6 +10364,7 @@ normalize_comparison_markdown() {
 run_comparison_synthesis() {
     local error_log=$1
     local comparison_prompt
+    local -a comparison_primary_sources=() comparison_cross_sources=()
     local comparison_output
     local comparison_log
     local comparison_usage
@@ -10116,12 +10398,14 @@ run_comparison_synthesis() {
     new_temp_file "comparison-usage"; comparison_usage=$NEW_TEMP_FILE
     new_temp_file "comparison-usage-json"; comparison_usage_json=$NEW_TEMP_FILE
 
+    survivor_agents primary comparison_primary_sources
+    survivor_agents cross comparison_cross_sources
     if [[ "$RERUN_FINAL" != true ]]; then
-        for agent in "${REVIEW_AGENTS[@]}"; do
+        for agent in "${comparison_primary_sources[@]}"; do
             comparison_prompt_arguments+=("Primary $(agent_label "$agent")" "${PRIMARY_OUTPUTS[$agent]}")
         done
     fi
-    for agent in "${REVIEW_AGENTS[@]}"; do
+    for agent in "${comparison_cross_sources[@]}"; do
         comparison_prompt_arguments+=("Cross-review $(agent_label "$agent")" "${CROSS_OUTPUTS[$agent]}")
     done
     # Pi's @file loader can truncate a large attachment from the beginning.
@@ -10559,17 +10843,15 @@ run_final_synthesis_attempt() {
 }
 
 run_final_synthesis() {
-    local final_attempt
     local error_log=$1
-    local final_prompt
     local agent
-    local -a final_prompt_arguments=()
+    local -a primary_sources=() cross_sources=()
 
-    new_temp_file "final-prompt"
-    final_prompt=$NEW_TEMP_FILE
-
+    survivor_agents primary primary_sources
+    survivor_agents cross cross_sources
+    FINAL_PROMPT_ARGUMENTS=()
     if [[ "$RERUN_FINAL" == true ]]; then
-        FINAL_INPUT_DESCRIPTION="Synthesize only the ${#REVIEW_AGENTS[@]} supplied cross-reviews. This final rerun intentionally excludes primary reports and must not attempt another review from scratch."
+        FINAL_INPUT_DESCRIPTION="Synthesize only the ${#cross_sources[@]} supplied cross-reviews. This final rerun intentionally excludes primary reports and must not attempt another review from scratch."
         if [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" && -n "$CHANGED_LINE_MAP_FILE" ]]; then
             FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews, their embedded code evidence, the repository-facts snapshot, and the exact changed-line map are the complete input for this run.'
         elif [[ -n "$REPOSITORY_FACTS_MARKDOWN_FILE" ]]; then
@@ -10580,17 +10862,17 @@ run_final_synthesis() {
             FINAL_SOURCE_POLICY_INSTRUCTION='This is an artifact-only re-synthesis. Do not inspect or rely on the repository checkout, current GitHub PR state, source files, or a newly fetched diff. The preserved cross-reviews and their embedded code evidence are the complete input for this historical run; repository facts and a changed-line map were not recorded, so related premises and inline-anchor verification remain unknown.'
         fi
     else
-        FINAL_INPUT_DESCRIPTION="Synthesize the ${#REVIEW_AGENTS[@]} primary reviews and ${#REVIEW_AGENTS[@]} cross-reviews supplied below."
+        FINAL_INPUT_DESCRIPTION="Synthesize the ${#primary_sources[@]} primary reviews and ${#cross_sources[@]} cross-reviews supplied below."
         FINAL_SOURCE_POLICY_INSTRUCTION='Inspect the actual checked-out PR/source whenever necessary; source code is the source of truth.'
-        for agent in "${REVIEW_AGENTS[@]}"; do
-            final_prompt_arguments+=(
+        for agent in "${primary_sources[@]}"; do
+            FINAL_PROMPT_ARGUMENTS+=(
                 "Primary $(agent_label "$agent")"
                 "${PRIMARY_OUTPUTS[$agent]}"
             )
         done
     fi
-    for agent in "${REVIEW_AGENTS[@]}"; do
-        final_prompt_arguments+=(
+    for agent in "${cross_sources[@]}"; do
+        FINAL_PROMPT_ARGUMENTS+=(
             "Cross-review $(agent_label "$agent")"
             "${CROSS_OUTPUTS[$agent]}"
         )
@@ -10598,7 +10880,19 @@ run_final_synthesis() {
     if [[ "$RERUN_FINAL" != true ]]; then
         refresh_github_check_runs
     fi
-    write_final_prompt "$final_prompt" "${final_prompt_arguments[@]}"
+    run_final_synthesis_attempts "$error_log" && return 0
+    run_fallback_final_synthesis "$error_log"
+}
+
+# One synthesizer's turn at the final: the prompt is built for it, because the
+# prompt carries its own skill and name, and it gets the configured attempts.
+run_final_synthesis_attempts() {
+    local error_log=$1
+    local final_attempt final_prompt
+
+    new_temp_file "final-prompt"
+    final_prompt=$NEW_TEMP_FILE
+    write_final_prompt "$final_prompt" "${FINAL_PROMPT_ARGUMENTS[@]}"
     FINAL_PROMPT_FILE=$final_prompt
 
     for (( final_attempt = 1; final_attempt <= RETRY_MAX_ATTEMPTS; final_attempt++ )); do
@@ -10618,6 +10912,40 @@ run_final_synthesis() {
         fi
     done
     return 1
+}
+
+# Final synthesis is the one phase nobody can stand in for. A failed reviewer
+# leaves others behind it; a failed synthesis leaves nothing, however much went
+# into the phases before it. When the configured synthesizer has used up its
+# attempts, a different agent -- a stronger model is the whole point -- takes the
+# same inputs and tries again. The swap is written down, so the report says who
+# actually wrote it rather than implying the configured synthesizer did.
+run_fallback_final_synthesis() {
+    local error_log=$1
+    local failed_synthesizer=$FINAL_SYNTHESIZER failed_reason=$FINAL_FAILURE_REASON
+    # The full reason can run to kilobytes of per-record diagnostics. It is already
+    # on the line above and in the attempt's error log; the handover says what
+    # kind of failure it was, and the report must stay readable.
+    local short_reason=${failed_reason%% (*}
+
+    [[ -n "$FALLBACK_SYNTHESIZER" && "$FALLBACK_SYNTHESIS_USED" != true ]] || return 1
+    FALLBACK_SYNTHESIS_USED=true
+    FINAL_SYNTHESIZER=$FALLBACK_SYNTHESIZER
+    FINALIZATION_MODEL=${FALLBACK_MODEL:-${AGENT_MODELS[$FALLBACK_SYNTHESIZER]:-}}
+    FINALIZATION_EFFORT=$FALLBACK_EFFORT
+    FINALIZATION_EFFORT_CONFIGURED=$FALLBACK_EFFORT_CONFIGURED
+    log "Final synthesis by $(agent_label "$failed_synthesizer") failed (${short_reason}); handing it to $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
+    if [[ -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]]; then
+        atomic_manifest_update \
+            '.final_fallback = {from: $from, to: $to, model: (if $model == "" then null else $model end),
+                                reason: $reason, detail: $detail}' \
+            --arg from "$failed_synthesizer" \
+            --arg to "$FINAL_SYNTHESIZER" \
+            --arg model "$FINALIZATION_MODEL" \
+            --arg reason "$short_reason" \
+            --arg detail "$failed_reason"
+    fi
+    run_final_synthesis_attempts "${error_log%.log}-fallback-${FINAL_SYNTHESIZER}.log"
 }
 
 write_contract_test_prompt() {
@@ -11154,9 +11482,8 @@ if [[ "$RESUME_RUN" == true ]]; then
     declare -a missing_primary=()
     declare -a missing_cross=()
     for agent in "${REVIEW_AGENTS[@]}"; do
-        if [[ ! -f "${PRIMARY_OUTPUTS[$agent]}" || ! -s "${PRIMARY_OUTPUTS[$agent]}" || -L "${PRIMARY_OUTPUTS[$agent]}" ]]; then
-            missing_primary+=("$agent")
-        fi
+        ! agent_was_dropped 'primary review' "$agent" || continue
+        report_is_complete "${PRIMARY_OUTPUTS[$agent]}" || missing_primary+=("$agent")
     done
 
     log "Resuming run ${SOURCE_TIMESTAMP}; inspecting preserved artifacts"
@@ -11180,19 +11507,22 @@ if [[ "$RESUME_RUN" == true ]]; then
             write_primary_prompt "$agent" "${PROMPT_FILES[$agent]}"
         done
         activity_log "Resuming primary review for failed/missing agents: ${missing_primary[*]}"
-        if ! run_review_phase "primary review" "${missing_primary[@]}"; then
+        if ! run_review_phase "primary review" "${missing_primary[@]}" && ! phase_may_continue_without_failures primary; then
             stop_dashboard; update_full_manifest_phase primary failed
             log "Cross-review and synthesis remain paused; successful artifacts were preserved."
             exit 1
         fi
         update_full_manifest_phase primary complete
+        refresh_phase_survivors
     fi
 
-    for agent in "${REVIEW_AGENTS[@]}"; do
-        [[ -f "${PRIMARY_OUTPUTS[$agent]}" && -s "${PRIMARY_OUTPUTS[$agent]}" && ! -L "${PRIMARY_OUTPUTS[$agent]}" ]] || die "Primary report is missing after resume: ${agent}"
-        if [[ ! -f "${CROSS_OUTPUTS[$agent]}" || ! -s "${CROSS_OUTPUTS[$agent]}" || -L "${CROSS_OUTPUTS[$agent]}" ]]; then
-            missing_cross+=("$agent")
-        fi
+    # Anyone still without a primary report was set aside by the quorum rule,
+    # either just now or on an earlier pass; the phase would have stopped the run
+    # otherwise. The survivors are the ones cross-review is for.
+    refresh_phase_survivors
+    for agent in "${PRIMARY_AGENTS[@]}"; do
+        ! agent_was_dropped 'cross-review' "$agent" || continue
+        report_is_complete "${CROSS_OUTPUTS[$agent]}" || missing_cross+=("$agent")
     done
     if (( ${#missing_cross[@]} > 0 )); then
         PROMPT_FILES=(); TEMP_OUTPUTS=(); TEMP_LOGS=(); TEMP_USAGE_FILES=(); TEMP_USAGE_JSON_FILES=(); FINAL_OUTPUTS=(); USAGE_OUTPUTS=(); ERROR_LOGS=()
@@ -11206,19 +11536,21 @@ if [[ "$RESUME_RUN" == true ]]; then
             USAGE_OUTPUTS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-usage.json"
             ERROR_LOGS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-resume-${TIMESTAMP}-error.log"
             cross_prompt_arguments=()
-            for other_agent in "${REVIEW_AGENTS[@]}"; do
+            for other_agent in "${PRIMARY_AGENTS[@]}"; do
                 [[ "$other_agent" == "$agent" ]] || cross_prompt_arguments+=("$(agent_label "$other_agent")" "${PRIMARY_OUTPUTS[$other_agent]}")
             done
             write_cross_prompt "$agent" "${PROMPT_FILES[$agent]}" "${cross_prompt_arguments[@]}"
         done
         activity_log "Resuming cross-review for failed/missing agents: ${missing_cross[*]}"
-        if ! run_review_phase "cross-review" "${missing_cross[@]}"; then
+        if ! run_review_phase "cross-review" "${missing_cross[@]}" && ! phase_may_continue_without_failures cross; then
             skip_dashboard_sections final comparison; stop_dashboard; update_full_manifest_phase cross_review failed
             log "Final synthesis remains paused; successful artifacts were preserved."
             exit 1
         fi
         update_full_manifest_phase cross_review complete
+        refresh_phase_survivors
     fi
+    refresh_phase_survivors
 
     if [[ ! -e "$FINAL_REPORT" ]]; then
         if ! run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-resume-${TIMESTAMP}-error.log"; then
@@ -11403,7 +11735,7 @@ if (( MAX_CONCURRENCY == 0 )); then
 else
     activity_log "Starting ${#REVIEW_AGENTS[@]} independent reviews with max concurrency ${MAX_CONCURRENCY}: ${REVIEW_AGENTS[*]}"
 fi
-if ! run_review_phase "primary review" "${REVIEW_AGENTS[@]}"; then
+if ! run_review_phase "primary review" "${REVIEW_AGENTS[@]}" && ! phase_may_continue_without_failures primary; then
     skip_dashboard_sections cross final comparison
     stop_dashboard
     update_full_manifest_phase primary failed
@@ -11411,6 +11743,7 @@ if ! run_review_phase "primary review" "${REVIEW_AGENTS[@]}"; then
     exit 1
 fi
 update_full_manifest_phase primary complete
+refresh_phase_survivors
 
 PROMPT_FILES=()
 TEMP_OUTPUTS=()
@@ -11421,7 +11754,7 @@ FINAL_OUTPUTS=()
 USAGE_OUTPUTS=()
 ERROR_LOGS=()
 
-for agent in "${REVIEW_AGENTS[@]}"; do
+for agent in "${PRIMARY_AGENTS[@]}"; do
     new_temp_file "cross-${agent}-prompt"
     PROMPT_FILES[$agent]=$NEW_TEMP_FILE
     new_temp_file "cross-${agent}-output"
@@ -11438,9 +11771,9 @@ for agent in "${REVIEW_AGENTS[@]}"; do
     ERROR_LOGS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-error.log"
 done
 
-for agent in "${REVIEW_AGENTS[@]}"; do
+for agent in "${PRIMARY_AGENTS[@]}"; do
     cross_prompt_arguments=()
-    for other_agent in "${REVIEW_AGENTS[@]}"; do
+    for other_agent in "${PRIMARY_AGENTS[@]}"; do
         if [[ "$other_agent" == "$agent" ]]; then
             continue
         fi
@@ -11456,11 +11789,11 @@ for agent in "${REVIEW_AGENTS[@]}"; do
 done
 
 if (( MAX_CONCURRENCY == 0 )); then
-    activity_log "Starting ${#REVIEW_AGENTS[@]} cross-reviews with unlimited concurrency"
+    activity_log "Starting ${#PRIMARY_AGENTS[@]} cross-reviews with unlimited concurrency"
 else
-    activity_log "Starting ${#REVIEW_AGENTS[@]} cross-reviews with max concurrency ${MAX_CONCURRENCY}"
+    activity_log "Starting ${#PRIMARY_AGENTS[@]} cross-reviews with max concurrency ${MAX_CONCURRENCY}"
 fi
-if ! run_review_phase "cross-review" "${REVIEW_AGENTS[@]}"; then
+if ! run_review_phase "cross-review" "${PRIMARY_AGENTS[@]}" && ! phase_may_continue_without_failures cross; then
     skip_dashboard_sections final comparison
     stop_dashboard
     update_full_manifest_phase cross_review failed
@@ -11468,6 +11801,7 @@ if ! run_review_phase "cross-review" "${REVIEW_AGENTS[@]}"; then
     exit 1
 fi
 update_full_manifest_phase cross_review complete
+refresh_phase_survivors
 
 if ! run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-error.log"; then
     skip_dashboard_sections comparison

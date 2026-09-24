@@ -38,7 +38,21 @@ Example:
 
 Required finding fields:
 
-- `source_id`: stable and unique within one source report;
+- `source_id`: stable and unique within one source report. It is the author's own id and stays
+  with the record in the canonical sidecar and the raw stream, but it does not travel. The next
+  phase sees each record under a short handle instead, numbered on across every reviewer that
+  finished the phase, in reviewer order -- `r01`, `r02`, … for primary findings, `x01`, … for
+  cross-review records -- so each handle names exactly one record and the agent-key correction
+  below keeps working. The handle is shown as the record's `source_id` and in its `record_ref`,
+  never with the author's id beside it. Handles are derived, not stored: a resumed run leaves its
+  preserved sidecars byte for byte as they were, and the same reviewers and records give the same
+  handles every time. The final numbers its own records `s01`, … as a stored `ref_id`, which the
+  fix-list shows a fixing agent. A run records `reporting.source_handles` when it is created; one
+  recorded before handles existed keeps its reviewers' own ids throughout, so resuming it cannot
+  mix the two styles across cross-reviews of one finding. A
+  reviewer handed a 66-character descriptive id rewrote it into a shorter one and so answered
+  findings under names nobody had sent it; a record with two ids invites copying either. The
+  letters stay clear of the `P0`–`P3` severity scale;
 - `title` and one atomic `claim`;
 - `anchor.kind`: `changed-line` or `pr-level`;
 - `anchor.file`, `anchor.start`, and `anchor.end`, nullable only for `pr-level`;
@@ -75,6 +89,17 @@ supplied record, the orchestrator corrects a mislabelled agent key to that owner
 and says so in the log. An unknown or ambiguous `source_id` is never guessed at. A compound source claim may become multiple records
 so each classification remains atomic. Consolidation may merge duplicate records, but it retains
 every source ref and contributing agent.
+
+A cross-reviewer is told to look for the evidence against a finding, not only for it, before it
+confirms one. Showing that the code does what the finding says is half the check; the other half is
+whether it does so on purpose, stated in a docblock, an interface or response contract, a test that
+pins it, or the PR description. A declared behaviour stands as a defect only when the finding shows
+why the declaration itself does harm; otherwise it is rejected, or left `UNCERTAIN` when the harm
+cannot be shown from the PR. This comes from a direct probe of a local 27B model on 2026-09-23:
+handed a finding alone it traced the mechanism across six files and confirmed it; handed the same
+finding with a second reviewer's point that the response contract declares the behaviour, it
+checked that contract itself and rejected it. It could weigh the argument, but did not go looking
+for it.
 
 Final records use the same `source_refs` shape for canonical cross-review records and add
 `include_in_rejected_summary`. That boolean is valid only as `true` on a `REJECTED` record and
@@ -403,6 +428,20 @@ keys remain language-independent.
   ceiling on how much may be dropped: by the time salvage runs, every agent has already been paid
   for, so refusing to publish would discard the surviving work as well as the broken part. A reader
   who never opens a log still sees what the review does not contain.
+- A reviewer whose stream no recovery can rescue -- every record malformed, or a failed process --
+  fails its phase, but the phase does not fail with it while `execution.quorum` reviewers finish
+  (default and minimum 2). Every finding is cross-reviewed by everyone but its author, so two is
+  the smallest number at which each survivor's own findings are still checked by someone; with one
+  left they would drop out of the final unseen, and the run stops. A reviewer that failed its
+  primary review takes no part in cross-review and its missing report is handed to nobody; one that
+  failed only its cross-review stays a primary source, since the others checked its findings. The
+  loss is recorded as an `agent_losses` entry and among the review's verification limitations, and
+  a resumed run does not retry a reviewer the quorum set aside. `"quorum": "all"` restores the
+  earlier behaviour of stopping on any failure.
+- Final synthesis has no quorum because it has one author. When the synthesizer has used up its
+  attempts, `finalization.fallback_synthesizer` receives the same inputs under a prompt built for
+  it and gets the same attempts. The swap is recorded as `final_fallback` in the manifest and among
+  the review's verification limitations, so the report names who actually wrote it.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

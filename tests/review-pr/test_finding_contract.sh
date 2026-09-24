@@ -31,6 +31,24 @@ assert_true 'raw agent response is preserved byte-for-byte' \
 assert_eq ndjson-v1 "$(jq -r '.contract' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
     'canonical finding artifact records its protocol'
 
+# The next phase is handed each record by a short handle instead of the id its
+# author chose. A reviewer given a 66-character descriptive id rewrote it into a
+# shorter one and so answered findings it had been sent under names nobody knew.
+# The handle is positional, so a continued stream keeps the ones it had.
+REVIEW_AGENTS=(codex)
+primary_handles="$test_root/primary-handles.json"
+canonical_before=$(cksum <"${PRIMARY_FINDINGS_OUTPUTS[codex]}")
+phase_handle_map primary "$primary_handles"
+assert_eq 'r01,r02' "$(jq -r '[.["codex F-001"], .["codex F-002"]] | join(",")' "$primary_handles")" \
+    'every primary finding gets a short handle in stream order'
+assert_eq "$canonical_before" "$(cksum <"${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'handles are derived, not written: the canonical sidecar is left byte for byte as it was'
+SOURCE_HANDLES_ENABLED=false
+phase_handle_map primary "$primary_handles"
+assert_eq 'F-001' "$(jq -r '.["codex F-001"]' "$primary_handles")" \
+    "a run recorded before handles existed keeps its reviewers' own ids"
+SOURCE_HANDLES_ENABLED=true
+
 # A PHP namespace inside a JSON string is the single most likely way for a
 # reviewer of PHP to emit an invalid escape: `GuzzleHttp\Handler` is not valid
 # JSON, and a backslash before a character that starts no escape can only have
@@ -398,6 +416,10 @@ jq '.agent = "gamma" | .findings[0].source_id = "gamma:C-001" | .findings[0].cla
     "$cross_canonical" >"$gamma_cross_canonical"
 REVIEW_AGENTS=(alpha gamma)
 CROSS_FINDINGS_OUTPUTS[gamma]="$gamma_cross_canonical"
+cross_handles="$test_root/cross-handles.json"
+phase_handle_map cross "$cross_handles"
+assert_eq 'x01 x02' "$(jq -r '.["alpha alpha:C-001"] + " " + .["gamma gamma:C-001"]' "$cross_handles")" \
+    "handles run on across reviewers, so no two reviewers' records share one"
 disputes_file="$test_root/disputes.json"
 assert_true 'dispute detection reads every canonical cross-review sidecar' \
     build_final_disputes "$disputes_file"
@@ -407,7 +429,11 @@ assert_eq 'dispute:beta:beta:F-001' "$(jq -r '.[0].dispute_id' "$disputes_file")
     'dispute ids derive from the primary ref'
 assert_eq 'factual' "$(jq -r '.[0].kind_hint' "$disputes_file")" \
     'differing classifications hint at a factual dispute'
-assert_eq 'alpha:alpha:C-001,gamma:gamma:C-001' \
+# A conflicting ref names a cross-review record by the handle the finalizer was
+# given for it, the same one its REQUIRED SOURCE REFS list, not the reviewer's own
+# id: the finalizer copies these into resolution records and is checked against
+# the refs it cited.
+assert_eq 'alpha:x01,gamma:x02' \
     "$(jq -r '[.[0].conflicting_refs[] | .agent + ":" + .source_id] | join(",")' "$disputes_file")" \
     'conflicting refs list every cross-review record of the disputed primary ref in stable order'
 
@@ -543,9 +569,11 @@ assert_true 'a severity-only dispute may be reconciled without a measurement' \
 
 final_records="$test_root/final-records.json"
 final_canonical="$test_root/final-canonical.json"
+# The finalizer is handed cross-review records by their short handle, so that is
+# what it cites; the reviewer's own id "alpha:C-001" never reaches it.
 jq -n '{
     record: "finding", schema_version: 1, source_id: "FINAL-001",
-    source_refs: [{agent: "alpha", source_id: "alpha:C-001"}],
+    source_refs: [{agent: "alpha", source_id: "x01"}],
     title: "Fixture final finding", claim: "The changed branch can fail.",
     anchor: {kind: "changed-line", file: "src/Changed.php", start: 10, "end": 10},
     evidence: ["The canonical cross-review confirms the changed failure path."],
@@ -718,8 +746,15 @@ DISPUTE_RESOLUTION_ENABLED=true
 WORK_DIR=$test_root
 REPORT_STEM=resolution-run
 FINAL_FINDING_CONTRACT_MODE=ndjson-v1
+# The unit checks above pair the fixture with hand-written disputes that name the
+# cross-review records by the reviewers' own ids. The pipeline builds disputes
+# from the canonical sidecars instead, where the same records carry the handle
+# the finalizer is given -- x01 and x02 here -- so every stream sent
+# through the pipeline below cites the handles, as a real finalizer's would.
+pipeline_resolution_fixture="$test_root/final-resolution-handles.ndjson"
+sed 's/"alpha:C-001"/"x01"/g; s/"gamma:C-001"/"x02"/g' "$resolution_fixture" >"$pipeline_resolution_fixture"
 processed_final="$test_root/processed-final.md"
-cp -- "$resolution_fixture" "$processed_final"
+cp -- "$pipeline_resolution_fixture" "$processed_final"
 assert_true 'a final stream with valid resolution records is processed' \
     process_final_ndjson_output "$processed_final"
 assert_file_exists "$FINAL_PROCESSED_RESOLUTIONS_FILE" 'processing produces a resolutions sidecar candidate'
@@ -731,7 +766,7 @@ assert_file_contains "$processed_final" '<!-- review-pr:dispute-resolutions -->'
     'the rendered final report carries the dispute-resolution marker'
 
 DISPUTE_RESOLUTION_ENABLED=false
-cp -- "$resolution_fixture" "$processed_final"
+cp -- "$pipeline_resolution_fixture" "$processed_final"
 assert_false 'resolution records are rejected when the feature is disabled' \
     process_final_ndjson_output "$processed_final"
 assert_eq 'unexpected_resolution_records' "$FINDING_CONTRACT_FAILURE_REASON" \
@@ -739,7 +774,7 @@ assert_eq 'unexpected_resolution_records' "$FINDING_CONTRACT_FAILURE_REASON" \
 
 DISPUTE_RESOLUTION_ENABLED=true
 broken_resolution_stream="$test_root/broken-resolution.ndjson"
-jq -c 'if .record == "resolution" then .verification_method = "manual" else . end' "$resolution_fixture" >"$broken_resolution_stream"
+jq -c 'if .record == "resolution" then .verification_method = "manual" else . end' "$pipeline_resolution_fixture" >"$broken_resolution_stream"
 cp -- "$broken_resolution_stream" "$processed_final"
 assert_false 'an unmeasured factual resolution fails final processing' \
     process_final_ndjson_output "$processed_final"
@@ -762,7 +797,7 @@ assert_eq '' "$(describe_diagnostic_only_findings "$diagnostic_only_canonical")"
     'an uncertain claim may cite a check failure as its reason'
 diagnostic_only_stream="$test_root/diagnostic-only.ndjson"
 jq -c 'if .record == "finding" then .evidence = ["CI check phpunit failed", "Pipeline status: pending"] else . end' \
-    "$resolution_fixture" >"$diagnostic_only_stream"
+    "$pipeline_resolution_fixture" >"$diagnostic_only_stream"
 cp -- "$diagnostic_only_stream" "$processed_final"
 assert_false 'a diagnostic-only confirmed finding fails final processing' \
     process_final_ndjson_output "$processed_final"
@@ -771,9 +806,9 @@ assert_eq 'diagnostic_only_finding: finding[FINAL-001]' "$FINDING_CONTRACT_FAILU
 
 resolution_baseline="$test_root/resolution-baseline.json"
 assert_true 'a stream with resolution records produces a repair baseline' \
-    build_final_repair_baseline "$resolution_fixture" "$resolution_baseline"
+    build_final_repair_baseline "$pipeline_resolution_fixture" "$resolution_baseline"
 assert_eq '1' "$(jq '.resolutions | length' "$resolution_baseline")" 'the repair baseline preserves resolution decisions'
-cp -- "$resolution_fixture" "$processed_final"
+cp -- "$pipeline_resolution_fixture" "$processed_final"
 process_final_ndjson_output "$processed_final"
 assert_true 'unchanged resolutions satisfy repair stability' \
     validate_final_repair_stability "$resolution_baseline" "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"

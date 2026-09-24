@@ -28,6 +28,17 @@ prompt_block_lines() {
     ' <<<"$prompt_text"
 }
 
+# The whole of a block, for one that holds a single indented JSON document rather
+# than one record per line -- the preserved baseline a repair prompt carries.
+prompt_block_text() {
+    local name=$1
+    awk -v begin="===== BEGIN ${name} =====" -v end="===== END ${name} =====" '
+        $0 == begin {inside = 1; next}
+        $0 == end {inside = 0}
+        inside {print}
+    ' <<<"$prompt_text"
+}
+
 # Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
 # GNU and BSD tools, unlike sed's GNU-only "0,/re/" address.
 replace_first_literal() {
@@ -226,6 +237,12 @@ emit_valid_ndjson_cross() {
         kept=$(sed -n 's/.*kept the \([0-9][0-9]*\) finding record.*/\1/p' <<<"$prompt_text" | head -n 1)
         [[ -n "$kept" ]] || kept=0
     fi
+    # A repair prompt lists no required refs: it hands back the preserved baseline
+    # instead, and a model repairing the stream keeps the refs that baseline cites.
+    if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
+        refs_json=$(prompt_block_text 'PRESERVED BASELINE' \
+            | jq -c '[.findings[]?.source_refs[]?] | unique_by(.agent, .source_id)' 2>/dev/null || printf '[]')
+    fi
     if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
         source_agent=alpha
         [[ "$agent" != alpha ]] || source_agent=beta
@@ -304,6 +321,12 @@ emit_valid_ndjson_final() {
         primary_id=FINAL-002
         kept=$(sed -n 's/.*kept the \([0-9][0-9]*\) finding record.*/\1/p' <<<"$prompt_text" | head -n 1)
         [[ -n "$kept" ]] || kept=0
+    fi
+    # A repair prompt lists no required refs; the preserved baseline it hands back
+    # carries the ones the repaired stream has to keep.
+    if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
+        refs_json=$(prompt_block_text 'PRESERVED BASELINE' \
+            | jq -c '[.findings[]?.source_refs[]?] | unique_by(.agent, .source_id)' 2>/dev/null || printf '[]')
     fi
     if [[ "$(jq 'length' <<<"$refs_json")" == 0 ]]; then
         refs_json='[{"agent":"alpha","source_id":"alpha:C-001"},{"agent":"beta","source_id":"beta:C-001"}]'

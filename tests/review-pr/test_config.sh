@@ -392,4 +392,60 @@ jq '.agents.claude = {"label": "Claude", enabled: true, type: "claude", model: "
 assert_file_contains <(config_error "$still_invalid") 'automatic' \
     'a value that merely looks like auto is still rejected'
 
+# One failed reviewer used to stop the whole run. The quorum is how many must
+# finish a phase for the run to go on without the rest; two is the floor, because
+# with one reviewer left its own findings would have nobody to check them.
+assert_file_contains "$show_output" 'Reviewer quorum: 2' \
+    'an unconfigured quorum defaults to two'
+for quorum in 2 3 '"all"'; do
+    quorum_ok="$test_root/quorum-ok.json"
+    jq --argjson quorum "$quorum" '.execution.quorum = $quorum' "$config_file" >"$quorum_ok"
+    assert_true "a quorum of ${quorum} is accepted" \
+        "$repo_root/bin/review-pr" --config "$quorum_ok" --show-config
+done
+quorum_all="$test_root/quorum-all.json"
+jq '.execution.quorum = "all"' "$config_file" >"$quorum_all"
+assert_file_contains <("$repo_root/bin/review-pr" --config "$quorum_all" --show-config) 'Reviewer quorum: all' \
+    'a quorum of all is shown as refusing any failure'
+for quorum in 1 0 2.5 '"most"'; do
+    quorum_bad="$test_root/quorum-bad.json"
+    jq --argjson quorum "$quorum" '.execution.quorum = $quorum' "$config_file" >"$quorum_bad"
+    assert_false "a quorum of ${quorum} is refused" \
+        "$repo_root/bin/review-pr" --config "$quorum_bad" --show-config
+done
+quorum_one="$test_root/quorum-one.json"
+jq '.execution.quorum = 1' "$config_file" >"$quorum_one"
+assert_file_contains <(config_error "$quorum_one") 'at least 2' \
+    'the refusal of a quorum of one says what the floor is'
+
+# The synthesizer is the one phase nobody can stand in for, so a different agent
+# may be named to take it over. It has to be a real, enabled agent that is not
+# the synthesizer itself.
+fallback_ok="$test_root/fallback-ok.json"
+jq '.finalization.fallback_synthesizer = "beta" | .finalization.fallback_model = "mock-strong"' "$config_file" >"$fallback_ok"
+assert_true 'an enabled agent other than the synthesizer may be the fallback' \
+    "$repo_root/bin/review-pr" --config "$fallback_ok" --show-config
+assert_file_contains <("$repo_root/bin/review-pr" --config "$fallback_ok" --show-config) 'Fallback synthesizer: beta model=mock-strong' \
+    'the fallback and its model are shown'
+assert_file_contains "$show_output" 'Fallback synthesizer: (none)' \
+    'no fallback is configured unless one is named'
+fallback_self="$test_root/fallback-self.json"
+jq '.finalization.fallback_synthesizer = "alpha"' "$config_file" >"$fallback_self"
+assert_false 'the synthesizer cannot be its own fallback' \
+    "$repo_root/bin/review-pr" --config "$fallback_self" --show-config
+assert_file_contains <(config_error "$fallback_self") 'different agent' \
+    'the refusal says a fallback has to be a different agent'
+fallback_missing="$test_root/fallback-missing.json"
+jq '.finalization.fallback_synthesizer = "ghost"' "$config_file" >"$fallback_missing"
+assert_false 'a fallback with no agent entry is refused' \
+    "$repo_root/bin/review-pr" --config "$fallback_missing" --show-config
+assert_file_contains <(config_error "$fallback_missing") 'ghost' \
+    'the refusal names the missing fallback'
+fallback_disabled="$test_root/fallback-disabled.json"
+jq '.finalization.fallback_synthesizer = "paused"' "$config_file" >"$fallback_disabled"
+assert_false 'a disabled fallback is refused' \
+    "$repo_root/bin/review-pr" --config "$fallback_disabled" --show-config
+assert_file_contains <(config_error "$fallback_disabled") 'disabled' \
+    'the refusal says the fallback is disabled'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

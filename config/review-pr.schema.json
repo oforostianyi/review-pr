@@ -85,6 +85,19 @@
           "type": "string",
           "description": "Reasoning-effort override used only by the configured synthesizer during final synthesis. Omit to inherit agents.<synthesizer>.effort; set an empty string to disable inherited effort. Supported values depend on the synthesizer and model."
         },
+        "fallback_synthesizer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Agent that takes over final synthesis when the synthesizer has used up its attempts. It must be a configured, enabled agent other than the synthesizer. The comparison phase stays with it once it has taken over."
+        },
+        "fallback_model": {
+          "type": "string",
+          "description": "Model the fallback synthesizer uses for final synthesis. Omit to use agents.<fallback_synthesizer>.model."
+        },
+        "fallback_effort": {
+          "type": "string",
+          "description": "Reasoning-effort override for the fallback synthesizer. Omit to inherit agents.<fallback_synthesizer>.effort; set an empty string to disable it."
+        },
         "language": {
           "type": "string",
           "enum": [
@@ -324,6 +337,22 @@
           "type": "integer",
           "minimum": 1,
           "description": "Maximum number of reviewer processes running at once in primary and cross-review phases. Omit for unlimited concurrency."
+        },
+        "quorum": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 2
+            },
+            {
+              "type": "string",
+              "enum": [
+                "all"
+              ]
+            }
+          ],
+          "default": 2,
+          "description": "How many reviewers must finish a primary or cross-review phase for the run to go on without the rest. The minimum and default is 2: with one reviewer left, its own findings would have nobody to check them and would drop out of the final unseen. A failed reviewer is left out of the later phases and named in the manifest and the report. Set \"all\" to stop the run on any failure, as it did before."
         },
         "retry": {
           "type": "object",
