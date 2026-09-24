@@ -433,7 +433,7 @@ Validation enforces the principle that reviewer count never settles a fact: a fa
 
 `reporting.execute_measurements: true` (default `false`, requires `dispute_resolution: true`) makes the orchestrator run the `command` a resolution proposes when its `verification_method` is `command` or `test`. Execution is deliberately narrow: the argv array runs without a shell in the review checkout at the exact PR head; only read-only tools are allow-listed (`rg`, `grep`, `ls`, `cat`, `head`, `wc`, `test`, and `git` with `show`, `log`, `diff`, `ls-tree`, `cat-file`, `grep`, `rev-parse`, `blame`); absolute or parent-directory paths, `rg --pre` and `--hostname-bin`, `git grep --open-files-in-pager` (`-O`), and `git` configuration or directory overrides are refused; each command gets a ten-second portable timeout; stdout and stderr excerpts are bounded to 2000 characters and credential-like values are redacted. The result is attached to the resolution as a separate `measurement` object (`executed`, `skipped_reason`, `exit_status`, excerpts, `duration_ms`, `commit`) in `*-final-resolutions.json`, so the model's `observed` claim and the orchestrator's measurement never mix, and the final report gains a `Measured` column. Refused commands are recorded as `skipped: not_allowlisted` and never run; artifact-only `--rerun-final` skips execution with `checkout_unavailable` because it has no checkout.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. Each structured prompt closes with a `BEFORE YOU SEND` checklist naming every key of each record it may emit, since a record that misses one key is rejected whole. Prose ahead of the first record is dropped before validation, without a model call, and the console says how many lines went. A structurally recoverable response first receives one dedicated field-stable repair pass. A record the model finished writing but mis-punctuated is named in the repair prompt, and the repair must write every such record again: one that leaves a record out is rejected like one that rewrites a preserved finding, and salvage then counts the line as lost. A cross-review that stopped before answering every required source ref receives a continuation pass instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with the kept findings unchanged. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
+There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. Each structured prompt closes with a `BEFORE YOU SEND` checklist naming every key of each record it may emit, since a record that misses one key is rejected whole. Prose ahead of the first record is dropped before validation, without a model call, and the console says how many lines went; so is a key a `complete` record carries beyond its own six. A structurally recoverable response first receives one dedicated field-stable repair pass. A record the model finished writing but mis-punctuated is named in the repair prompt, and the repair must write every such record again: one that leaves a record out is rejected like one that rewrites a preserved finding, and salvage then counts the line as lost. A cross-review that stopped before answering every required source ref receives a continuation pass instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with the kept findings unchanged. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
 
 ### Verification limitations and positive evidence
 
@@ -658,8 +658,10 @@ The orchestrator also gives every primary reviewer, cross-reviewer, and final sy
 Every new full run also writes `work/*-changed-lines.json` from the exact `BASE...HEAD` diff before
 agents start. It is language-independent and keyed by each RIGHT-side repository path. For every
 changed path it records Git status, an old path for a detected rename/copy, binary state, and compact
-inclusive `right_side_ranges` containing only added or modified RIGHT-side lines. Deleted files,
-deletion-only hunks, pure renames, and binary changes therefore have no fabricated line anchors.
+inclusive `right_side_ranges` containing only added or modified RIGHT-side lines, and
+`right_side_hunks`, the RIGHT-side extent of each diff hunk with three lines of context, the way
+GitHub shows the diff. Deleted files, deletion-only hunks, pure renames, and binary changes therefore
+have no fabricated line anchors.
 Name/status parsing is NUL-delimited, so spaces, shell metacharacters, tabs, and newlines in Git paths
 do not change file boundaries.
 
@@ -674,9 +676,13 @@ Line: `41-47`
 ```
 
 For a single line, that line must occur in the file's `right_side_ranges`. For a range, its end is
-the inline anchor and must be changed; the start may be earlier context in the same file. Unchanged
-code may still appear in `Evidence`, but if this PR makes an old defect newly reachable, the finding
-must anchor to the changed reachability line.
+the inline anchor and must be changed; the start may be earlier context in the same file. A range
+that covers changed lines may also end on a context line inside a `right_side_hunks` hunk: git reuses
+old lines where it can, so the closing brace of a new block is often printed as unchanged, and a
+finding anchored to the whole new block would otherwise be rejected for the one line it did not
+invent. A range of context lines alone is never an anchor, and a map recorded before hunks existed
+keeps the stricter rule. Unchanged code may still appear in `Evidence`, but if this PR makes an old
+defect newly reachable, the finding must anchor to the changed reachability line.
 
 A missing test, missing migration, or other genuinely PR-wide omission can avoid a fake line:
 

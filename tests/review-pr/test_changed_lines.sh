@@ -66,6 +66,10 @@ assert_eq 'true' "$(jq -r '.files[] | select(.path == "modified file.txt") | any
     'modified RIGHT-side line is anchorable'
 assert_eq 'false' "$(jq -r '.files[] | select(.path == "modified file.txt") | any(.right_side_ranges[]; .start <= 2 and .["end"] >= 2)' "$CHANGED_LINE_MAP_FILE")" \
     'unchanged context line is excluded from the map'
+assert_eq '[{"start":1,"end":7}]' "$(jq -c '.files[] | select(.path == "modified file.txt") | .right_side_hunks' "$CHANGED_LINE_MAP_FILE")" \
+    'the map records each diff hunk with its context, the way the diff shows it'
+assert_eq '[{"start":4,"end":10}]' "$(jq -c '.files[] | select(.path == "rename-new.txt") | .right_side_hunks' "$CHANGED_LINE_MAP_FILE")" \
+    'and a change inside a rename gets its hunk as well'
 assert_eq 'rename-old.txt' "$(jq -r '.files[] | select(.path == "rename-new.txt") | .old_path' "$CHANGED_LINE_MAP_FILE")" \
     'rename map keeps the old path but keys anchors by the RIGHT-side path'
 assert_eq 'true' "$(jq -r '.files[] | select(.path == "rename-new.txt") | any(.right_side_ranges[]; .start <= 7 and .["end"] >= 7)' "$CHANGED_LINE_MAP_FILE")" \

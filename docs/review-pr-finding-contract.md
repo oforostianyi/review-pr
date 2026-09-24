@@ -394,7 +394,8 @@ keys remain language-independent.
   a finding without `existing_feedback` gets `{"state":"unknown","thread_ids":[]}`, which states
   honestly that the model did not report thread coverage, and a final finding without
   `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
-  Both are filled in before validation, without a model, and the console says so; any other missing
+  Both are filled in before validation, without a model, and the console says so, as is a key a
+  `complete` record carries that the contract does not define, which is dropped. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
   finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array --
   is left out of the baseline and handed back to the repair pass, which sees the broken record in

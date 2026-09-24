@@ -2836,10 +2836,48 @@ extract_right_side_ranges() {
         "$output_file" >/dev/null
 }
 
+# The RIGHT-side extent of each diff hunk, three lines of context included, as
+# GitHub shows the diff. git aligns an insertion with whatever old lines it can
+# reuse, so the closing brace of a new block is often printed as unchanged
+# context: a finding anchored to the whole new block then ends on a line the
+# changed-line ranges do not hold, although it points at exactly the change.
+extract_right_side_hunks() {
+    local output_file=$1
+    shift
+
+    if ! LC_ALL=C git diff \
+        --no-ext-diff \
+        --no-color \
+        --unified=3 \
+        --find-renames \
+        "$BASE_SHA...$HEAD_SHA" \
+        -- "$@" \
+        | awk '
+            /^@@ / {
+                line = $0
+                sub(/^@@ -[^ ]+ \+/, "", line)
+                sub(/ .*/, "", line)
+                count = split(line, range, ",")
+                start = range[1] + 0
+                line_count = (count == 1 ? 1 : range[2] + 0)
+                if (line_count > 0) {
+                    printf "%d\t%d\n", start, start + line_count - 1
+                }
+            }
+        ' \
+        | jq -Rn '[inputs | split("\t") | {start: (.[0] | tonumber), "end": (.[1] | tonumber)}] | sort_by(.start)' \
+        >"$output_file"; then
+        return 1
+    fi
+    jq -e 'type == "array" and all(.[]; .start > 0 and .["end"] >= .start)' "$output_file" >/dev/null
+}
+
 collect_changed_line_map() {
     local temp_map
     local status_file
     local ranges_file
+    local hunks_file
+    local hunks_json
     local entries_json='[]'
     local status_record
     local status_code
@@ -2862,7 +2900,8 @@ collect_changed_line_map() {
     temp_map=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-changed-lines.tmp.XXXXXX")
     status_file=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-changed-lines-status.tmp.XXXXXX")
     ranges_file=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-changed-lines-ranges.tmp.XXXXXX")
-    TEMP_FILES+=("$temp_map" "$status_file" "$ranges_file")
+    hunks_file=$(mktemp "${WORK_DIR}/.${REPORT_STEM}-changed-lines-hunks.tmp.XXXXXX")
+    TEMP_FILES+=("$temp_map" "$status_file" "$ranges_file" "$hunks_file")
 
     if ! LC_ALL=C git diff --name-status -z --find-renames "$BASE_SHA...$HEAD_SHA" >"$status_file"; then
         die 'Could not enumerate changed files for the RIGHT-side line map'
@@ -2900,11 +2939,16 @@ collect_changed_line_map() {
         fi
 
         ranges_json='[]'
+        hunks_json='[]'
         if [[ "$status_code" != D && "$binary_json" != true ]]; then
             if ! extract_right_side_ranges "$ranges_file" "${diff_paths[@]}"; then
                 die "Could not extract RIGHT-side changed lines for: ${path}"
             fi
             ranges_json=$(jq -c . "$ranges_file")
+            if ! extract_right_side_hunks "$hunks_file" "${diff_paths[@]}"; then
+                die "Could not extract RIGHT-side diff hunks for: ${path}"
+            fi
+            hunks_json=$(jq -c . "$hunks_file")
         fi
         line_count=$(jq '[.[] | (.["end"] - .start + 1)] | add // 0' <<<"$ranges_json")
         if (( line_count > 0 )); then
@@ -2920,6 +2964,7 @@ collect_changed_line_map() {
             --arg status "$status_name" \
             --argjson binary "$binary_json" \
             --argjson ranges "$ranges_json" \
+            --argjson hunks "$hunks_json" \
             --argjson line_count "$line_count" \
             --argjson inline_anchorable "$inline_anchorable_json" \
             '. + [{
@@ -2929,6 +2974,7 @@ collect_changed_line_map() {
                 status: $status,
                 binary: $binary,
                 right_side_ranges: $ranges,
+                right_side_hunks: $hunks,
                 right_side_line_count: $line_count,
                 inline_anchorable: $inline_anchorable
             }]' <<<"$entries_json")
@@ -2965,7 +3011,7 @@ collect_changed_line_map() {
             anchor_semantics: {
                 side: "RIGHT",
                 eligible_lines: "added_or_modified",
-                range_rule: "The range end must be an eligible RIGHT-side line; its start may be earlier context within the same file."
+                range_rule: "The range must cover an eligible RIGHT-side line and end on one, or on a context line inside a diff hunk in right_side_hunks; its start may be earlier context within the same file."
             },
             files: $files
         }' >"$temp_map"
@@ -2978,7 +3024,8 @@ collect_changed_line_map() {
         all(.files[];
             (.path | type == "string") and
             (.right_side_ranges | type == "array") and
-            all(.right_side_ranges[]; .start > 0 and .["end"] >= .start)
+            all(.right_side_ranges[]; .start > 0 and .["end"] >= .start) and
+            all((.right_side_hunks // [])[]; .start > 0 and .["end"] >= .start)
         )
     ' "$temp_map" >/dev/null; then
         die 'Generated changed-line map failed structural validation'
@@ -3004,7 +3051,7 @@ append_changed_line_map_to_prompt() {
         || die "Changed-line map is missing or unsafe: ${CHANGED_LINE_MAP_FILE}"
     {
         printf '\n===== BEGIN RIGHT-SIDE CHANGED-LINE MAP =====\n'
-        printf 'This language-independent JSON map is authoritative for inline-capable anchors. Only lines covered by right_side_ranges are added/modified RIGHT-side lines. Supporting evidence may cite unchanged code, but the actionable File/Line anchor must follow the contract above.\n\n'
+        printf 'This language-independent JSON map is authoritative for inline-capable anchors. Only lines covered by right_side_ranges are added/modified RIGHT-side lines. right_side_hunks gives each diff hunk'"'"'s RIGHT-side extent, context lines included: a range that covers changed lines may also end on a context line inside such a hunk, such as the closing brace of a new block that the diff prints as unchanged, but anchor to changed lines wherever you can. Supporting evidence may cite unchanged code, but the actionable File/Line anchor must follow the contract above.\n\n'
         cat -- "$CHANGED_LINE_MAP_FILE"
         printf '\n===== END RIGHT-SIDE CHANGED-LINE MAP =====\n'
     } >>"$prompt_file"
@@ -3383,6 +3430,24 @@ fill_presentation_defaults() {
     fi
 }
 
+# A complete record carries a count, a summary and two lists. A key beyond them
+# -- a reviewer wrote summary_language -- holds nothing the contract reads, and
+# failing the stream over it cost a repair pass. It is dropped, aloud.
+drop_unknown_complete_keys() {
+    local phase=$1 agent=$2 records_file=$3 extra filtered_file
+
+    extra=$(jq -r --arg keys "$COMPLETE_RECORD_KEYS" '($keys | split(", ")) as $known
+        | [.[] | select(.record == "complete") | keys[] | select(IN($known[]) | not)] | unique | join(", ")' \
+        "$records_file" 2>/dev/null) || return 0
+    [[ -n "$extra" ]] || return 0
+    new_temp_file "${phase}-complete-keys"; filtered_file=$NEW_TEMP_FILE
+    jq --arg keys "$COMPLETE_RECORD_KEYS" '($keys | split(", ")) as $known
+        | map(if .record == "complete" then with_entries(select(.key | IN($known[]))) else . end)' \
+        "$records_file" >"$filtered_file" || return 0
+    mv -- "$filtered_file" "$records_file"
+    log "Dropped ${extra}, which the contract does not define, from the complete record in the ${phase} stream${agent:+ from ${agent}}"
+}
+
 log_leading_prose() {
     local count=$1 phase=$2 agent=$3
     local noun=lines
@@ -3467,7 +3532,9 @@ validate_primary_ndjson_records() {
                     any($changed_lines[0].files[];
                         .path == $anchor.file and
                         .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
+                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
+                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
+                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false
@@ -3675,6 +3742,7 @@ process_primary_ndjson_output() {
     fi
     mv -- "$records_array_file" "$records_file"
     fill_presentation_defaults primary "$agent" "$records_file"
+    drop_unknown_complete_keys primary "$agent" "$records_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings primary "$records_file" "$agent"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
         return 1
@@ -3804,7 +3872,9 @@ validate_cross_ndjson_records() {
                     any($changed_lines[0].files[];
                         .path == $anchor.file and
                         .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
+                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
+                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
+                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false
@@ -4015,6 +4085,7 @@ process_cross_ndjson_output() {
     }
     mv -- "$records_array_file" "$records_file"
     fill_presentation_defaults cross "$agent" "$records_file"
+    drop_unknown_complete_keys cross "$agent" "$records_file"
     repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings cross "$records_file" "$agent" "$expected_refs_file"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
@@ -4133,7 +4204,9 @@ validate_final_ndjson_records() {
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
+                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
+                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
+                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false end;
@@ -4786,7 +4859,9 @@ describe_ndjson_validation_failure() {
                 (. as $anchor |
                     any($changed_lines[0].files[];
                         .path == $anchor.file and .inline_anchorable == true and
-                        any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))
+                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
+                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
+                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false end;
@@ -5240,6 +5315,7 @@ process_final_ndjson_output() {
     jq '[.[] | select(.record == "resolution")]' "$records_array_file" >"$resolutions_file"
     jq '[.[] | select(.record != "resolution")]' "$records_array_file" >"$records_file"
     fill_presentation_defaults final "$FINAL_SYNTHESIZER" "$records_file"
+    drop_unknown_complete_keys final "$FINAL_SYNTHESIZER" "$records_file"
     repair_ndjson_source_ref_agents final '' "$records_file" "$expected_refs_file"
     if [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] && (( $(jq 'length' "$resolutions_file") > 0 )); then
         FINDING_CONTRACT_FAILURE_REASON=unexpected_resolution_records
@@ -10425,9 +10501,12 @@ validate_final_anchors() {
                 elif ! jq -e --arg path "$file" '.files | any(.path == $path)' "$CHANGED_LINE_MAP_FILE" >/dev/null; then
                     finding_status=invalid
                     reason=file_not_in_exact_diff
-                elif ! jq -e --arg path "$file" --argjson line "$end_number" '
+                elif ! jq -e --arg path "$file" --argjson start "$start_number" --argjson line "$end_number" '
                     .files
-                    | any(.path == $path and (.right_side_ranges | any(.start <= $line and .["end"] >= $line)))
+                    | any(.path == $path and
+                        (any(.right_side_ranges[]; .start <= $line and .["end"] >= $line)
+                         or (any(.right_side_ranges[]; .start <= $line and .["end"] >= $start)
+                             and any((.right_side_hunks // [])[]; .start <= $line and .["end"] >= $line))))
                 ' "$CHANGED_LINE_MAP_FILE" >/dev/null; then
                     finding_status=invalid
                     reason=line_not_changed_on_right_side

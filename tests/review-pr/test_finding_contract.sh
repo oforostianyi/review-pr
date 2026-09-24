@@ -1298,6 +1298,47 @@ assert_eq 'F-001 F-002' "$(jq -r '[.findings[].source_id] | join(" ")' "${PRIMAR
 assert_file_contains "${PRIMARY_RAW_OUTPUTS[codex]}" 'I am applying the review methodology' \
     'while the raw artifact keeps what the model actually wrote'
 
+# The same rule for a record's own anchor: covering changed lines and ending on a
+# context line of their hunk is an anchor; context alone is not.
+anchor_map="$test_root/changed-lines-with-hunks.json"
+jq '(.files[] | select(.path == "src/Changed.php")) += {right_side_hunks: [{start: 7, "end": 16}]}' \
+    "$test_dir/fixtures/changed-lines-valid.json" >"$anchor_map"
+overrun_stream="$test_root/anchor-overrun.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor.start = 11 | .anchor["end"] = 13'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$overrun_stream"
+REPORT_STEM=fixture-anchor-overrun
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-anchor-overrun-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-anchor-overrun-codex-findings.json"
+assert_false 'a range ending on a context line fails against a map without hunks' \
+    process_primary_ndjson_output "$overrun_stream" codex
+CHANGED_LINE_MAP_FILE=$anchor_map
+assert_true 'and passes where that line lies inside the hunk of the changed lines it covers' \
+    process_primary_ndjson_output "$overrun_stream" codex
+context_stream="$test_root/anchor-context.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor.start = 13 | .anchor["end"] = 14'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$context_stream"
+assert_false 'while a range of context lines alone still fails' \
+    process_primary_ndjson_output "$context_stream" codex
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+
+# A key the complete record does not define is dropped instead of failing the stream.
+extra_complete="$test_root/extra-complete-key.ndjson"
+{
+    sed -n '1,2p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '. + {summary_language: "en"}'
+} >"$extra_complete"
+REPORT_STEM=fixture-extra-complete
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-extra-complete-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-extra-complete-codex-findings.json"
+assert_true 'a complete record with a key the contract does not define is accepted' \
+    process_primary_ndjson_output "$extra_complete" codex
+assert_eq 'Two actionable findings were identified.' "$(jq -r '.summary' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'and what it does define is kept'
+
 # A key that only says how a finding is presented is filled in, not failed on.
 no_feedback="$test_root/no-feedback-source.ndjson"
 {

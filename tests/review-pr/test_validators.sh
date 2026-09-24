@@ -116,6 +116,30 @@ assert_false 'context-only RIGHT-side line is rejected' \
 assert_eq 'line_not_changed_on_right_side' "$(jq -r '.findings[0].reason' "$context_validation")" \
     'invalid context anchor has a machine-readable reason'
 
+# git reuses old lines where it can, so the closing brace of a new block is often
+# printed as unchanged context. A range over the changed lines that ends on such
+# a line points at exactly the change, and the diff hunk lets GitHub place it.
+hunk_map="$test_root/changed-lines-with-hunks.json"
+jq '(.files[] | select(.path == "src/Changed.php")) += {right_side_hunks: [{start: 7, "end": 16}]}' \
+    "$test_dir/fixtures/changed-lines-valid.json" >"$hunk_map"
+overrun_output="$test_root/final-anchor-overrun.md"
+sed 's/^Line: `13`$/Line: `11-13`/' "$test_dir/fixtures/final-anchor-context-invalid.md" >"$overrun_output"
+normalize_final_markdown "$overrun_output"
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+assert_false 'a range ending on a context line is rejected by a map that records no hunks' \
+    validate_final_anchors "$overrun_output" "$test_root/final-anchor-overrun-old.json"
+CHANGED_LINE_MAP_FILE=$hunk_map
+sed 's/^Line: `13`$/Line: `11-13`/' "$test_dir/fixtures/final-anchor-context-invalid.md" >"$overrun_output"
+normalize_final_markdown "$overrun_output"
+assert_true 'and accepted where the context line lies inside the hunk of the changed lines it covers' \
+    validate_final_anchors "$overrun_output" "$test_root/final-anchor-overrun.json"
+context_again="$test_root/final-anchor-context-again.md"
+cp -- "$test_dir/fixtures/final-anchor-context-invalid.md" "$context_again"
+normalize_final_markdown "$context_again"
+assert_false 'while a line of context alone is still no anchor' \
+    validate_final_anchors "$context_again" "$test_root/final-anchor-context-again.json"
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+
 deleted_output="$test_root/final-anchor-deleted-invalid.md"
 deleted_validation="$test_root/final-anchor-deleted-invalid.json"
 sed 's@src/Changed.php@src/Deleted.php@g; s@`13`@`1`@g' \
