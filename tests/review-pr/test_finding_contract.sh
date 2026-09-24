@@ -777,6 +777,19 @@ assert_eq '1' "$(jq '.finding_count' "$FINAL_PROCESSED_FINDINGS_FILE")" \
 assert_file_contains "$processed_final" '<!-- review-pr:dispute-resolutions -->' \
     'the rendered final report carries the dispute-resolution marker'
 
+# On 29031 a finalizer left include_in_rejected_summary out of five findings of
+# six. It only decides whether a rejection is listed among the important ones, so
+# it defaults to false instead of costing the finding.
+jq -c 'if .record == "finding" then del(.include_in_rejected_summary) else . end' \
+    "$pipeline_resolution_fixture" >"$processed_final"
+assert_true 'a final finding that left out include_in_rejected_summary is accepted' \
+    process_final_ndjson_output "$processed_final"
+assert_eq 'false' "$(jq -r '.findings[0].include_in_rejected_summary' "$FINAL_PROCESSED_FINDINGS_FILE")" \
+    'and kept out of the important-rejections list'
+jq -c 'if .record == "finding" then del(.recommendation) else . end' "$pipeline_resolution_fixture" >"$processed_final"
+assert_false 'while a finding that left out its recommendation still fails, since that would be made up' \
+    process_final_ndjson_output "$processed_final"
+
 DISPUTE_RESOLUTION_ENABLED=false
 cp -- "$pipeline_resolution_fixture" "$processed_final"
 assert_false 'resolution records are rejected when the feature is disabled' \
@@ -1284,6 +1297,20 @@ assert_eq 'F-001 F-002' "$(jq -r '[.findings[].source_id] | join(" ")' "${PRIMAR
     'and every record behind them is kept'
 assert_file_contains "${PRIMARY_RAW_OUTPUTS[codex]}" 'I am applying the review methodology' \
     'while the raw artifact keeps what the model actually wrote'
+
+# A key that only says how a finding is presented is filled in, not failed on.
+no_feedback="$test_root/no-feedback-source.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.existing_feedback)'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$no_feedback"
+REPORT_STEM=fixture-no-feedback
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-no-feedback-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-no-feedback-codex-findings.json"
+assert_true 'a finding that left out existing_feedback is accepted' \
+    process_primary_ndjson_output "$no_feedback" codex
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'with its thread coverage recorded as unknown, which is what the model left it'
 
 between="$test_root/prose-between-source.ndjson"
 {

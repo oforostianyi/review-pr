@@ -388,21 +388,24 @@ keys remain language-independent.
   raw artifact keeps them. It is dropped only when a record follows, so a reply that is prose
   throughout still fails, and prose after the first record still fails the stream.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
-  already a parseable object with a unique `source_id` and every substantive field present.
-  Trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
-  completion record are repairable. A finding that lacks only `existing_feedback` is repairable
-  too: the baseline records `{"state":"unknown","thread_ids":[]}`, which states honestly that the
-  model did not report thread coverage. A JSON-looking record the model finished writing but
-  mis-punctuated -- a stray bracket closing a string as if it were an array -- is left out of the
-  baseline and handed back to the repair pass, which sees the broken record in the rejected draft and
-  writes it again. The baseline's `unparsed` list names each such line: its position, its record
-  kind, and the ids it names. The repair prompt lists them, and a repair must bring back every one --
-  the preserved records unchanged and in order, plus exactly one restored record per unparsed line,
-  carrying an id that line named wherever it named one. A repair that leaves one out is rejected
-  like one that rewrites a preserved record, and salvage then counts the line as lost. A `complete`
-  record restored this way keeps the summary the draft wrote. A record torn off mid-token, unknown
-  record types, duplicate completion records, and other missing substantive finding fields remain
-  ineligible because recovery would require guessing what was cut.
+  already a parseable object with a unique `source_id` and every substantive field present. Trailing
+  transport prose, fences, record/schema metadata, and a missing or malformed terminal completion
+  record are repairable. Two keys that only say how a finding is presented are not failed on at all:
+  a finding without `existing_feedback` gets `{"state":"unknown","thread_ids":[]}`, which states
+  honestly that the model did not report thread coverage, and a final finding without
+  `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
+  Both are filled in before validation, without a model, and the console says so; any other missing
+  key still fails its record, because it would have to be made up. A JSON-looking record the model
+  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array --
+  is left out of the baseline and handed back to the repair pass, which sees the broken record in
+  the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
+  position, its record kind, and the ids it names. The repair prompt lists them, and a repair must
+  bring back every one -- the preserved records unchanged and in order, plus exactly one restored
+  record per unparsed line, carrying an id that line named wherever it named one. A repair that
+  leaves one out is rejected like one that rewrites a preserved record, and salvage then counts the
+  line as lost. A `complete` record restored this way keeps the summary the draft wrote. A record
+  torn off mid-token, unknown record types, duplicate completion records, and other missing
+  substantive finding fields remain ineligible because recovery would require guessing what was cut.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,

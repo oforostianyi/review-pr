@@ -3347,6 +3347,41 @@ log_escape_repairs() {
     log "Repaired ${count} invalid JSON ${noun} in the ${phase} stream from ${agent}"
 }
 
+# Two keys say how a finding is presented, not what it claims, and a model that
+# leaves them out loses nothing a reader needs. existing_feedback defaults to
+# "unknown", which says honestly that thread coverage went unreported, and a
+# final finding's include_in_rejected_summary defaults to false, which keeps a
+# rejection out of the important-rejections list. On 29031 a finalizer left the
+# second out of five findings of six, salvage dropped all five, and the review
+# went out with one. Both are filled in here, without a model and aloud; any
+# other missing key still fails its record, because it would have to be made up.
+fill_presentation_defaults() {
+    local phase=$1 agent=$2 records_file=$3
+    local filled_file feedback=0 flags=0 noun
+
+    feedback=$(jq '[.[] | select(.record == "finding" and (has("existing_feedback") | not))] | length' "$records_file" 2>/dev/null) || return 0
+    if [[ "$phase" == final ]]; then
+        flags=$(jq '[.[] | select(.record == "finding" and (has("include_in_rejected_summary") | not))] | length' "$records_file" 2>/dev/null) || return 0
+    fi
+    (( feedback + flags > 0 )) || return 0
+    new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
+    jq --arg phase "$phase" 'map(
+        if .record == "finding" then
+            (if has("existing_feedback") then . else . + {existing_feedback: {state: "unknown", thread_ids: []}} end)
+            | (if $phase == "final" and (has("include_in_rejected_summary") | not)
+               then . + {include_in_rejected_summary: false} else . end)
+        else . end)' "$records_file" >"$filled_file" || return 0
+    mv -- "$filled_file" "$records_file"
+    if (( feedback > 0 )); then
+        noun=findings; (( feedback != 1 )) || noun=finding
+        log "Recorded existing_feedback as unknown for ${feedback} ${phase} ${noun}${agent:+ from ${agent}} that left it out"
+    fi
+    if (( flags > 0 )); then
+        noun=findings; (( flags != 1 )) || noun=finding
+        log "Set include_in_rejected_summary to false for ${flags} final ${noun}${agent:+ from ${agent}} that left it out"
+    fi
+}
+
 log_leading_prose() {
     local count=$1 phase=$2 agent=$3
     local noun=lines
@@ -3638,6 +3673,7 @@ process_primary_ndjson_output() {
         return 1
     fi
     mv -- "$records_array_file" "$records_file"
+    fill_presentation_defaults primary "$agent" "$records_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings primary "$records_file" "$agent"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
         return 1
@@ -3977,6 +4013,7 @@ process_cross_ndjson_output() {
         return 1
     }
     mv -- "$records_array_file" "$records_file"
+    fill_presentation_defaults cross "$agent" "$records_file"
     repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings cross "$records_file" "$agent" "$expected_refs_file"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
@@ -5191,6 +5228,7 @@ process_final_ndjson_output() {
     # the detected disputes, not as findings.
     jq '[.[] | select(.record == "resolution")]' "$records_array_file" >"$resolutions_file"
     jq '[.[] | select(.record != "resolution")]' "$records_array_file" >"$records_file"
+    fill_presentation_defaults final "$FINAL_SYNTHESIZER" "$records_file"
     repair_ndjson_source_ref_agents final '' "$records_file" "$expected_refs_file"
     if [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] && (( $(jq 'length' "$resolutions_file") > 0 )); then
         FINDING_CONTRACT_FAILURE_REASON=unexpected_resolution_records
