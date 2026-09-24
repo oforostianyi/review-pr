@@ -451,8 +451,10 @@ keys remain language-independent.
   quoted code rather than a fresh read of the checkout.
 - Final synthesis has no quorum because it has one author. When the synthesizer has used up its
   attempts, `finalization.fallback_synthesizer` receives the same inputs under a prompt built for
-  it and gets the same attempts. The swap is recorded as `final_fallback` in the manifest and among
-  the review's verification limitations, so the report names who actually wrote it.
+  it and gets the same attempts. It may be the synthesizer itself on a different
+  `finalization.fallback_model`; only the same agent on the same model is refused. The swap is
+  recorded as `final_fallback` in the manifest and among the review's verification limitations, so
+  the report names who actually wrote it.
 - Keep current Markdown validation as a legacy adapter for historical manifests. Legacy fields that
   cannot be recovered become explicit `null`/`unknown`, not invented values.
 

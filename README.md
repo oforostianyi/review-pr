@@ -430,8 +430,10 @@ actually measured.
 
 Final synthesis is the one phase nobody can stand in for, so it takes a fallback instead of a
 quorum. When the synthesizer has used up its attempts, `finalization.fallback_synthesizer` takes the
-same inputs and tries again with a prompt built for it. It must be an enabled agent other than the
-synthesizer; a stronger model is the point.
+same inputs and tries again with a prompt built for it. It must be an enabled agent, and either a
+different agent or the synthesizer itself on a different `fallback_model`: sonnet failing over to
+opus on the same adapter is a real fallback, the same agent on the same model is not. A stronger
+model is the point.
 
 ```json
 "synthesizer": "pi",

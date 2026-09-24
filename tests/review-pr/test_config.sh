@@ -430,11 +430,20 @@ assert_file_contains <("$repo_root/bin/review-pr" --config "$fallback_ok" --show
 assert_file_contains "$show_output" 'Fallback synthesizer: (none)' \
     'no fallback is configured unless one is named'
 fallback_self="$test_root/fallback-self.json"
-jq '.finalization.fallback_synthesizer = "alpha"' "$config_file" >"$fallback_self"
-assert_false 'the synthesizer cannot be its own fallback' \
+jq '.finalization.fallback_synthesizer = "alpha" | .finalization.fallback_model = .finalization.model' "$config_file" >"$fallback_self"
+assert_false 'a fallback that would run the synthesizer again on the same model is refused' \
     "$repo_root/bin/review-pr" --config "$fallback_self" --show-config
-assert_file_contains <(config_error "$fallback_self") 'different agent' \
-    'the refusal says a fallback has to be a different agent'
+assert_file_contains <(config_error "$fallback_self") 'same model' \
+    'the refusal says it would only repeat the synthesizer'
+# The same adapter on a stronger model is a real fallback: sonnet fails, opus
+# takes over. Only a fallback that would run the same agent on the same model
+# again is pointless.
+fallback_same_agent="$test_root/fallback-same-agent.json"
+jq '.finalization.fallback_synthesizer = "alpha" | .finalization.fallback_model = "mock-stronger"' "$config_file" >"$fallback_same_agent"
+assert_true 'the synthesizer may be its own fallback on a different model' \
+    "$repo_root/bin/review-pr" --config "$fallback_same_agent" --show-config
+assert_file_contains <("$repo_root/bin/review-pr" --config "$fallback_same_agent" --show-config) 'Fallback synthesizer: alpha model=mock-stronger' \
+    'and it is shown with the model it would switch to'
 fallback_missing="$test_root/fallback-missing.json"
 jq '.finalization.fallback_synthesizer = "ghost"' "$config_file" >"$fallback_missing"
 assert_false 'a fallback with no agent entry is refused' \

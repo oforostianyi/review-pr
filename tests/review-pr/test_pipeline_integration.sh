@@ -1918,6 +1918,10 @@ run_fallback_synthesis_case() {
         'built for it, not the one made for the synthesizer that failed'
     assert_file_contains "$case_dir/stderr.log" 'handing it to Beta on mock-strong' \
         'the console says the synthesis was handed over'
+    assert_eq 'alpha' "$(jq -r '.final_fallback.from' "$manifest")" \
+        'the manifest names the synthesizer that failed'
+    assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'after alpha on ' \
+        'and the report says which model failed, so a same-agent handover still reads clearly'
     assert_file_contains "$(report_root_of "$work_dir")/${stem}-final.md" 'The final synthesis was written by the fallback agent' \
         'and the published review says who actually wrote it'
 }

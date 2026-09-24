@@ -831,7 +831,10 @@ describe_configuration_problems() {
             ((.finalization.fallback_synthesizer // null) as $fallback
              | if $fallback == null then empty
                elif ($config.agents | has($fallback)) | not then "finalization.fallback_synthesizer \($fallback | tojson) has no entry under agents"
-               elif $fallback == $config.synthesizer then "finalization.fallback_synthesizer is the synthesizer itself; a fallback has to be a different agent"
+               elif $fallback == $config.synthesizer
+                    and (($config.finalization.fallback_model // $config.agents[$fallback].model // "")
+                         == ($config.finalization.model // $config.agents[$config.synthesizer].model // ""))
+               then "finalization.fallback_synthesizer runs the synthesizer again on the same model; a fallback needs a different agent or a different fallback_model"
                elif ($config.agents[$fallback] | if type == "object" and has("enabled") then .enabled else true end) != true
                then "finalization.fallback_synthesizer \($fallback | tojson) is disabled; the agent that takes over a failed synthesis must be enabled"
                else empty end),
@@ -1124,7 +1127,10 @@ die_with_configuration_problems() {
         (. as $config
          | ($config.finalization.fallback_synthesizer // null) as $fallback
          | $fallback == null or
-           (($config.agents | has($fallback)) and $fallback != $config.synthesizer and
+           (($config.agents | has($fallback)) and
+            ($fallback != $config.synthesizer
+             or (($config.finalization.fallback_model // $config.agents[$fallback].model // "")
+                 != ($config.finalization.model // $config.agents[$config.synthesizer].model // ""))) and
             (($config.agents[$fallback] | if type == "object" and has("enabled") then .enabled else true end) == true))) and
         (. as $config
          | (($config.agents[$config.synthesizer].type // $config.synthesizer)) as $synthesizer_type
@@ -4420,7 +4426,8 @@ collect_orchestrator_diagnostics() {
           (($manifest.final_fallback // null) | select(. != null) |
             rec("final_synthesis_fallback"; "phase"; "final synthesis"; .to;
                 ("written by " + .to + (if .model == null then "" else " on " + .model end) +
-                 " after " + .from + " failed: " + (.reason // "unknown reason")); [])),
+                 " after " + .from + (if (.from_model // null) == null then "" else " on " + .from_model end) +
+                 " failed: " + (.reason // "unknown reason")); [])),
           (($manifest.agent_losses // [])[] |
             rec("reviewer_dropped"; "phase"; .phase; .agent;
                 ("the run went on without this reviewer: " + (.reason // "unknown reason")); [])),
@@ -10942,6 +10949,7 @@ run_final_synthesis_attempts() {
 run_fallback_final_synthesis() {
     local error_log=$1
     local failed_synthesizer=$FINAL_SYNTHESIZER failed_reason=$FINAL_FAILURE_REASON
+    local failed_model=${FINALIZATION_MODEL:-${AGENT_MODELS[$FINAL_SYNTHESIZER]:-}}
     # The full reason can run to kilobytes of per-record diagnostics. It is already
     # on the line above and in the attempt's error log; the handover says what
     # kind of failure it was, and the report must stay readable.
@@ -10953,12 +10961,14 @@ run_fallback_final_synthesis() {
     FINALIZATION_MODEL=${FALLBACK_MODEL:-${AGENT_MODELS[$FALLBACK_SYNTHESIZER]:-}}
     FINALIZATION_EFFORT=$FALLBACK_EFFORT
     FINALIZATION_EFFORT_CONFIGURED=$FALLBACK_EFFORT_CONFIGURED
-    log "Final synthesis by $(agent_label "$failed_synthesizer") failed (${short_reason}); handing it to $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
+    log "Final synthesis by $(agent_label "$failed_synthesizer")${failed_model:+ on ${failed_model}} failed (${short_reason}); handing it to $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
     if [[ -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]]; then
         atomic_manifest_update \
-            '.final_fallback = {from: $from, to: $to, model: (if $model == "" then null else $model end),
+            '.final_fallback = {from: $from, from_model: (if $from_model == "" then null else $from_model end),
+                                to: $to, model: (if $model == "" then null else $model end),
                                 reason: $reason, detail: $detail}' \
             --arg from "$failed_synthesizer" \
+            --arg from_model "$failed_model" \
             --arg to "$FINAL_SYNTHESIZER" \
             --arg model "$FINALIZATION_MODEL" \
             --arg reason "$short_reason" \

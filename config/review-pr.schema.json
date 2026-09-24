@@ -88,7 +88,7 @@
         "fallback_synthesizer": {
           "type": "string",
           "pattern": "^[A-Za-z0-9._-]+$",
-          "description": "Agent that takes over final synthesis when the synthesizer has used up its attempts. It must be a configured, enabled agent other than the synthesizer. The comparison phase stays with it once it has taken over."
+          "description": "Agent that takes over final synthesis when the synthesizer has used up its attempts. It must be a configured, enabled agent, and either a different agent or the synthesizer on a different fallback_model -- sonnet failing over to opus on the same adapter is a real fallback; the same agent on the same model is not. The comparison phase stays with it once it has taken over."
         },
         "fallback_model": {
           "type": "string",
