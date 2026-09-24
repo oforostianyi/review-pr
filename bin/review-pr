@@ -6150,6 +6150,45 @@ preserve_agent_failure_artifacts() {
     fi
 }
 
+# The keys of each ndjson-v1 record as the closing checklist states them. The
+# validators hold the same sets, and test_finding_contract checks that valid
+# records carry exactly these keys.
+readonly PRIMARY_FINDING_KEYS='record, schema_version, source_id, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback'
+readonly CROSS_FINDING_KEYS='record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback'
+readonly FINAL_FINDING_KEYS='record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary'
+readonly RESOLUTION_RECORD_KEYS='record, schema_version, dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, limitations'
+readonly COMPLETE_RECORD_KEYS='record, schema_version, finding_count, summary, verification_limitations, positive_evidence'
+
+# The last thing a structured phase prompt says. The key lists sit in the middle
+# of a long prompt, under the skill, its checklists and the repository facts, and
+# a model that reaches its answer after dozens of tool calls may rebuild a record
+# from memory: on 29031 a reviewer returned two otherwise complete findings
+# without recommendation, and each was rejected whole. The check restates every
+# list where the model reads it last.
+append_record_checklist_to_prompt() {
+    local prompt_file=$1 phase=$2 finding_keys
+
+    case "$phase" in
+        primary) finding_keys=$PRIMARY_FINDING_KEYS ;;
+        cross) finding_keys=$CROSS_FINDING_KEYS ;;
+        final) finding_keys=$FINAL_FINDING_KEYS ;;
+        *) return 1 ;;
+    esac
+    {
+        printf '\n===== BEFORE YOU SEND =====\n'
+        printf 'Check every record against its key list before you send the stream. Every key is present in every record -- where the contract lets a value be empty, write the empty value instead of leaving the key out -- and no other key is added. A record that misses one key is rejected whole, however good the rest of it is.\n'
+        printf -- '- finding: %s\n' "$finding_keys"
+        if [[ "$phase" == final && "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
+            printf -- '- resolution, when a REQUIRED RESOLUTIONS block is present: %s\n' "$RESOLUTION_RECORD_KEYS"
+        fi
+        printf -- '- complete: %s\n' "$COMPLETE_RECORD_KEYS"
+        if [[ "$phase" == primary ]]; then
+            printf 'In this review title, claim, failure_scenario, recommendation and category are never empty. A finding with no fix to propose still has a recommendation: say what to check, measure or decide.\n'
+        fi
+        printf '===== END BEFORE YOU SEND =====\n'
+    } >>"$prompt_file"
+}
+
 write_primary_prompt() {
     local reviewer=$1
     local prompt_file=$2
@@ -6227,6 +6266,9 @@ EOF
         append_changed_line_map_to_prompt "$prompt_file"
     fi
     append_github_context_to_prompt "$prompt_file"
+    if [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        append_record_checklist_to_prompt "$prompt_file" primary
+    fi
 }
 
 write_cross_prompt() {
@@ -6273,7 +6315,7 @@ EOF
         output_contract_block=$(cat <<'EOF'
 Output contract: ndjson-v1. This orchestrator contract overrides Markdown formatting requested by a skill or custom prompt. Return only newline-delimited JSON: one complete JSON object per physical line, with no fence, preamble, commentary, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment. Every backslash inside a string value must be doubled: a PHP class name is written "GuzzleHttp\\Handler\\MockHandler", never "GuzzleHttp\Handler\MockHandler", which is not valid JSON and rejects the whole record.
 
-Classify every supplied primary source finding. Each output finding has the standard finding keys plus source_refs. source_refs is a non-empty unique array of objects with exactly the keys agent and source_id, each one copied verbatim from the record_ref of a supplied input finding. Never build the pair yourself and never decorate either value: an agent key is exactly what record_ref says, such as claude, never a phrase like cross-review-claude. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
+Classify every supplied primary source finding. Each output finding has exactly these keys: record, schema_version, source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback. source_refs is a non-empty unique array of objects with exactly the keys agent and source_id, each one copied verbatim from the record_ref of a supplied input finding. Never build the pair yourself and never decorate either value: an agent key is exactly what record_ref says, such as claude, never a phrase like cross-review-claude. Every supplied agent/source_id pair must appear in at least one output record and no unknown pair may appear. Merge genuine duplicates into one record with multiple source_refs. Split a compound source claim only when necessary for independent classification; the same source ref may then appear in multiple records. Do not introduce a new finding without an input source ref.
 
 - record must be "finding", schema_version 1, and source_id unique within this cross-review.
 - Every supplied primary record carries record_ref, the exact {"agent":...,"source_id":...} object to copy into source_refs when you classify it. Copy it verbatim; never pair an id with an agent key yourself.
@@ -6374,6 +6416,9 @@ EOF
     fi
 
     append_github_context_to_prompt "$prompt_file"
+    if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        append_record_checklist_to_prompt "$prompt_file" cross
+    fi
 }
 
 append_required_source_refs_to_prompt() {
@@ -6656,6 +6701,9 @@ EOF
 
     if [[ "$RERUN_FINAL" != true ]]; then
         append_github_context_to_prompt "$prompt_file"
+    fi
+    if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+        append_record_checklist_to_prompt "$prompt_file" final
     fi
 }
 

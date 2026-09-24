@@ -1234,6 +1234,34 @@ replace_first_literal '"state":"new","thread_ids":[]' '"state":"confirmed-existi
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
 assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
 
+# The closing checklist restates the key lists where a model reads them last, so
+# a list that drifted from what the validators accept would teach the very
+# mistake it is there to catch. Valid records must carry exactly these keys.
+key_set() { tr -d ' ' <<<"$1" | tr ',' '\n' | sort | paste -sd, -; }
+assert_eq "$(key_set "$PRIMARY_FINDING_KEYS")" \
+    "$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -r 'keys | join(",")')" \
+    'the checklist lists exactly the keys of a valid primary finding'
+assert_eq "$(key_set "$COMPLETE_RECORD_KEYS")" \
+    "$(tail -n 1 "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -r 'keys | join(",")')" \
+    'and of a valid complete record'
+assert_eq "$(key_set "$CROSS_FINDING_KEYS")" "$(jq -r '.[0] | keys | join(",")' "$cross_records")" \
+    'and of a valid cross-review finding'
+assert_eq "$(key_set "$FINAL_FINDING_KEYS")" \
+    "$(jq -r 'select(.record == "finding") | keys | join(",")' "$resolution_fixture")" \
+    'and of a valid final finding'
+assert_eq "$(key_set "$RESOLUTION_RECORD_KEYS")" \
+    "$(jq -r 'select(.record == "resolution") | keys | join(",")' "$resolution_fixture")" \
+    'and of a valid resolution record'
+checklist_prompt="$test_root/checklist-prompt.txt"
+: >"$checklist_prompt"
+append_record_checklist_to_prompt "$checklist_prompt" primary
+assert_eq '===== END BEFORE YOU SEND =====' "$(tail -n 1 "$checklist_prompt")" \
+    'the checklist closes the prompt'
+assert_file_contains "$checklist_prompt" "- finding: ${PRIMARY_FINDING_KEYS}" \
+    'and names every finding key'
+assert_file_contains "$checklist_prompt" 'still has a recommendation' \
+    'and tells a primary reviewer what to write when there is no fix to propose'
+
 # Prose ahead of the first record is dropped without a model. Codex sends a note
 # before each tool call, and each note is an agent message of its own that is
 # joined with the answer, so most Codex reviews opened with a few lines like

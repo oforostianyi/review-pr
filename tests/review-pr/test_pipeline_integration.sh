@@ -869,6 +869,8 @@ run_ndjson_cross_case() {
         'upstream provenance stays visible and stays distinct from the ref to cite'
 
     for contract_prompt in primary-review-alpha cross-review-alpha final-synthesis-alpha; do
+        assert_eq '===== END BEFORE YOU SEND =====' "$(tail -n 1 "$capture/${contract_prompt}-attempt-1.prompt")" \
+            "the ${contract_prompt%%-*} prompt ends with the key checklist"
         assert_file_contains "$capture/${contract_prompt}-attempt-1.prompt" \
             'verification_limitations and positive_evidence are arrays of strings' \
             "the ${contract_prompt%%-*} contract states the terminal record's array element type"
@@ -876,6 +878,10 @@ run_ndjson_cross_case() {
             'names the file and the symbol inside that string' \
             "the ${contract_prompt%%-*} contract shows how one positive_evidence string carries a file and a symbol"
     done
+    assert_file_contains "$capture/cross-review-alpha-attempt-1.prompt" '- finding: record, schema_version, source_id, source_refs, title' \
+        'the cross-review checklist lists source_refs among the finding keys'
+    assert_file_contains "$capture/final-synthesis-alpha-attempt-1.prompt" 'contributing_agents, verification_limitations, existing_feedback, include_in_rejected_summary' \
+        'and the final checklist lists include_in_rejected_summary'
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-cross-beta-usage.json")" \
         'structured cross-review usage includes generation and bounded repair passes'
     assert_file_exists "$work_dir/${stem}-cross-beta-error-schema-repair-attempt-1-source-raw.ndjson" \

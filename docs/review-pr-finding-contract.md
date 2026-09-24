@@ -378,6 +378,10 @@ keys remain language-independent.
   those records as diagnostics; never publish them as a successful review. They may still seed one
   continuation pass, described below, which republishes them only as part of a merged stream that
   passes the full contract.
+- Every structured phase prompt ends with a `BEFORE YOU SEND` block that restates the keys of each
+  record the phase may emit. The lists appear earlier in the contract too, but that is mid-prompt,
+  under the skill and the repository facts, and a model that answers after dozens of tool calls may
+  rebuild a record from memory and drop a key. Valid fixtures are tested against the same lists.
 - Prose ahead of the first record is dropped before validation, without a model: an announcement
   such as "Here is the review:", or the progress notes Codex sends before tool calls, which arrive
   as agent messages of their own and are joined with the answer. The console counts the lines; the
