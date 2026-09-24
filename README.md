@@ -419,7 +419,8 @@ not handed to anyone. One that fails only its cross-review stays a primary sourc
 checked its findings. Either way the loss is recorded rather than absorbed. The console says who was
 left out and why, the manifest gains an `agent_losses` entry, and the published review lists the
 reviewer among its verification limitations. Resuming the run does not retry a reviewer the quorum
-already set aside.
+already set aside, and a `--rerun-final` of the run works from the cross-reviews it has and names
+the same loss in its own report.
 
 The finalizer does not review the pull request a second time. Cross-review has already checked each
 finding against the code, so the finalizer checks in proportion to the stakes: it settles a factual
@@ -468,6 +469,8 @@ To re-synthesize a completed historical run without touching Git or GitHub, sele
 ```bash
 review-pr --rerun-final repository#123 --run 20260901-154503-CEST
 ```
+
+`--run last` selects the newest run whose primary and cross-review phases completed, and the log names it.
 
 Manifest-backed final reruns are artifact-only: metadata comes from the source manifest, and its preserved cross-review reports plus repository-facts snapshot are supplied to the finalizer. The current PR head may have changed. No fetch, checkout, branch switch, GitHub request, or current-source inspection is performed. The legacy `--force --run` compatibility path is the exception because pre-manifest artifacts lack reliable recorded metadata.
 
@@ -558,7 +561,9 @@ A team overlay is an ordinary directory tree that each member copies into place,
    the reviewed repository itself, so a finding can cite an explicit rule with its path.
 
 Nothing in the overlay is executed: skill text is appended to the agent prompt as methodology, and
-the orchestrated-mode safety rules in the core prompt take precedence over it.
+the core prompt takes precedence over it for safety, persistence, the output format, and the scope
+of each phase. A skill that says every one of its steps runs does not turn a cross-review or a final
+synthesis into a second full review; what a later phase checks again is the prompt's decision.
 
 Review repository and config can also be overridden without editing JSON:
 

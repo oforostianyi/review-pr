@@ -402,6 +402,18 @@ changed_cross_canonical="$test_root/cross-changed-classification.json"
 jq '.findings[0].classification = "UNCERTAIN" | .findings[0].severity = null' "$cross_canonical" >"$changed_cross_canonical"
 assert_false 'cross-review repair stability rejects reclassification' \
     validate_cross_repair_stability "$cross_repair_baseline" "$changed_cross_canonical"
+cross_dirty="$test_root/cross-dirty.ndjson"
+{
+    jq -c '.[0]' "$cross_records" | sed 's/}$/]}/'
+    jq -c '.[1]' "$cross_records"
+} >"$cross_dirty"
+assert_true 'a cross-review with an unreadable finding still yields a repair baseline' \
+    build_cross_repair_baseline "$cross_dirty" "$test_root/cross-dirty-baseline.json"
+assert_true 'and a repair that writes that finding again is accepted' \
+    validate_cross_repair_stability "$test_root/cross-dirty-baseline.json" "$cross_canonical"
+jq '.findings = [] | .finding_count = 0' "$cross_canonical" >"$test_root/cross-dirty-dropped.json"
+assert_false 'while one that drops it is rejected' \
+    validate_cross_repair_stability "$test_root/cross-dirty-baseline.json" "$test_root/cross-dirty-dropped.json"
 
 REVIEW_AGENTS=(alpha)
 CROSS_FINDINGS_OUTPUTS[alpha]="$cross_canonical"
@@ -781,6 +793,68 @@ assert_false 'an unmeasured factual resolution fails final processing' \
 assert_eq 'dispute_resolution_validation_failed: resolution[dispute:beta:beta:F-001].verification_method' \
     "$FINDING_CONTRACT_FAILURE_REASON" 'final processing exposes the resolution diagnostic'
 
+# A confirmed finding over a factual dispute nobody measured is a claim about
+# the code, and salvage must not publish it. It once did: one stray line of prose
+# counted as "salvage removed something", the whole dispute table was dropped,
+# and the confirmed P1 went out with nothing left to hold it back.
+unresolved_stream="$test_root/unresolved-factual.ndjson"
+jq -c 'if .record == "resolution" then .resolution_status = "uncertain" else . end' "$pipeline_resolution_fixture" >"$unresolved_stream"
+cp -- "$unresolved_stream" "$processed_final"
+assert_false 'a confirmed finding over an unresolved factual dispute is refused' \
+    process_final_ndjson_output "$processed_final"
+{ printf 'Here is the requested final synthesis:\n'; cat -- "$unresolved_stream"; } >"$processed_final"
+assert_false 'and one stray line in front does not buy it a way through salvage' \
+    run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$processed_final"
+assert_true 'the refusal is still the dispute rule, not a formatting complaint' \
+    grep -q 'confirmed_over_unresolved_factual' <<<"$FINDING_CONTRACT_FAILURE_REASON"
+
+# What salvage may forgive is narrower: the resolution of a finding it dropped,
+# and a dispute nothing that survived still covers. The rest is validated again.
+orphan_root="$test_root/orphans"
+mkdir -p -- "$orphan_root"
+printf '%s\n' '[{"dispute_id":"D1","final_source_id":"F-dropped"},{"dispute_id":"D2","final_source_id":"F-kept"}]' >"$orphan_root/resolutions.json"
+printf '%s\n' '[{"dispute_id":"D1","conflicting_refs":[{"agent":"a","source_id":"x01"},{"agent":"b","source_id":"x02"}]},{"dispute_id":"D2","conflicting_refs":[{"agent":"a","source_id":"x03"},{"agent":"b","source_id":"x04"}]}]' >"$orphan_root/disputes.json"
+printf '%s\n' '{"findings":[{"source_id":"F-kept","source_refs":[{"agent":"a","source_id":"x03"},{"agent":"b","source_id":"x04"}]}]}' >"$orphan_root/canonical.json"
+NDJSON_SALVAGE_DROPPED_IDS=()
+assert_false 'with no finding dropped, nothing is forgiven' \
+    salvage_orphaned_resolutions "$orphan_root/resolutions.json" "$orphan_root/canonical.json" "$orphan_root/disputes.json"
+NDJSON_SALVAGE_DROPPED_IDS=(F-dropped)
+assert_true 'with a finding dropped, its resolution can go' \
+    salvage_orphaned_resolutions "$orphan_root/resolutions.json" "$orphan_root/canonical.json" "$orphan_root/disputes.json"
+assert_eq 'D2' "$(jq -r '[.[].dispute_id] | join(",")' "$orphan_root/resolutions.json")" \
+    'only the resolution of the dropped finding is removed'
+assert_eq 'D2' "$(jq -r '[.[].dispute_id] | join(",")' "$orphan_root/disputes.json")" \
+    'and its dispute, which nothing that survived still covers'
+assert_eq 1 "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS" \
+    'the resolutions let go are counted, so the report can name them'
+printf '%s\n' '[{"dispute_id":"D1","final_source_id":"F-dropped"}]' >"$orphan_root/resolutions.json"
+printf '%s\n' '[{"dispute_id":"D1","conflicting_refs":[{"agent":"a","source_id":"x01"},{"agent":"b","source_id":"x02"}]}]' >"$orphan_root/disputes.json"
+printf '%s\n' '{"findings":[{"source_id":"F-other","source_refs":[{"agent":"a","source_id":"x01"}]}]}' >"$orphan_root/canonical.json"
+salvage_orphaned_resolutions "$orphan_root/resolutions.json" "$orphan_root/canonical.json" "$orphan_root/disputes.json"
+assert_eq 'D1' "$(jq -r '[.[].dispute_id] | join(",")' "$orphan_root/disputes.json")" \
+    'a dispute a surviving finding still covers stays, so it fails as unresolved instead of vanishing'
+
+# A finding can also be lost with a line that did not parse, and a resolution may
+# name it. Salvage keeps every id such a line names, so that resolution goes with
+# the line instead of the phase failing over a finding it already counted as lost.
+unreadable_final="$test_root/final-unreadable-finding.ndjson"
+sed '/"record":"finding"/ s/}$/]}/' "$pipeline_resolution_fixture" >"$unreadable_final"
+run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$unreadable_final" || true
+assert_true 'salvage keeps the ids an unreadable finding line names' \
+    grep -qx 'FINAL-001' <<<"$(printf '%s\n' "${NDJSON_SALVAGE_UNREADABLE_IDS[@]}")"
+printf '%s\n' '[{"dispute_id":"D1","final_source_id":"F-dropped"},{"dispute_id":"D2","final_source_id":"F-kept"}]' >"$orphan_root/resolutions.json"
+printf '%s\n' '[{"dispute_id":"D1","conflicting_refs":[{"agent":"a","source_id":"x01"},{"agent":"b","source_id":"x02"}]},{"dispute_id":"D2","conflicting_refs":[{"agent":"a","source_id":"x03"},{"agent":"b","source_id":"x04"}]}]' >"$orphan_root/disputes.json"
+printf '%s\n' '{"findings":[{"source_id":"F-kept","source_refs":[{"agent":"a","source_id":"x03"},{"agent":"b","source_id":"x04"}]}]}' >"$orphan_root/canonical.json"
+NDJSON_SALVAGE_DROPPED_IDS=()
+NDJSON_SALVAGE_UNREADABLE_IDS=(F-dropped)
+assert_true 'and a resolution naming a finding lost that way goes with it' \
+    salvage_orphaned_resolutions "$orphan_root/resolutions.json" "$orphan_root/canonical.json" "$orphan_root/disputes.json"
+assert_eq 'D2' "$(jq -r '[.[].dispute_id] | join(",")' "$orphan_root/resolutions.json")" \
+    'while the resolution of the finding that survived stays'
+NDJSON_SALVAGE_DROPPED_IDS=()
+NDJSON_SALVAGE_UNREADABLE_IDS=()
+NDJSON_SALVAGE_DROPPED_RESOLUTIONS=0
+
 diagnostic_only_canonical="$test_root/diagnostic-only-final.json"
 jq '.findings[0].source_id = "F-9" | .findings[0].evidence = ["CI check phpunit failed", "Pipeline status: pending"]' \
     "$FINAL_PROCESSED_FINDINGS_FILE" >"$diagnostic_only_canonical"
@@ -816,6 +890,26 @@ changed_resolutions="$test_root/changed-resolutions.json"
 jq '.resolutions[0].resolution_status = "uncertain"' "$FINAL_PROCESSED_RESOLUTIONS_FILE" >"$changed_resolutions"
 assert_false 'repair stability rejects a changed resolution decision' \
     validate_final_repair_stability "$resolution_baseline" "$FINAL_PROCESSED_FINDINGS_FILE" "$changed_resolutions"
+# A resolution that did not parse is held to the same rule as a finding: a
+# repair that dropped it would leave its dispute undecided without a word.
+dirty_resolution_stream="$test_root/final-dirty-resolution.ndjson"
+sed '/"record":"resolution"/ s/}$/]}/' "$pipeline_resolution_fixture" >"$dirty_resolution_stream"
+assert_true 'a final stream with an unreadable resolution still yields a repair baseline' \
+    build_final_repair_baseline "$dirty_resolution_stream" "$test_root/final-dirty-resolution-baseline.json"
+assert_eq 'resolution dispute:beta:beta:F-001' \
+    "$(jq -r '.unparsed[0] | "\(.record) \(.dispute_ids[0])"' "$test_root/final-dirty-resolution-baseline.json")" \
+    'the baseline knows which dispute the unreadable line decided'
+assert_true 'a repair that writes the resolution again is accepted' \
+    validate_final_repair_stability "$test_root/final-dirty-resolution-baseline.json" \
+        "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"
+jq '.resolutions = []' "$FINAL_PROCESSED_RESOLUTIONS_FILE" >"$test_root/final-dirty-resolution-dropped.json"
+assert_false 'while one that drops it is rejected' \
+    validate_final_repair_stability "$test_root/final-dirty-resolution-baseline.json" \
+        "$FINAL_PROCESSED_FINDINGS_FILE" "$test_root/final-dirty-resolution-dropped.json"
+write_final_finding_repair_prompt "$test_root/final-dirty-resolution-prompt.txt" invalid_json_line_2 \
+    "$test_root/final-dirty-resolution-baseline.json" "$dirty_resolution_stream"
+assert_file_contains "$test_root/final-dirty-resolution-prompt.txt" '(resolution, dispute_id "dispute:beta:beta:F-001")' \
+    'the final repair prompt names the resolution it has to write again'
 assert_true 'a stream without resolution records still satisfies the two-argument stability check' \
     validate_final_repair_stability "$final_repair_baseline" "$final_canonical"
 resolution_final_canonical_full=$FINAL_PROCESSED_FINDINGS_FILE
@@ -857,6 +951,20 @@ assert_eq 'allowed' "$(measurement_command_policy '["git","show","HEAD:sample.tx
 assert_eq 'not_allowlisted' "$(measurement_command_policy '["docker","compose","exec","db","mysql"]')" 'runtime tools are not allow-listed'
 assert_eq 'git_subcommand_not_allowlisted' "$(measurement_command_policy '["git","push","origin","main"]')" 'writing git subcommands are refused'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["rg","--pre","sh","needle","sample.txt"]')" 'preprocessor options that execute programs are refused'
+# git grep opens its matches in a "pager" that can be any command, and an
+# independent review reproduced it creating a file. rg has a second such option,
+# and -O on a diff reads an order file from anywhere: a value attached to a short
+# option never reaches the path checks.
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","grep","--open-files-in-pager=touch sentinel","original"]')" \
+    "git grep's pager option, which runs any command, is refused"
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","grep","-Otouch","original"]')" \
+    'and so is its short form'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","diff","-O/etc/passwd"]')" \
+    'as is a diff order file, which would be read from outside the checkout'
+assert_eq 'unsafe_argument' "$(measurement_command_policy '["rg","--hostname-bin=touch","needle"]')" \
+    "rg's hostname helper, which runs a program, is refused"
+assert_eq 'allowed' "$(measurement_command_policy '["git","grep","-n","needle"]')" \
+    'while an ordinary git grep is still allowed'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","../outside.txt"]')" 'parent-directory paths are refused'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["cat","/etc/hosts"]')" 'absolute paths are refused'
 assert_eq 'unsafe_argument' "$(measurement_command_policy '["git","-c","core.pager=sh","show","HEAD"]')" 'git configuration overrides are refused'
@@ -1159,6 +1267,59 @@ assert_eq 1 "$NDJSON_BASELINE_DIRTY_RECORDS" \
     'and the record it could not read is counted, not silently forgotten'
 assert_false 'a stream torn off mid-record is still refused outright' \
     build_primary_repair_baseline "$test_root/baseline-torn.ndjson" "$test_root/baseline-torn.md"
+
+# The baseline names every line it left out, and the repair has to put each one
+# back. The prompt used to say "add nothing", so a model that obeyed dropped the
+# record, and the check -- comparing only what the baseline kept -- accepted the
+# loss as faithful while it refused the model that restored the record.
+assert_eq '{"line":2,"record":"finding","source_ids":["F-009"],"dispute_ids":[]}' \
+    "$(jq -c '.unparsed[0]' "$test_root/baseline-dirty.md")" \
+    'the baseline names the line it could not read, its kind, and the id it carries'
+fixture_first=$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson")
+fixture_second=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson")
+fixture_complete=$(sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson")
+printf '%s\n%s\n%s\n' "$fixture_first" "${fixture_second%\}}]}" "$fixture_complete" >"$test_root/restore-one.ndjson"
+build_primary_repair_baseline "$test_root/restore-one.ndjson" "$test_root/restore-one-baseline.json"
+assert_true 'a repair that writes the unreadable finding again is accepted' \
+    validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$valid_canonical"
+jq 'del(.findings[1])' "$valid_canonical" >"$test_root/restore-one-dropped.json"
+assert_false 'while one that leaves it out is rejected, so that salvage counts the loss' \
+    validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$test_root/restore-one-dropped.json"
+jq '.findings[1].source_id = "F-003"' "$valid_canonical" >"$test_root/restore-one-invented.json"
+assert_false 'and so is one that puts a different finding in its place' \
+    validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$test_root/restore-one-invented.json"
+jq '.findings[0].claim = "The repair rewrote the claim."' "$valid_canonical" >"$test_root/restore-one-rewritten.json"
+assert_false 'and restoring one record does not license changing another' \
+    validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$test_root/restore-one-rewritten.json"
+
+printf '%s\n%s\n%s\n' "${fixture_first%\}}]}" "${fixture_second%\}}]}" "$fixture_complete" >"$test_root/restore-two.ndjson"
+build_primary_repair_baseline "$test_root/restore-two.ndjson" "$test_root/restore-two-baseline.json"
+assert_true 'every unreadable finding written again is accepted' \
+    validate_primary_repair_stability "$test_root/restore-two-baseline.json" "$valid_canonical"
+assert_false 'one of two written again is not' \
+    validate_primary_repair_stability "$test_root/restore-two-baseline.json" "$test_root/restore-one-dropped.json"
+
+# The terminal record is restored the same way: its summary comes back from the
+# draft instead of being replaced by the baseline's empty placeholder.
+printf '%s\n%s\n%s\n' "$fixture_first" "$fixture_second" "${fixture_complete%\}}]}" >"$test_root/restore-complete.ndjson"
+build_primary_repair_baseline "$test_root/restore-complete.ndjson" "$test_root/restore-complete-baseline.json"
+assert_true 'a complete record written again with the summary the draft gave is accepted' \
+    validate_primary_repair_stability "$test_root/restore-complete-baseline.json" "$valid_canonical"
+
+write_primary_finding_repair_prompt "$test_root/restore-one-prompt.txt" invalid_json_line_2 \
+    "$test_root/restore-one-baseline.json" "$test_root/restore-one.ndjson"
+assert_file_contains "$test_root/restore-one-prompt.txt" 'line 2 (finding, source_id "F-002")' \
+    'the repair prompt names the line the model has to write again'
+assert_file_contains "$test_root/restore-one-prompt.txt" 'every one of them must come back' \
+    'and says that a repair leaving it out is rejected'
+write_primary_finding_repair_prompt "$test_root/clean-repair-prompt.txt" invalid_json_line_1 \
+    "$repair_baseline" "$repairable_preamble"
+assert_false 'a draft whose every record parsed gets no such paragraph' \
+    grep -q 'did not parse' "$test_root/clean-repair-prompt.txt"
+write_primary_finding_repair_prompt "$test_root/restore-complete-prompt.txt" invalid_json_line_3 \
+    "$test_root/restore-complete-baseline.json" "$test_root/restore-complete.ndjson"
+assert_file_contains "$test_root/restore-complete-prompt.txt" 'not the empty values in the baseline' \
+    'and a draft whose complete record broke is told to keep the summary it wrote'
 
 # Salvage: the step before a phase is abandoned. Every record is put to the same
 # contract on its own, and whatever stands is kept. The run has already been paid

@@ -178,9 +178,10 @@ NDJSON_BASELINE_DIRTY_RECORDS=0
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 NDJSON_SALVAGE_DROPPED_IDS=()
+NDJSON_SALVAGE_UNREADABLE_IDS=()
 NDJSON_SALVAGE_UNPARSEABLE_LINES=0
 NDJSON_SALVAGE_MISSING_REFS=0
-NDJSON_SALVAGE_DROPPED_RESOLUTIONS=false
+NDJSON_SALVAGE_DROPPED_RESOLUTIONS=0
 AGENT_QUORUM=2
 SOURCE_HANDLES_ENABLED=true
 FALLBACK_SYNTHESIZER=""
@@ -3071,7 +3072,7 @@ append_configured_skill_to_prompt() {
         printf '\n===== CONFIGURED SKILL CHECKLISTS ARE EMBEDDED BELOW =====\n'
         printf 'Any `checklists/*.md` reference in the configured skill means the corresponding checklist text appears later in this prompt. It is not a path in the checked-out repository and it is not a request to search another agent skill directory. Do not use tools to open, find, or locate these configured checklists; read and apply the embedded blocks below.\n'
         printf '\n===== BEGIN CONFIGURED REVIEW SKILL (REFERENCE) =====\n'
-        printf 'This portable skill copy is review methodology: what to examine, how to verify it, what evidence to demand. It does not decide how the answer is written. The requirements in this prompt take precedence for persistence, for safety, and for the output format -- the response format, its record or section structure, its field names and its classification vocabulary come from this prompt alone. Where the skill prescribes a report layout, sections to produce, or verdict words of its own, they apply to running the skill directly, not here; follow this prompt instead and do not add, rename or drop a field to match the skill.\n\n'
+        printf 'This portable skill copy is review methodology: what to examine, how to verify it, what evidence to demand. It does not decide how the answer is written, and it does not decide how much of the review this phase repeats. The requirements in this prompt take precedence for persistence, for safety, for the output format, and for the scope of this phase -- the response format, its record or section structure, its field names and its classification vocabulary come from this prompt alone, and so does what this phase checks again and what it takes from earlier phases as settled. Where the skill prescribes a report layout, sections to produce, or verdict words of its own, they apply to running the skill directly, not here; follow this prompt instead and do not add, rename or drop a field to match the skill. Where the skill says that every one of its steps runs, it means within the scope this prompt sets: apply the methodology to what this phase is asked to check. A cross-review or a final synthesis does not repeat the whole review because the skill lists every step.\n\n'
         cat -- "$AGENT_SKILL_FILE"
         printf '\n===== END CONFIGURED REVIEW SKILL =====\n'
 
@@ -4252,7 +4253,13 @@ measurement_command_policy() {
         elif any(.[1:][]; startswith("-") and contains("=") and ((split("=")[1:] | join("=")) | startswith("/") or startswith("~") or . == ".." or startswith("../") or contains("/../") or endswith("/.."))) then "unsafe_argument"
         # And no measurement writes a file, whatever the path looks like.
         elif any(.[1:][]; . == "--output" or startswith("--output=")) then "unsafe_argument"
-        elif .[0] == "rg" and any(.[1:][]; startswith("--pre")) then "unsafe_argument"
+        # Options that run a program. rg runs a preprocessor for --pre and a
+        # hostname helper for --hostname-bin; git grep opens its matches in a
+        # "pager" that is any command for --open-files-in-pager and -O, and -O on a
+        # diff reads an order file from anywhere, since a value attached to a short
+        # option never passes the path checks above.
+        elif .[0] == "rg" and any(.[1:][]; startswith("--pre") or startswith("--hostname-bin")) then "unsafe_argument"
+        elif .[0] == "git" and any(.[1:][]; startswith("--open-files-in-pager") or startswith("-O")) then "unsafe_argument"
         elif .[0] == "git" and any(.[1:][]; startswith("-c") or . == "-C" or startswith("--exec-path") or startswith("--git-dir") or startswith("--work-tree") or startswith("--config-env") or startswith("--namespace")) then "unsafe_argument"
         elif .[0] == "git" and (((.[1] // "") | IN($git_ok[])) | not) then "git_subcommand_not_allowlisted"
         else "allowed" end
@@ -4378,7 +4385,7 @@ collect_orchestrator_diagnostics() {
             --argjson dropped "$(json_string_array "${NDJSON_SALVAGE_DROPPED_IDS[@]}")" \
             --argjson missing "$NDJSON_SALVAGE_MISSING_REFS" \
             --argjson resolutions "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS" '
-            if $unreadable > 0 or ($dropped | length) > 0 or $missing > 0 or $resolutions
+            if $unreadable > 0 or ($dropped | length) > 0 or $missing > 0 or $resolutions > 0
             then [{phase: "final synthesis", agent: (if $agent == "" then null else $agent end),
                    unparseable_lines: $unreadable, dropped_findings: $dropped,
                    unanswered_refs: $missing, dropped_resolutions: $resolutions}]
@@ -4436,7 +4443,10 @@ collect_orchestrator_diagnostics() {
                 ([(if ($loss.unparseable_lines // 0) > 0 then (($loss.unparseable_lines | tostring) + " unreadable line(s)") else empty end),
                   (if (($loss.dropped_findings // []) | length) > 0 then ((($loss.dropped_findings | length) | tostring) + " finding(s) that did not meet the contract") else empty end),
                   (if ($loss.unanswered_refs // 0) > 0 then (($loss.unanswered_refs | tostring) + " source record(s) left unanswered") else empty end),
-                  (if ($loss.dropped_resolutions // false) then "the dispute resolution table" else empty end)]
+                  (($loss.dropped_resolutions // 0) as $gone
+                   | if $gone == true then "the dispute resolution table"
+                     elif ($gone | type) == "number" and $gone > 0 then (($gone | tostring) + " dispute resolution(s) that went with their findings")
+                     else empty end)]
                  | join(", ")
                  | . + (if ($loss.unanswered_refs // 0) > 0 then " -- this review is incomplete and a rerun would cover the gap" else "" end));
                 ($loss.dropped_findings // []))),
@@ -4929,6 +4939,37 @@ EOF
     } >"$prompt_file"
 }
 
+# Removes, in place, the resolutions whose covering finding salvage dropped --
+# for failing the contract, or with a line that did not parse -- and the disputes
+# nothing that survived still covers. It refuses when salvage dropped no finding
+# at all: then the resolutions failed on their own account.
+salvage_orphaned_resolutions() {
+    local resolutions_file=$1 canonical_file=$2 disputes_file=$3
+    local filtered_resolutions filtered_disputes before after dropped_json
+
+    (( ${#NDJSON_SALVAGE_DROPPED_IDS[@]} + ${#NDJSON_SALVAGE_UNREADABLE_IDS[@]} > 0 )) || return 1
+    dropped_json=$(json_string_array "${NDJSON_SALVAGE_DROPPED_IDS[@]}" "${NDJSON_SALVAGE_UNREADABLE_IDS[@]}")
+    new_temp_file 'salvage-resolutions'; filtered_resolutions=$NEW_TEMP_FILE
+    new_temp_file 'salvage-disputes'; filtered_disputes=$NEW_TEMP_FILE
+    jq --argjson dropped "$dropped_json" \
+        '[.[] | select(.final_source_id as $id | ($dropped | index($id)) | not)]' \
+        "$resolutions_file" >"$filtered_resolutions" || return 1
+    jq --slurpfile canonical "$canonical_file" --slurpfile resolutions "$resolutions_file" \
+        --argjson dropped "$dropped_json" '
+        ([$resolutions[0][] | select(.final_source_id as $id | $dropped | index($id)) | .dispute_id]) as $orphaned |
+        ([$canonical[0].findings[] | (.source_refs // [])[] | {agent, source_id}]) as $still_covered |
+        [.[] | select(
+            (.dispute_id as $d | $orphaned | index($d)) and
+            ([.conflicting_refs[] | {agent, source_id}] | any(. as $ref | $still_covered | index([$ref])) | not)
+            | not)]
+    ' "$disputes_file" >"$filtered_disputes" || return 1
+    before=$(jq 'length' "$resolutions_file")
+    after=$(jq 'length' "$filtered_resolutions")
+    NDJSON_SALVAGE_DROPPED_RESOLUTIONS=$((before - after))
+    mv -- "$filtered_resolutions" "$resolutions_file"
+    mv -- "$filtered_disputes" "$disputes_file"
+}
+
 # The last step before a phase is given up on. Everything earlier tries to get a
 # clean stream out of the model; this asks a narrower question instead -- which of
 # these records stand up on their own? Each finding is put to the very same
@@ -5002,9 +5043,10 @@ run_ndjson_salvage() {
     NDJSON_SALVAGE_MODE=true
     NDJSON_ALLOW_PARTIAL_COVERAGE=true
     NDJSON_SALVAGE_DROPPED_IDS=()
+    NDJSON_SALVAGE_UNREADABLE_IDS=()
     NDJSON_SALVAGE_UNPARSEABLE_LINES=0
     NDJSON_SALVAGE_MISSING_REFS=0
-    NDJSON_SALVAGE_DROPPED_RESOLUTIONS=false
+    NDJSON_SALVAGE_DROPPED_RESOLUTIONS=0
     case "$phase" in
         primary) process_primary_ndjson_output "$output_file" "$agent" || status=$? ;;
         cross) process_cross_ndjson_output "$output_file" "$agent" || status=$? ;;
@@ -5040,7 +5082,10 @@ record_salvage_losses() {
         noun=records; (( NDJSON_SALVAGE_MISSING_REFS != 1 )) || noun=record
         parts+=("${NDJSON_SALVAGE_MISSING_REFS} source ${noun} left unanswered")
     fi
-    [[ "$NDJSON_SALVAGE_DROPPED_RESOLUTIONS" != true ]] || parts+=('the dispute resolution table')
+    if (( NDJSON_SALVAGE_DROPPED_RESOLUTIONS > 0 )); then
+        noun=resolutions; (( NDJSON_SALVAGE_DROPPED_RESOLUTIONS != 1 )) || noun=resolution
+        parts+=("${NDJSON_SALVAGE_DROPPED_RESOLUTIONS} dispute ${noun} that went with their findings")
+    fi
     (( ${#parts[@]} > 0 )) || return 0
 
     log "Kept the ${label} output from ${agent:-the synthesizer}${reason:+ after ${reason}} and dropped $(printf '%s; ' "${parts[@]}" | sed 's/; $//')"
@@ -5092,6 +5137,12 @@ process_final_ndjson_output() {
                 || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
+                    # A resolution may name the finding this line held. Every id the
+                    # line names is kept, so that resolution goes with the line
+                    # instead of taking the rest of the dispute table along.
+                    mapfile -t -O "${#NDJSON_SALVAGE_UNREADABLE_IDS[@]}" NDJSON_SALVAGE_UNREADABLE_IDS < <(
+                        describe_unparsed_record "$line" "$line_number" \
+                            | jq -r 'select(.record != "complete" and .record != "resolution") | .source_ids[]')
                     continue
                 fi
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
@@ -5129,21 +5180,22 @@ process_final_ndjson_output() {
         build_final_disputes "$disputes_file" || { FINDING_CONTRACT_FAILURE_REASON=missing_canonical_cross_inputs; return 1; }
         if ! validate_final_resolutions "$resolutions_file" "$canonical_file" "$disputes_file" "$resolutions_canonical_file"; then
             # Dropping a finding can leave the dispute it settled with nothing to
-            # point at. The dispute table helps a reader weigh the findings; it is
-            # not the findings, so it is let go rather than allowed to take them.
-            # When salvage removed nothing, though, the resolutions are wrong on
-            # their own account -- a confirmed finding resting on a dispute nobody
-            # measured -- and that is a claim about the code, not a misprint. It
-            # fails as it always did, because publishing it would overstate what
-            # the review actually established.
+            # point at, and only that is forgiven: the resolutions of findings
+            # salvage removed go with them, and a dispute goes only when nothing
+            # that survived still covers it. Everything left is validated again.
+            # A failure that remains is a claim about the code -- a confirmed
+            # finding over a dispute nobody measured -- and it fails as it always
+            # did. Without this narrowing, one stray line of prose was enough to
+            # drop the whole table and publish exactly that finding.
             if [[ "$NDJSON_SALVAGE_MODE" != true ]] \
-                || (( ${#NDJSON_SALVAGE_DROPPED_IDS[@]} == 0 && NDJSON_SALVAGE_UNPARSEABLE_LINES == 0 )); then
+                || ! salvage_orphaned_resolutions "$resolutions_file" "$canonical_file" "$disputes_file" \
+                || ! validate_final_resolutions "$resolutions_file" "$canonical_file" "$disputes_file" "$resolutions_canonical_file"; then
                 detail=$(describe_resolution_validation_failure "$resolutions_file" "$canonical_file" "$disputes_file")
                 FINDING_CONTRACT_FAILURE_REASON="dispute_resolution_validation_failed${detail:+: $detail}"
                 return 1
             fi
-            NDJSON_SALVAGE_DROPPED_RESOLUTIONS=true
-        else
+        fi
+        if [[ -s "$resolutions_canonical_file" ]]; then
             attach_measurements "$resolutions_canonical_file"
             FINAL_PROCESSED_RESOLUTIONS_FILE=$resolutions_canonical_file
         fi
@@ -5172,21 +5224,75 @@ log_baseline_dirty_records() {
 # it -- a stray bracket, a doubled brace. The torn one cannot be put back without
 # guessing what was cut, so it still refuses the repair. The finished one is left
 # out of the baseline and handed to the repair pass, which carries the rejected
-# draft in full: the model sees its own broken record and writes it again. A
-# record the repair does not bring back cannot vanish quietly, because the
-# stream's source-ref coverage is checked against the inputs either way.
+# draft in full: the model sees its own broken record and writes it again. The
+# baseline names every such line, and a repair that does not bring each one back
+# is rejected; salvage then works from the draft and counts the line as lost.
 ndjson_line_is_terminated_record() {
     [[ "$1" == \{* && "$1" == *\} ]]
 }
 
+# What can still be read off a record that did not parse: where it stood, what
+# kind of record it was, and the ids it names. The repair has to write it again,
+# and these are what the stability check holds the rewritten record to.
+describe_unparsed_record() {
+    local record_line=$1 line_number=$2
+    jq -Rc --argjson line "$line_number" '{
+        line: $line,
+        record: (first(scan("\"record\"\\s*:\\s*\"([a-z_]+)\"")[0]) // null),
+        source_ids: [scan("\"source_id\"\\s*:\\s*\"([^\"\\\\]*)\"")[0]],
+        dispute_ids: [scan("\"dispute_id\"\\s*:\\s*\"([^\"\\\\]*)\"")[0]]
+    }' <<<"$record_line"
+}
+
+# Shared jq definitions for the repair stability checks. The caller binds
+# $baseline. A record left out of the baseline because it did not parse has to
+# come back: the preserved records unchanged and in their order, and beside them
+# one restored record for every unparsed line, carrying an id that line named
+# wherever it named one. A record of unreadable kind is taken for a finding, so
+# the doubt falls on the side of asking for it back.
+readonly REPAIR_RESTORATION_JQ_DEFS='
+    def unparsed_findings($b): [($b.unparsed // [])[] | select(.record != "complete" and .record != "resolution")];
+    def unparsed_resolutions($b): [($b.unparsed // [])[] | select(.record == "resolution")];
+    def keeps_completion($b):
+        any(($b.unparsed // [])[]; .record == "complete")
+        or ({summary, verification_limitations, positive_evidence} == $b.completion);
+    def restores_unparsed($kept; $out; $lost; key; named):
+        [$kept[] | key] as $kept_keys |
+        [$out[] | select(key | IN($kept_keys[]) | not)] as $restored |
+        ($kept == [$out[] | select(key | IN($kept_keys[]))])
+        and (($restored | length) == ($lost | length))
+        and all($lost[] | select((named | length) > 0); named as $ids | any($restored[]; key | IN($ids[])));
+'
+
+# The paragraph a repair prompt gains when the draft held records that did not
+# parse. The prompt otherwise tells the model to add nothing, and a model that
+# obeyed would drop exactly the records the repair exists to put back.
+unparsed_records_repair_note() {
+    local baseline_file=$1
+    jq -r '
+        (.unparsed // []) as $lost |
+        if ($lost | length) == 0 then empty else
+            ($lost | map("line \(.line) (\(.record // "record of unknown kind")" + (
+                if .record == "resolution" and (.dispute_ids | length) > 0 then ", dispute_id \(.dispute_ids[0] | tojson)"
+                elif .record != "complete" and .record != "resolution" and (.source_ids | length) > 0 then ", source_id \(.source_ids[0] | tojson)"
+                else "" end) + ")") | join("; ")) as $lines |
+            "\n\nThe rejected draft also holds \($lost | length) line(s) that did not parse, so the preserved baseline could not keep them: \($lines). Write each of them again, once, as one valid record in the place it held in the draft. It must say what the draft says: mend only its punctuation and schema metadata."
+            + (if any($lost[]; .record == "complete") then " For the complete record, that means the summary, verification_limitations, and positive_evidence the draft wrote, not the empty values in the baseline." else "" end)
+            + " These are the only records you may add, and every one of them must come back: a repair that leaves one out is rejected like one that changes a preserved record."
+        end
+    ' "$baseline_file"
+}
+
 build_final_repair_baseline() {
-    local input_file=$1 baseline_file=$2 parsed_file line trimmed
-    local object_count=0 saw_trailing_prose=false
+    local input_file=$1 baseline_file=$2 parsed_file unparsed_file line trimmed
+    local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file 'final-repair-parsed'; parsed_file=$NEW_TEMP_FILE
-    : >"$parsed_file"
+    new_temp_file 'final-repair-unparsed'; unparsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
@@ -5200,13 +5306,14 @@ build_final_repair_baseline() {
         if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
             ndjson_line_is_terminated_record "$trimmed" || return 1
             NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            describe_unparsed_record "$trimmed" "$line_number" >>"$unparsed_file" || return 1
             continue
         fi
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
 
-    jq -e -s '
+    jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
@@ -5236,7 +5343,8 @@ build_final_repair_baseline() {
             resolutions: [.[] | select(.record == "resolution") | resolution_content],
             completion: (if (($completions | length) == 1 and ($completions[0] | valid_completion_content))
                 then ($completions[0] | {summary, verification_limitations, positive_evidence})
-                else {summary: "", verification_limitations: [], positive_evidence: []} end)
+                else {summary: "", verification_limitations: [], positive_evidence: []} end),
+            unparsed: $unparsed
         }
         else error("unsafe final repair baseline") end
     ' "$parsed_file" >"$baseline_file" 2>/dev/null
@@ -5244,20 +5352,23 @@ build_final_repair_baseline() {
 
 validate_final_repair_stability() {
     local baseline_file=$1 canonical_file=$2 resolutions_file=${3:-}
-    jq -e --slurpfile baseline "$baseline_file" '
+    jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
              verification_limitations, existing_feedback, include_in_rejected_summary};
-        {findings: [.findings[] | content],
-         completion: {summary, verification_limitations, positive_evidence}} == ($baseline[0] | {findings, completion})
+        $baseline[0] as $b |
+        restores_unparsed($b.findings; [.findings[] | content]; unparsed_findings($b); .source_id; .source_ids)
+        and keeps_completion($b)
     ' "$canonical_file" >/dev/null || return 1
     [[ -n "$resolutions_file" ]] || return 0
-    jq -e --slurpfile baseline "$baseline_file" '
+    jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def resolution_content:
             {dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status,
              verification_method, command, observed, basis, basis_source, limitations};
-        [.resolutions[] | resolution_content] == ($baseline[0].resolutions // [])
+        $baseline[0] as $b |
+        restores_unparsed($b.resolutions // []; [.resolutions[] | resolution_content];
+            unparsed_resolutions($b); .dispute_id; .dispute_ids)
     ' "$resolutions_file" >/dev/null
 }
 
@@ -5272,7 +5383,7 @@ The rejected draft failed with: ${failure_reason}
 
 Preserve every finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback, and include_in_rejected_summary. Any difference is rejected. Primary provenance is derived later and must not be added. Resolution records are preserved exactly as well: dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status, verification_method, command, observed, basis, basis_source, and limitations are frozen. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline.
 
-Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
+Finish with exactly one complete record whose finding_count is the number of findings you output. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.$(unparsed_records_repair_note "$baseline_file")
 
 ===== BEGIN PRESERVED BASELINE =====
 $(cat -- "$baseline_file")
@@ -5436,13 +5547,15 @@ attempt_final_ndjson_repair() {
 }
 
 build_cross_repair_baseline() {
-    local input_file=$1 baseline_file=$2 parsed_file line trimmed
-    local object_count=0 saw_trailing_prose=false
+    local input_file=$1 baseline_file=$2 parsed_file unparsed_file line trimmed
+    local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file "cross-repair-parsed"; parsed_file=$NEW_TEMP_FILE
-    : >"$parsed_file"
+    new_temp_file "cross-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
@@ -5456,13 +5569,14 @@ build_cross_repair_baseline() {
         if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
             ndjson_line_is_terminated_record "$trimmed" || return 1
             NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            describe_unparsed_record "$trimmed" "$line_number" >>"$unparsed_file" || return 1
             continue
         fi
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
 
-    jq -e -s '
+    jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
@@ -5488,7 +5602,8 @@ build_cross_repair_baseline() {
             findings: [$findings[] | content],
             completion: (if (($completions | length) == 1 and ($completions[0] | valid_completion_content))
                 then ($completions[0] | {summary, verification_limitations, positive_evidence})
-                else {summary: "", verification_limitations: [], positive_evidence: []} end)
+                else {summary: "", verification_limitations: [], positive_evidence: []} end),
+            unparsed: $unparsed
         }
         else error("unsafe cross-review repair baseline") end
     ' "$parsed_file" >"$baseline_file" 2>/dev/null
@@ -5496,13 +5611,14 @@ build_cross_repair_baseline() {
 
 validate_cross_repair_stability() {
     local baseline_file=$1 canonical_file=$2
-    jq -e --slurpfile baseline "$baseline_file" '
+    jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
              recommendation, classification, severity, category, contributing_agents,
              verification_limitations, existing_feedback};
-        {findings: [.findings[] | content],
-         completion: {summary, verification_limitations, positive_evidence}} == $baseline[0]
+        $baseline[0] as $b |
+        restores_unparsed($b.findings; [.findings[] | content]; unparsed_findings($b); .source_id; .source_ids)
+        and keeps_completion($b)
     ' "$canonical_file" >/dev/null
 }
 
@@ -5517,7 +5633,7 @@ The rejected draft failed with: ${failure_reason}
 
 Preserve every output finding exactly and in the same order. Do not add, remove, split, merge, reorder, rephrase, translate, or reclassify anything. The orchestrator structurally compares source_id, source_refs, title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, and existing_feedback. Any difference is rejected. You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline.
 
-Finish with exactly one complete record whose finding_count matches the preserved findings. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.
+Finish with exactly one complete record whose finding_count is the number of findings you output. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.$(unparsed_records_repair_note "$baseline_file")
 
 ===== BEGIN PRESERVED BASELINE =====
 $(cat -- "$baseline_file")
@@ -5697,11 +5813,15 @@ build_primary_repair_baseline() {
     local trimmed
     local object_count=0
     local saw_trailing_prose=false
+    local unparsed_file
+    local line_number=0
 
     new_temp_file "primary-repair-parsed"; parsed_file=$NEW_TEMP_FILE
-    : >"$parsed_file"
+    new_temp_file "primary-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
+    : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
         line=${line%$'\r'}
         trimmed=${line#"${line%%[![:space:]]*}"}
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
@@ -5718,6 +5838,7 @@ build_primary_repair_baseline() {
         if [[ "$trimmed" == \{* || "$trimmed" == \[* ]]; then
             ndjson_line_is_terminated_record "$trimmed" || return 1
             NDJSON_BASELINE_DIRTY_RECORDS=$((NDJSON_BASELINE_DIRTY_RECORDS + 1))
+            describe_unparsed_record "$trimmed" "$line_number" >>"$unparsed_file" || return 1
             continue
         fi
         if (( object_count > 0 )); then
@@ -5726,7 +5847,7 @@ build_primary_repair_baseline() {
     done <"$input_file"
     (( object_count > 0 )) || return 1
 
-    jq -e -s '
+    jq -e -s --slurpfile unparsed "$unparsed_file" '
         def finding_content:
             {
                 source_id, title, claim, anchor, evidence, failure_scenario,
@@ -5765,7 +5886,8 @@ build_primary_repair_baseline() {
                      else {
                         summary: "", verification_limitations: [], positive_evidence: []
                      }
-                     end)
+                     end),
+                unparsed: $unparsed
             }
         else
             error("unsafe primary repair baseline")
@@ -5777,19 +5899,16 @@ validate_primary_repair_stability() {
     local baseline_file=$1
     local canonical_file=$2
 
-    jq -e --slurpfile baseline "$baseline_file" '
+    jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def finding_content:
             {
                 source_id, title, claim, anchor, evidence, failure_scenario,
                 recommendation, classification, severity, category,
                 contributing_agents, verification_limitations, existing_feedback
             };
-        {
-            findings: [.findings[] | finding_content],
-            completion: {
-                summary, verification_limitations, positive_evidence
-            }
-        } == $baseline[0]
+        $baseline[0] as $b |
+        restores_unparsed($b.findings; [.findings[] | finding_content]; unparsed_findings($b); .source_id; .source_ids)
+        and keeps_completion($b)
     ' "$canonical_file" >/dev/null
 }
 
@@ -5808,7 +5927,7 @@ The rejected draft failed with: ${failure_reason}
 
 You MUST preserve every finding exactly, in the same order, with the same source_id. Do not add, remove, split, merge, reorder, rephrase, translate, or otherwise change any finding. The orchestrator compares these substantive fields structurally and rejects any difference: title, claim, anchor, evidence, failure_scenario, recommendation, classification, severity, category, contributing_agents, verification_limitations, existing_feedback.
 
-You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline. Each finding needs record "finding" and schema_version 1. Finish with exactly one complete record using finding_count equal to the preserved finding count. Preserve the complete record's summary, verification_limitations, and positive_evidence when present in the supplied baseline; when the baseline contains empty values, use them exactly. Do not output records after complete.
+You may only remove transport prose/fences and repair record/schema metadata or the terminal complete record. If a finding lacks existing_feedback, add exactly the existing_feedback object shown for it in the preserved baseline. Each finding needs record "finding" and schema_version 1. Finish with exactly one complete record using finding_count equal to the number of findings you output. Preserve the complete record's summary, verification_limitations, and positive_evidence when present in the supplied baseline; when the baseline contains empty values, use them exactly. Do not output records after complete.$(unparsed_records_repair_note "$baseline_file")
 
 The complete preserved-content baseline is authoritative:
 
@@ -8971,6 +9090,15 @@ select_artifact_source_manifest() {
         search_roots+=("$LEGACY_REVIEWS_ROOT")
     fi
 
+    # This path runs before the review directory is known, so it sees `last`
+    # before the resolver that turns it into an identifier for every other path.
+    # An empty selector already means the newest completed run, which is exactly
+    # what `last` asks for; it used to be searched for as a literal timestamp.
+    local selecting_latest=false
+    if [[ "$RUN_SELECTOR" == last ]]; then
+        RUN_SELECTOR=""
+        selecting_latest=true
+    fi
     if [[ -n "$RUN_SELECTOR" ]]; then
         file_pattern="${PR_NUMBER}-*-${RUN_SELECTOR}-manifest.json"
     else
@@ -9046,6 +9174,9 @@ select_artifact_source_manifest() {
             die "Completed source run ${RUN_SELECTOR} was not found for ${GITHUB_REPOSITORY:-the selected repository} PR #${PR_NUMBER}"
         fi
         die "No completed primary + cross-review manifest was found for ${GITHUB_REPOSITORY:-the selected repository} PR #${PR_NUMBER}"
+    fi
+    if [[ "$selecting_latest" == true ]]; then
+        log "Selected the most recent completed run of PR #${PR_NUMBER}: $(jq -r '.timestamp' "$SOURCE_MANIFEST")"
     fi
 }
 
@@ -9212,7 +9343,20 @@ load_artifact_source_run() {
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 && "$source_cross_contract" != ndjson-v1 ]]; then
         die 'Structured final synthesis requires a source run with structured cross-review findings'
     fi
+    # A reviewer the source run went on without has no cross-review to load, and
+    # the run it produced was complete without one; asking for it anyway made
+    # every final rerun of a quorum-saved run fail on a report that never existed.
+    CROSS_AGENTS=()
+    PRIMARY_AGENTS=()
     for manifest_agent in "${REVIEW_AGENTS[@]}"; do
+        if agent_was_dropped 'primary review' "$manifest_agent" "$SOURCE_MANIFEST"; then
+            continue
+        fi
+        PRIMARY_AGENTS+=("$manifest_agent")
+        if agent_was_dropped 'cross-review' "$manifest_agent" "$SOURCE_MANIFEST"; then
+            continue
+        fi
+        CROSS_AGENTS+=("$manifest_agent")
         configured_file=$(jq -r --arg agent "$manifest_agent" '.artifacts.cross_review[$agent]' "$SOURCE_MANIFEST")
         [[ "$configured_file" == "${configured_file##*/}" ]] || die "Unsafe cross-review artifact path for ${manifest_agent}"
         [[ "$configured_file" == "${REPORT_STEM}-cross-${manifest_agent}.md" ]] || die "Unexpected cross-review artifact in source manifest for ${manifest_agent}"
@@ -9242,6 +9386,7 @@ load_artifact_source_run() {
         configured_file=$(jq -r --arg agent "$manifest_agent" '.reviewer_labels[$agent] // ""' "$SOURCE_MANIFEST")
         [[ -z "$configured_file" ]] || AGENT_LABELS[$manifest_agent]=$configured_file
     done
+    (( ${#CROSS_AGENTS[@]} >= 2 )) || die "Selected run has fewer than two cross-reviews to synthesize"
 
     configured_file=$(jq -r '.artifacts.github_context // ""' "$SOURCE_MANIFEST")
     if [[ -n "$configured_file" && "$configured_file" == "${configured_file##*/}" ]]; then
@@ -9295,7 +9440,7 @@ run_artifact_only_final_rerun() {
     fi
     create_rerun_manifest
 
-    log "Re-running final synthesis from ${#REVIEW_AGENTS[@]} preserved cross-reviews in source run ${SOURCE_TIMESTAMP}"
+    log "Re-running final synthesis from ${#CROSS_AGENTS[@]} preserved cross-reviews in source run ${SOURCE_TIMESTAMP}"
     log "Artifact-only mode: no GitHub request, fetch, checkout, branch switch, or source-tree validation will be performed"
     log "Original recorded diff ${BASE_SHA}...${HEAD_SHA} (${BASE_REF} <- ${HEAD_REF})"
     initialize_dashboard rerun
@@ -9634,10 +9779,21 @@ create_rerun_manifest() {
     local reviewers_json
     local cross_json='{}'
     local cross_findings_json='{}'
+    local source_losses='{"agent_losses": [], "salvage_losses": []}'
     local agent
+    local -a rerun_sources=()
 
     reviewers_json=$(json_string_array "${REVIEW_AGENTS[@]}")
-    for agent in "${REVIEW_AGENTS[@]}"; do
+    # The rerun is built on the source run's reviews, so what that run lost on the
+    # way to them is lost to the rerun too: a reviewer it went on without, records
+    # its reviews had to drop. Its final synthesis is replaced, and that
+    # synthesis's own losses go with it.
+    if [[ -n "$SOURCE_MANIFEST" && -s "$SOURCE_MANIFEST" ]]; then
+        source_losses=$(jq -c '{agent_losses: (.agent_losses // []),
+            salvage_losses: [(.salvage_losses // [])[] | select(.phase != "final synthesis")]}' "$SOURCE_MANIFEST")
+    fi
+    survivor_agents cross rerun_sources
+    for agent in "${rerun_sources[@]}"; do
         cross_json=$(jq -c \
             --arg agent "$agent" \
             --arg file "${CROSS_OUTPUTS[$agent]##*/}" \
@@ -9709,6 +9865,7 @@ create_rerun_manifest() {
         --argjson reviewers "$reviewers_json" \
         --argjson cross_review "$cross_json" \
         --argjson cross_review_findings "$cross_findings_json" \
+        --argjson source_losses "$source_losses" \
         '{
             schema_version: $schema_version,
             review_pr_version: $review_pr_version,
@@ -9783,6 +9940,8 @@ create_rerun_manifest() {
                 usage: (if $comparison_usage == "" then null else $comparison_usage end),
                 status: (if $final_comparison_mode == "standalone" then "pending" else "skipped" end)
             },
+            agent_losses: $source_losses.agent_losses,
+            salvage_losses: $source_losses.salvage_losses,
             final_status: "pending",
             status: "in_progress",
             failure: null

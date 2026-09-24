@@ -1836,7 +1836,7 @@ run_quorum_case() {
 # cross-review finished, and one reviewer failed. Two reviewers are still enough
 # for every finding to be checked by someone other than its author.
 run_quorum_cross_case() {
-    local case_dir="$suite_root/quorum-cross" manifest work_dir stem
+    local case_dir="$suite_root/quorum-cross" manifest work_dir stem rerun_manifest
 
     prepare_quorum_case "$case_dir" 'Fixture quorum cross-review.'
     printf 'nonzero\n' >"$QUORUM_SCENARIOS/gamma-cross-review"
@@ -1855,6 +1855,28 @@ run_quorum_cross_case() {
         grep -Fq -- 'CANONICAL CROSS-REVIEW FINDINGS: gamma' "$QUORUM_CAPTURE/final-synthesis-alpha-attempt-1.prompt"
     assert_file_contains "$QUORUM_CAPTURE/final-synthesis-alpha-attempt-1.prompt" 'CANONICAL CROSS-REVIEW FINDINGS: beta' \
         'while the ones that finished are all there'
+
+    # A final rerun of that run works from the cross-reviews it has. It used to
+    # ask for gamma's as well and die on a report that was never written, and
+    # "--run last" reached the artifact-only rerun without being resolved.
+    PATH="$QUORUM_BIN:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$QUORUM_SCENARIOS" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$QUORUM_CAPTURE/rerun" \
+        "$repo_root/bin/review-pr" --config "$QUORUM_CONFIG" --rerun-final --run last 123 \
+        >"$case_dir/rerun-output.txt" 2>"$case_dir/rerun-stderr.log" \
+        || fail "a final rerun of a run that went on without a reviewer must succeed: $(tail -3 "$case_dir/rerun-stderr.log")"
+    assert_file_contains "$case_dir/rerun-stderr.log" \
+        "Selected the most recent completed run of PR #123: $(jq -r '.timestamp' "$manifest")" \
+        'an artifact-only rerun resolves --run last to the newest completed run'
+    rerun_manifest=$(find "$work_dir" -type f -name '*-final-rerun-*-manifest.json' -print | sed -n '1p')
+    [[ -n "$rerun_manifest" ]] || fail 'the final rerun of a quorum-saved run wrote no manifest'
+    assert_eq 'alpha beta' "$(jq -r '.inputs.cross_review | keys | join(" ")' "$rerun_manifest")" \
+        'the rerun is given the cross-reviews that exist'
+    assert_false 'and its finalizer is not handed the one that does not' \
+        grep -Fq -- 'CANONICAL CROSS-REVIEW FINDINGS: gamma' "$QUORUM_CAPTURE/rerun/final-synthesis-alpha-attempt-1.prompt"
+    assert_eq 'cross-review gamma' "$(jq -r '.agent_losses[0] | .phase + " " + .agent' "$rerun_manifest")" \
+        'the rerun inherits the record of the reviewer the source run went on without'
+    assert_file_contains "$(report_root_of "$work_dir")/$(jq -r '.artifact' "$rerun_manifest")" 'A reviewer dropped out of the run' \
+        'so the rerun report names the same gap as the report it replaces'
 }
 
 # A reviewer that fails its primary review has no findings for anyone to check,

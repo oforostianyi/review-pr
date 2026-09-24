@@ -236,8 +236,10 @@ resolution decision is never changed automatically; a disagreement between the t
 
 Policy, fixed in this iteration: argv only, no shell; allow-listed read-only tools (`rg`, `grep`,
 `ls`, `cat`, `head`, `wc`, `test`, `git` restricted to `show`, `log`, `diff`, `ls-tree`, `cat-file`,
-`grep`, `rev-parse`, `blame`); no absolute or parent-directory paths; no `rg --pre`; no `git -c`,
-`-C`, `--exec-path`, `--git-dir`, `--work-tree`, `--config-env`, `--namespace`; a ten-second timeout
+`grep`, `rev-parse`, `blame`); no absolute or parent-directory paths; no `rg --pre` or
+`--hostname-bin`, which run a program of the caller's choosing; no `git grep -O` /
+`--open-files-in-pager`, which does the same; no `git -c`, `-C`, `--exec-path`, `--git-dir`,
+`--work-tree`, `--config-env`, `--namespace`; a ten-second timeout
 per command; excerpts capped at 2000 characters after redaction. Everything else is recorded as
 `skipped: not_allowlisted` and never executed. Artifact-only final reruns record
 `skipped: checkout_unavailable`. Schema repair does not compare measurements: they are attached after
@@ -384,16 +386,22 @@ keys remain language-independent.
   model did not report thread coverage. A JSON-looking record the model finished writing but
   mis-punctuated -- a stray bracket closing a string as if it were an array -- is left out of the
   baseline and handed back to the repair pass, which sees the broken record in the rejected draft and
-  writes it again. A record torn off mid-token, unknown record types, duplicate completion records,
-  and other missing substantive finding fields remain ineligible because recovery would require
-  guessing what was cut.
+  writes it again. The baseline's `unparsed` list names each such line: its position, its record
+  kind, and the ids it names. The repair prompt lists them, and a repair must bring back every one --
+  the preserved records unchanged and in order, plus exactly one restored record per unparsed line,
+  carrying an id that line named wherever it named one. A repair that leaves one out is rejected
+  like one that rewrites a preserved record, and salvage then counts the line as lost. A `complete`
+  record restored this way keeps the summary the draft wrote. A record torn off mid-token, unknown
+  record types, duplicate completion records, and other missing substantive finding fields remain
+  ineligible because recovery would require guessing what was cut.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,
   `severity`, `category`, `contributing_agents`, `verification_limitations`, and
-  `existing_feedback`. No finding may be added, removed, reordered, split, merged, translated, or
-  rewritten. Preserve valid completion prose; when none is safely recoverable, require an empty
-  summary and arrays. If stability cannot be established, fail closed instead of publishing repair.
+  `existing_feedback`. No finding may be added (other than one restored from an unparsed line),
+  removed, reordered, split, merged, translated, or rewritten. Preserve valid completion prose; when
+  none is safely recoverable, require an empty summary and arrays. If stability cannot be
+  established, fail closed instead of publishing repair.
 - Cross-review repair applies the same rule and additionally freezes `source_refs`, classification,
   severity, and contributing agents. The repaired stream must still cover every canonical primary
   `{agent, source_id}` input and may not introduce an unknown source ref.
@@ -423,11 +431,17 @@ keys remain language-independent.
   source refs than it was given but never an unknown one. A phase fails only when no record survives.
 - Salvage is a loss, and it is recorded as one rather than absorbed. The console names the phase, the
   reason the recovery failed, and what was dropped; the manifest gains a `salvage_losses` entry with
-  the unreadable line count, the dropped `source_id`s, and the number of unanswered refs; and the
-  published review carries the same fact among its verification limitations. There is deliberately no
-  ceiling on how much may be dropped: by the time salvage runs, every agent has already been paid
-  for, so refusing to publish would discard the surviving work as well as the broken part. A reader
-  who never opens a log still sees what the review does not contain.
+  the unreadable line count, the dropped `source_id`s, the number of unanswered refs, and the number
+  of dispute resolutions that went with their findings; and the published review carries the same
+  fact among its verification limitations. There is deliberately no ceiling on how much may be
+  dropped: by the time salvage runs, every agent has already been paid for, so refusing to publish
+  would discard the surviving work as well as the broken part. A reader who never opens a log still
+  sees what the review does not contain.
+- In a final synthesis, a resolution whose covering finding was dropped -- for failing the contract,
+  or with a line that did not parse -- goes with it, and so does a dispute that nothing surviving
+  still covers. The rest of the dispute table stands: a junk line, or a dropped finding that no
+  resolution names, leaves every resolution in place. A resolution table that is wrong on its own
+  account is not salvaged.
 - A reviewer whose stream no recovery can rescue -- every record malformed, or a failed process --
   fails its phase, but the phase does not fail with it while `execution.quorum` reviewers finish
   (default and minimum 2). Every finding is cross-reviewed by everyone but its author, so two is
