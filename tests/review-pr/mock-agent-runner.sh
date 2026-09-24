@@ -462,6 +462,13 @@ case "$behavior" in
         printf '%s\n' 'That completes the requested structured final synthesis.'
         write_usage null 58
         ;;
+    final-ndjson-trailing-prose-once)
+        # A draft salvage could publish on the first attempt, and a clean one on
+        # the second: salvage has to wait for the retry.
+        emit_valid_ndjson_final
+        (( attempt > 1 )) || printf '%s\n' 'That completes the requested structured final synthesis.'
+        write_usage null 58
+        ;;
     cross-ndjson-rejected)
         emit_valid_ndjson_cross reject-first
         write_usage null 57

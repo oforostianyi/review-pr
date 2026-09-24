@@ -1865,6 +1865,46 @@ run_ndjson_unsafe_final_repair_case() {
         'recorded once, not again when the manifest is written after publishing'
 }
 
+# Salvage keeps only the records that stand on their own, so in the final it
+# waits for everything else: here the first draft fails the contract and its
+# repair is rejected, and the retry -- not salvage -- publishes the synthesis.
+run_final_salvage_waits_case() {
+    local case_dir="$suite_root/final-salvage-waits"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local checkout config="$case_dir/config.json" events="$case_dir/events.tsv" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture salvage waits.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.execution.retry = {max_attempts: 2, delay_seconds: 0} |
+        .reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' "$config" >"$config.tmp"
+    mv -- "$config.tmp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' final-ndjson-trailing-prose-once >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' unsafe-final-ndjson-repair >"$scenarios/alpha-final-findings-repair"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_EVENT_LOG="$events" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a final that the retry gets through must publish: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" 'the run completes'
+    assert_eq '2' "$(grep -c '^start.*final-synthesis' "$events")" \
+        'the synthesizer is asked again instead of its first draft being salvaged'
+    assert_eq '0' "$(jq '.salvage_losses | length' "$manifest")" \
+        'so nothing is recorded as dropped'
+    assert_false 'and the console never reports a salvaged final' \
+        grep -q 'Kept the final synthesis output' "$case_dir/stderr.log"
+    assert_eq 'FINAL-001' "$(jq -r '[.findings[].source_id] | join(",")' "$work_dir/${stem}-final-findings.json")" \
+        'the published final holds the whole synthesis'
+}
+
 # Shared setup for the quorum and fallback cases: three mock reviewers, a fresh
 # repository, and a scenario directory the caller fills in.
 prepare_quorum_case() {
@@ -1979,6 +2019,35 @@ run_quorum_below_case() {
 
 # Final synthesis is the one phase nobody can stand in for, so a different agent
 # takes it over once the synthesizer has used up its attempts.
+# When the fallback fails too, salvage takes up the last draft there is -- here
+# the synthesizer's own, since the fallback produced none -- and the report says
+# who wrote what it publishes and that the handover did not succeed.
+run_fallback_then_salvage_case() {
+    local case_dir="$suite_root/fallback-then-salvage" manifest work_dir stem report
+
+    prepare_quorum_case "$case_dir" 'Fixture fallback then salvage.'
+    jq '.finalization.fallback_synthesizer = "beta" | .finalization.fallback_model = "mock-strong"' "$QUORUM_CONFIG" >"$QUORUM_CONFIG.tmp"
+    mv -- "$QUORUM_CONFIG.tmp" "$QUORUM_CONFIG"
+    printf 'final-ndjson-trailing-prose\n' >"$QUORUM_SCENARIOS/alpha-final-synthesis"
+    printf 'unsafe-final-ndjson-repair\n' >"$QUORUM_SCENARIOS/alpha-final-findings-repair"
+    printf 'nonzero\n' >"$QUORUM_SCENARIOS/beta-final-synthesis"
+    run_quorum_case "$case_dir" \
+        || fail "a draft left after a failed fallback must still be salvaged: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$QUORUM_REVIEWS"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    report="$(report_root_of "$work_dir")/${stem}-final.md"
+    assert_file_exists "$report" 'the salvaged draft is published'
+    assert_file_contains "$case_dir/stderr.log" 'salvaging the draft from Alpha' \
+        'salvage waited for the fallback, then took up the draft that was left'
+    assert_eq 'failed' "$(jq -r '.final_fallback.outcome' "$manifest")" \
+        'the manifest records that the handover did not succeed'
+    assert_eq 'alpha' "$(jq -r '.salvage_losses[0].agent' "$manifest")" \
+        'and credits the loss to the draft it came from'
+    assert_file_contains "$report" 'the fallback failed as well' \
+        'the report says the fallback failed too'
+    assert_false 'and does not claim the fallback wrote it' \
+        grep -q 'The final synthesis was written by the fallback agent' "$report"
+}
+
 run_fallback_synthesis_case() {
     local case_dir="$suite_root/fallback-synthesis" manifest work_dir stem
 
@@ -2018,8 +2087,10 @@ run_quorum_cross_case
 run_quorum_primary_case
 run_quorum_below_case
 run_fallback_synthesis_case
+run_fallback_then_salvage_case
 run_final_continuation_case
 run_final_retry_case
+run_final_salvage_waits_case
 run_final_no_retry_case
 run_measured_resolution_case
 run_unavailable_measurement_case

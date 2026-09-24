@@ -190,6 +190,7 @@ FALLBACK_MODEL=""
 FALLBACK_EFFORT=""
 FALLBACK_EFFORT_CONFIGURED=false
 FALLBACK_SYNTHESIS_USED=false
+declare -a FINAL_SALVAGE_CANDIDATES=()
 declare -a PRIMARY_AGENTS=()
 declare -a CROSS_AGENTS=()
 declare -a FINAL_PROMPT_ARGUMENTS=()
@@ -4501,10 +4502,18 @@ collect_orchestrator_diagnostics() {
           (if ($ancestry | IN("measurement_failed", "commit_unavailable")) then rec("repository_facts_measurement_failed"; "run"; null; null; ("reference ancestry: " + $ancestry); []) else empty end),
           (if $rerun then rec("checkout_unavailable"; "run"; null; null; "artifact-only final rerun: no repository checkout, measurements were not executed"; []) else empty end),
           (($manifest.final_fallback // null) | select(. != null) |
-            rec("final_synthesis_fallback"; "phase"; "final synthesis"; .to;
-                ("written by " + .to + (if .model == null then "" else " on " + .model end) +
-                 " after " + .from + (if (.from_model // null) == null then "" else " on " + .from_model end) +
-                 " failed: " + (.reason // "unknown reason")); [])),
+            if (.outcome // null) == "failed" then
+                rec("final_synthesis_fallback_failed"; "phase"; "final synthesis"; .from;
+                    ("handed to " + .to + (if .model == null then "" else " on " + .model end) +
+                     " after " + .from + (if (.from_model // null) == null then "" else " on " + .from_model end) +
+                     " failed (" + (.reason // "unknown reason") + "); the fallback failed as well, so this report" +
+                     " is what could be salvaged from the draft by " + .from); [])
+            else
+                rec("final_synthesis_fallback"; "phase"; "final synthesis"; .to;
+                    ("written by " + .to + (if .model == null then "" else " on " + .model end) +
+                     " after " + .from + (if (.from_model // null) == null then "" else " on " + .from_model end) +
+                     " failed: " + (.reason // "unknown reason")); [])
+            end),
           (($manifest.agent_losses // [])[] |
             rec("reviewer_dropped"; "phase"; .phase; .agent;
                 ("the run went on without this reviewer: " + (.reason // "unknown reason")); [])),
@@ -4695,7 +4704,8 @@ render_final_findings_markdown() {
                              pi_guard_budget_exhausted: "Бюджет викликів інструментів вичерпано", pi_guard_duplicates_blocked: "Заблоковано повторні виклики інструментів", context_compacted: "Контекст стискався: вікно моделі переповнилось",
                              measurement_skipped: "Вимірювання пропущено", checkout_unavailable: "Робоча копія недоступна",
                              salvage_dropped_records: "Частину виводу моделі довелось відкинути",
-                             reviewer_dropped: "Рецензент випав із прогону", final_synthesis_fallback: "Фінальний синтез написав резервний агент"}
+                             reviewer_dropped: "Рецензент випав із прогону", final_synthesis_fallback: "Фінальний синтез написав резервний агент",
+                             final_synthesis_fallback_failed: "Резервний агент теж не впорався; звіт урятовано з попередньої чернетки"}
                         else
                             {github_review_threads_unavailable: "Review threads unavailable", github_review_threads_partial: "Review threads partial",
                              github_check_failed: "CI check failed", github_check_cancelled: "CI check cancelled", github_check_pending: "CI check pending", github_check_skipped: "CI check skipped",
@@ -4704,7 +4714,8 @@ render_final_findings_markdown() {
                              pi_guard_budget_exhausted: "Tool-call budget exhausted", pi_guard_duplicates_blocked: "Duplicate tool calls blocked", context_compacted: "Context was compacted: the model window overflowed",
                              measurement_skipped: "Measurement skipped", checkout_unavailable: "Checkout unavailable",
                              salvage_dropped_records: "Part of the model output had to be dropped",
-                             reviewer_dropped: "A reviewer dropped out of the run", final_synthesis_fallback: "The final synthesis was written by the fallback agent"}
+                             reviewer_dropped: "A reviewer dropped out of the run", final_synthesis_fallback: "The final synthesis was written by the fallback agent",
+                             final_synthesis_fallback_failed: "The fallback synthesizer failed too; the report is salvaged from an earlier draft"}
                         end) as $labels | ($labels[.type] // .type);
                     def provenance: [.phase, .agent] | map(select(. != null and . != "")) | if length == 0 then "" else " (" + join(", ") + ")" end;
                     def refs: (.refs // []) | if length == 0 then "" else " — " + (map("`" + . + "`") | join(", ")) end;
@@ -10883,6 +10894,7 @@ final_attempt_is_retryable() {
 run_final_synthesis_attempt() {
     local run_error_log=$1
     local attempt=$2
+    local salvage_candidate=${3:-}
     local error_log
     local final_recovery
     local recovery_reason=""
@@ -10916,7 +10928,9 @@ run_final_synthesis_attempt() {
     local repaired_semantic_checksum
     local diagnostic_temp
 
-    if (( RETRY_MAX_ATTEMPTS > 1 )); then
+    if [[ -n "$salvage_candidate" ]]; then
+        error_log="${run_error_log%.log}-salvage.log"
+    elif (( RETRY_MAX_ATTEMPTS > 1 )); then
         error_log="${run_error_log%.log}-attempt-${attempt}.log"
     else
         error_log=$run_error_log
@@ -10935,22 +10949,35 @@ run_final_synthesis_attempt() {
     new_temp_file "final-usage-json-attempt-${attempt}"
     final_usage_json=$NEW_TEMP_FILE
 
-    activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
-    start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
-    final_pid=$STARTED_PID
-    final_started_at=$(date +%s)
-    set_dashboard_status final "$FINAL_SYNTHESIZER" "$(dashboard_attempt_status "$attempt")" "$final_pid" "$final_started_at" 0
-    heartbeat_agent "final synthesis" "$FINAL_SYNTHESIZER" "$final_pid" "$final_started_at" &
-    final_heartbeat_pid=$!
-    RUNNING_PIDS=("$final_pid" "$final_heartbeat_pid")
-    if wait "$final_pid"; then
+    if [[ -n "$salvage_candidate" ]]; then
+        # A draft an earlier attempt could not get through the contract, taken
+        # up again once nothing is left to try: no model runs, and the draft goes
+        # straight to salvage below.
+        cp -- "$(jq -r '.output' "$salvage_candidate")" "$final_output"
+        cp -- "$(jq -r '.usage' "$salvage_candidate")" "$final_usage"
+        cp -- "$(jq -r '.usage_json' "$salvage_candidate")" "$final_usage_json"
+        recovery_reason=$(jq -r '.reason' "$salvage_candidate")
+        final_pid=""
         final_status=0
+        final_started_at=$(date +%s)
     else
-        final_status=$?
+        activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
+        start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
+        final_pid=$STARTED_PID
+        final_started_at=$(date +%s)
+        set_dashboard_status final "$FINAL_SYNTHESIZER" "$(dashboard_attempt_status "$attempt")" "$final_pid" "$final_started_at" 0
+        heartbeat_agent "final synthesis" "$FINAL_SYNTHESIZER" "$final_pid" "$final_started_at" &
+        final_heartbeat_pid=$!
+        RUNNING_PIDS=("$final_pid" "$final_heartbeat_pid")
+        if wait "$final_pid"; then
+            final_status=0
+        else
+            final_status=$?
+        fi
+        kill "$final_heartbeat_pid" 2>/dev/null || true
+        wait "$final_heartbeat_pid" 2>/dev/null || true
+        RUNNING_PIDS=()
     fi
-    kill "$final_heartbeat_pid" 2>/dev/null || true
-    wait "$final_heartbeat_pid" 2>/dev/null || true
-    RUNNING_PIDS=()
     final_finished_at=$(date +%s)
     read_token_usage "$final_usage"
     final_token_display=$TOKEN_USAGE_DISPLAY
@@ -10984,7 +11011,14 @@ run_final_synthesis_attempt() {
         activity_log "Failed final synthesis after $(format_duration "$((final_finished_at - final_started_at))"): ${FINAL_FAILURE_REASON}"
         return 1
     fi
-    if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+    if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 && -n "$salvage_candidate" ]]; then
+        if ! process_final_ndjson_output "$final_output" \
+            && ! run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$final_output" "$recovery_reason"; then
+            FINAL_FAILURE_REASON="invalid final ndjson-v1 output (${recovery_reason}); salvage kept nothing"
+            activity_log "Could not salvage the final synthesis draft from $(agent_label "$FINAL_SYNTHESIZER"): ${FINDING_CONTRACT_FAILURE_REASON}"
+            return 1
+        fi
+    elif [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         if ! process_final_ndjson_output "$final_output"; then
             printf 'final ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"$final_log"
             # A stream that stopped short of the required cross-review refs is
@@ -10997,11 +11031,12 @@ run_final_synthesis_attempt() {
                 final_finished_at=$(date +%s)
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY
-            elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$final_output" "$recovery_reason"; then
-                final_finished_at=$(date +%s)
-                read_token_usage "$final_usage"
-                final_token_display=$TOKEN_USAGE_DISPLAY
             else
+                # Salvage waits for the end: another attempt, or the fallback,
+                # usually gets the whole synthesis through, and salvage keeps only
+                # the records that stand on their own.
+                recovery_reason=$FINDING_CONTRACT_FAILURE_REASON
+                keep_final_salvage_candidate "$final_output" "$final_usage" "$final_usage_json" "$recovery_reason"
                 FINDING_CONTRACT_FAILURE_REASON=$recovery_reason
                 set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$(date +%s)" "$final_token_display"
                 preserve_error_log "$final_log" "$error_log"
@@ -11155,6 +11190,53 @@ run_final_synthesis_attempt() {
     activity_log "Completed final synthesis after $(format_duration "$((final_finished_at - final_started_at))") [tokens: ${final_token_display}]: ${FINAL_REPORT}"
 }
 
+# Keeps a draft that failed the contract, with its author, for salvage at the end.
+keep_final_salvage_candidate() {
+    local output_file=$1 usage_file=$2 usage_json_file=$3 reason=$4
+    local kept_output kept_usage kept_usage_json descriptor
+
+    new_temp_file 'final-salvage-output'; kept_output=$NEW_TEMP_FILE
+    new_temp_file 'final-salvage-usage'; kept_usage=$NEW_TEMP_FILE
+    new_temp_file 'final-salvage-usage-json'; kept_usage_json=$NEW_TEMP_FILE
+    new_temp_file 'final-salvage-candidate'; descriptor=$NEW_TEMP_FILE
+    cp -- "$output_file" "$kept_output"
+    cp -- "$usage_file" "$kept_usage" 2>/dev/null || : >"$kept_usage"
+    cp -- "$usage_json_file" "$kept_usage_json" 2>/dev/null || : >"$kept_usage_json"
+    jq -n --arg output "$kept_output" --arg usage "$kept_usage" --arg usage_json "$kept_usage_json" \
+        --arg reason "$reason" --arg agent "$FINAL_SYNTHESIZER" --arg model "$FINALIZATION_MODEL" \
+        --arg effort "$FINALIZATION_EFFORT" --arg effort_configured "$FINALIZATION_EFFORT_CONFIGURED" \
+        --argjson fallback "$([[ "$FALLBACK_SYNTHESIS_USED" == true ]] && printf true || printf false)" \
+        '{output: $output, usage: $usage, usage_json: $usage_json, reason: $reason, agent: $agent,
+          model: $model, effort: $effort, effort_configured: $effort_configured, fallback: $fallback}' \
+        >"$descriptor" || return 0
+    FINAL_SALVAGE_CANDIDATES+=("$descriptor")
+}
+
+# Salvage comes last in the final, after every attempt by the synthesizer and by
+# its fallback. It publishes the records of a draft that stand up on their own,
+# while another attempt usually gets all of them through: on 29031 salvage run
+# straight away kept one finding of six. The newest draft is tried first, since
+# it came from the last and, with a fallback, the stronger model to try. Its
+# author is put back in place, so the report credits whoever wrote it.
+salvage_final_synthesis() {
+    local error_log=$1 index descriptor
+
+    for (( index = ${#FINAL_SALVAGE_CANDIDATES[@]} - 1; index >= 0; index-- )); do
+        descriptor=${FINAL_SALVAGE_CANDIDATES[index]}
+        FINAL_SYNTHESIZER=$(jq -r '.agent' "$descriptor")
+        FINALIZATION_MODEL=$(jq -r '.model' "$descriptor")
+        FINALIZATION_EFFORT=$(jq -r '.effort' "$descriptor")
+        FINALIZATION_EFFORT_CONFIGURED=$(jq -r '.effort_configured' "$descriptor")
+        log "Every final synthesis attempt failed the contract; salvaging the draft from $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
+        if [[ "$FALLBACK_SYNTHESIS_USED" == true && "$(jq -r '.fallback' "$descriptor")" != true \
+            && -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]]; then
+            atomic_manifest_update '.final_fallback.outcome = "failed"'
+        fi
+        run_final_synthesis_attempt "$error_log" "salvage-$((index + 1))" "$descriptor" && return 0
+    done
+    return 1
+}
+
 run_final_synthesis() {
     local error_log=$1
     local agent
@@ -11193,8 +11275,10 @@ run_final_synthesis() {
     if [[ "$RERUN_FINAL" != true ]]; then
         refresh_github_check_runs
     fi
+    FINAL_SALVAGE_CANDIDATES=()
     run_final_synthesis_attempts "$error_log" && return 0
-    run_fallback_final_synthesis "$error_log"
+    run_fallback_final_synthesis "$error_log" && return 0
+    salvage_final_synthesis "$error_log"
 }
 
 # One synthesizer's turn at the final: the prompt is built for it, because the

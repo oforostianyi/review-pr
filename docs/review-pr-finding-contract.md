@@ -441,6 +441,11 @@ keys remain language-independent.
   do not are dropped. The terminal `complete` record is rebuilt around what survived, and the
   coverage check is relaxed from equality to containment, so a salvaged stream may answer fewer
   source refs than it was given but never an unknown one. A phase fails only when no record survives.
+- In a final synthesis salvage comes last: after every attempt by the synthesizer and by its
+  fallback, because another attempt usually gets the whole synthesis through where salvage keeps
+  only what stands on its own. The newest draft is salvaged first. When the fallback left no draft
+  of its own, the synthesizer's is taken up, the manifest marks `final_fallback.outcome` as
+  `failed`, and the report says the fallback failed as well rather than crediting it.
 - Salvage is a loss, and it is recorded as one rather than absorbed. The console names the phase, the
   reason the recovery failed, and what was dropped; the manifest gains a `salvage_losses` entry with
   the unreadable line count, the dropped `source_id`s, the number of unanswered refs, and the number

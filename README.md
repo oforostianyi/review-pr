@@ -434,7 +434,8 @@ quorum. When the synthesizer has used up its attempts, `finalization.fallback_sy
 same inputs and tries again with a prompt built for it. It must be an enabled agent, and either a
 different agent or the synthesizer itself on a different `fallback_model`: sonnet failing over to
 opus on the same adapter is a real fallback, the same agent on the same model is not. A stronger
-model is the point.
+model is the point. Only when every attempt by both has failed the contract is the newest draft
+salvaged, since another attempt usually gets the whole synthesis through.
 
 ```json
 "synthesizer": "pi",
