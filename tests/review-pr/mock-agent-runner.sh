@@ -445,6 +445,23 @@ case "$behavior" in
         emit_valid_ndjson_primary
         write_usage null 58
         ;;
+    # Prose ahead of the first record is dropped without a model, so a pass
+    # that has to reach the bounded repair ends with a stray line instead.
+    ndjson-trailing-prose)
+        emit_valid_ndjson_primary
+        printf '%s\n' 'That completes the requested structured review.'
+        write_usage null 58
+        ;;
+    cross-ndjson-trailing-prose)
+        emit_valid_ndjson_cross
+        printf '%s\n' 'That completes the requested structured cross-review.'
+        write_usage null 58
+        ;;
+    final-ndjson-trailing-prose)
+        emit_valid_ndjson_final
+        printf '%s\n' 'That completes the requested structured final synthesis.'
+        write_usage null 58
+        ;;
     cross-ndjson-rejected)
         emit_valid_ndjson_cross reject-first
         write_usage null 57

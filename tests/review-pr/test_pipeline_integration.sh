@@ -782,9 +782,9 @@ run_ndjson_cross_case() {
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
-    printf '%s\n' cross-ndjson-preamble >"$scenarios/beta-cross-review"
+    printf '%s\n' cross-ndjson-trailing-prose >"$scenarios/beta-cross-review"
     printf '%s\n' valid-ndjson >"$scenarios/beta-cross-review-findings-repair"
-    printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' final-ndjson-trailing-prose >"$scenarios/alpha-final-synthesis"
     printf '%s\n' valid-ndjson >"$scenarios/alpha-final-findings-repair"
 
     PATH="$fake_bin:$PATH" \
@@ -1553,6 +1553,59 @@ run_ndjson_cross_resume_case() {
         'structured cross-review resume completes the remaining pipeline'
 }
 
+# Every phase may open with a line of prose -- Codex nearly always does, because
+# its progress notes are messages of their own and are joined with the answer.
+# The line is dropped without a model, so no phase pays a repair pass for it.
+run_ndjson_preamble_case() {
+    local case_dir="$suite_root/ndjson-preamble"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios"
+    local capture="$case_dir/captured-prompts" checkout config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json" manifest work_dir stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured preamble.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' ndjson-preamble >"$scenarios/beta-primary-review"
+    printf '%s\n' cross-ndjson-preamble >"$scenarios/beta-cross-review"
+    printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a preamble must not stop a structured run: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a run whose every phase opened with prose completes'
+    assert_eq '' "$(find "$capture" -name '*-repair-*.prompt' -print)" \
+        'and no phase needed a repair pass for it'
+    assert_eq 'false' "$(jq -r 'has("passes")' "$work_dir/${stem}-beta-usage.json")" \
+        'the primary review cost one pass: its usage merges no repair pass into it'
+    assert_file_contains "$case_dir/stderr.log" 'Dropped 1 line of prose ahead of the first record in the primary stream from beta' \
+        'the console says what was dropped'
+    assert_file_contains "$case_dir/stderr.log" 'in the cross-review stream from beta' \
+        'in the cross-review'
+    assert_file_contains "$case_dir/stderr.log" 'in the final stream from alpha' \
+        'and in the final synthesis'
+    assert_file_contains "$work_dir/${stem}-beta-raw.ndjson" 'Here is the requested structured review:' \
+        'the raw artifact still holds what the model wrote'
+    assert_eq 'The fixture changed branch can fail.' \
+        "$(jq -r '.findings[0].claim' "$work_dir/${stem}-beta-findings.json")" \
+        'and the findings behind the prose are all there'
+}
+
 run_ndjson_schema_repair_case() {
     local case_dir="$suite_root/ndjson-schema-repair"
     local reviews="$case_dir/reviews"
@@ -1582,7 +1635,7 @@ run_ndjson_schema_repair_case() {
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
-    printf '%s\n' 'ndjson-preamble' >"$scenarios/beta-primary-review"
+    printf '%s\n' 'ndjson-trailing-prose' >"$scenarios/beta-primary-review"
     printf '%s\n' 'valid-ndjson' >"$scenarios/beta-primary-findings-repair"
 
     PATH="$fake_bin:$PATH" \
@@ -1602,10 +1655,10 @@ run_ndjson_schema_repair_case() {
         'repair pass receives a dedicated no-new-review prompt'
     [[ -n "$source_diagnostic" ]] || fail 'schema repair did not preserve the rejected source response'
     pass 'schema repair preserves the rejected source response'
-    assert_file_contains "$source_diagnostic" 'Here is the requested structured review:' \
+    assert_file_contains "$source_diagnostic" 'That completes the requested structured review.' \
         'preserved source response retains the invalid transport prose'
     assert_false 'canonical raw response excludes repaired transport prose' \
-        grep -Fq -- 'Here is the requested structured review:' "$work_dir/${stem}-beta-raw.ndjson"
+        grep -Fq -- 'That completes the requested structured review.' "$work_dir/${stem}-beta-raw.ndjson"
     assert_eq '2' "$(jq -r '.passes | length' "$work_dir/${stem}-beta-usage.json")" \
         'primary usage includes generation and bounded repair passes'
     assert_eq 'The fixture changed branch can fail.' \
@@ -1641,13 +1694,13 @@ run_ndjson_unsafe_schema_repair_case() {
         "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
-    printf '%s\n' 'ndjson-preamble' >"$scenarios/beta-primary-review"
+    printf '%s\n' 'ndjson-trailing-prose' >"$scenarios/beta-primary-review"
     printf '%s\n' 'unsafe-ndjson-repair' >"$scenarios/beta-primary-findings-repair"
 
     # The repair rewrote a finding instead of reformatting it, so its output is
     # thrown away as it always was. What changed is what happens next: the run no
     # longer dies with it. Salvage falls back on the model's own first answer --
-    # here a perfectly good stream behind a line of prose -- and publishes that.
+    # here a perfectly good stream with a line of prose after it -- and publishes that.
     # The guard being tested is unchanged: the rewritten claim must not appear.
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
@@ -1664,7 +1717,7 @@ run_ndjson_unsafe_schema_repair_case() {
     pass 'unsafe repair preserves the rejected repair response'
     assert_file_contains "$rejected_repair" 'The repair rewrote the finding claim.' \
         'unsafe repair diagnostic exposes the changed substantive field'
-    assert_file_contains "$work_dir/${stem}-beta-raw.ndjson" 'Here is the requested structured review:' \
+    assert_file_contains "$work_dir/${stem}-beta-raw.ndjson" 'That completes the requested structured review.' \
         'the original response is kept whole, prose and all, as the published raw stream'
     assert_file_exists "$work_dir/${stem}-beta-findings.json" \
         'the salvaged primary review publishes the findings the model first wrote'
@@ -1770,13 +1823,13 @@ run_ndjson_unsafe_final_repair_case() {
         .reporting.comparison_sections = {cross_review: "none", final: "none"}' "$config" >"$config_temp"
     mv -- "$config_temp" "$config"
     ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
-    printf '%s\n' final-ndjson-preamble >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' final-ndjson-trailing-prose >"$scenarios/alpha-final-synthesis"
     printf '%s\n' unsafe-final-ndjson-repair >"$scenarios/alpha-final-findings-repair"
 
     # The repair changed decisions instead of reformatting them, so it is thrown
     # away exactly as before. The run continues on the synthesizer's own first
-    # answer -- a good stream behind a line of prose -- because losing a finished
-    # final synthesis over its preamble costs everything the run already spent.
+    # answer -- a good stream with a line of prose after it -- because losing a
+    # finished final synthesis over one stray line costs everything the run spent.
     PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
         "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
         || fail "a salvaged final synthesis must still publish: $(tail -3 "$case_dir/stderr.log")"
@@ -1966,6 +2019,7 @@ run_measured_resolution_case
 run_unavailable_measurement_case
 run_split_claim_resolution_case
 run_ndjson_cross_resume_case
+run_ndjson_preamble_case
 run_ndjson_schema_repair_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case

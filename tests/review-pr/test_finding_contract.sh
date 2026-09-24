@@ -802,8 +802,8 @@ jq -c 'if .record == "resolution" then .resolution_status = "uncertain" else . e
 cp -- "$unresolved_stream" "$processed_final"
 assert_false 'a confirmed finding over an unresolved factual dispute is refused' \
     process_final_ndjson_output "$processed_final"
-{ printf 'Here is the requested final synthesis:\n'; cat -- "$unresolved_stream"; } >"$processed_final"
-assert_false 'and one stray line in front does not buy it a way through salvage' \
+{ cat -- "$unresolved_stream"; printf 'That is the whole synthesis.\n'; } >"$processed_final"
+assert_false 'and one stray line of prose does not buy it a way through salvage' \
     run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$processed_final"
 assert_true 'the refusal is still the dispute rule, not a formatting complaint' \
     grep -q 'confirmed_over_unresolved_factual' <<<"$FINDING_CONTRACT_FAILURE_REASON"
@@ -1234,12 +1234,39 @@ replace_first_literal '"state":"new","thread_ids":[]' '"state":"confirmed-existi
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
 assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
 
+# Prose ahead of the first record is dropped without a model. Codex sends a note
+# before each tool call, and each note is an agent message of its own that is
+# joined with the answer, so most Codex reviews opened with a few lines like
+# these -- and each one cost a bounded repair pass to remove.
 preamble="$test_root/preamble-source.ndjson"
 {
-    printf '%s\n' 'Here is the requested review:'
+    printf '%s\n' 'I am applying the review methodology to the exact base and head commits.' \
+        'The new read path makes five database reads per request.' '' \
+        'I found one concrete attribution case in the new total.'
     cat -- "$test_dir/fixtures/primary-findings-valid.ndjson"
 } >"$preamble"
-assert_invalid_contract prose-preamble invalid_json_line_1 "$preamble"
+REPORT_STEM=fixture-preamble
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-preamble-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-preamble-codex-findings.json"
+cp -- "$preamble" "$test_root/preamble-candidate.ndjson"
+assert_true 'a stream behind lines of prose is accepted as it stands' \
+    process_primary_ndjson_output "$test_root/preamble-candidate.ndjson" codex
+assert_eq 3 "$NDJSON_LEADING_PROSE_LINES" 'the prose lines ahead of the first record are counted'
+assert_eq 'F-001 F-002' "$(jq -r '[.findings[].source_id] | join(" ")' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'and every record behind them is kept'
+assert_file_contains "${PRIMARY_RAW_OUTPUTS[codex]}" 'I am applying the review methodology' \
+    'while the raw artifact keeps what the model actually wrote'
+
+between="$test_root/prose-between-source.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    printf '%s\n' 'Now checking the second flow.'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$between"
+assert_invalid_contract prose-after-first-record invalid_json_line_2 "$between"
+all_prose="$test_root/all-prose-source.ndjson"
+printf '%s\n' 'I could not finish the review.' 'The checkout was unavailable.' >"$all_prose"
+assert_invalid_contract prose-throughout invalid_json_line_1 "$all_prose"
 
 # A JSON-looking line that does not parse is not one accident but two. The model
 # either stopped mid-token, or finished the record and mis-punctuated it -- one

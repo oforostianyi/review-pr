@@ -175,6 +175,7 @@ FINAL_FINDINGS_EXPORT_OUTPUT=""
 FINAL_ATTEMPT_RETRYABLE=false
 FINDING_CONTRACT_FAILURE_REASON=""
 NDJSON_BASELINE_DIRTY_RECORDS=0
+NDJSON_LEADING_PROSE_LINES=0
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 NDJSON_SALVAGE_DROPPED_IDS=()
@@ -1702,7 +1703,9 @@ agent_label() {
 # Codex may spread one answer over several agent messages, and
 # --output-last-message keeps only the final one. When the --json event
 # stream holds more than one agent message, join their texts in order so the
-# whole stream is validated, and record the deviation in the agent log.
+# whole stream is validated, and record the deviation in the agent log. The
+# progress notes it sends before tool calls are agent messages too; they come
+# first, and the ndjson normalizer drops them as prose ahead of the first record.
 join_codex_agent_messages() {
     local events_file=$1
     local output_file=$2
@@ -3344,15 +3347,43 @@ log_escape_repairs() {
     log "Repaired ${count} invalid JSON ${noun} in the ${phase} stream from ${agent}"
 }
 
+log_leading_prose() {
+    local count=$1 phase=$2 agent=$3
+    local noun=lines
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=line
+    log "Dropped ${count} ${noun} of prose ahead of the first record in the ${phase} stream from ${agent}"
+}
+
+# Prose ahead of the first record is dropped here, without a model: "Here is the
+# review:", or the progress notes Codex sends between tool calls, which arrive as
+# messages of their own and are joined with the answer. Such a line never holds a
+# record, and the bounded repair that used to remove it spent a model call on one
+# line of text in most runs. It is dropped only when a record follows -- a reply
+# that is prose throughout still fails as prose -- and prose anywhere after the
+# first record still fails the stream, since there it may be part of the answer.
+# NDJSON_LEADING_PROSE_LINES says how many lines went; the raw artifact keeps them.
 normalize_primary_ndjson_stream() {
     local input_file=$1
     local output_file=$2
 
-    awk '
-        BEGIN { started = 0; fenced = 0; closed = 0; invalid = 0 }
+    NDJSON_LEADING_PROSE_LINES=$(awk '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*[{[]/ || /^```/ { found = 1; exit }
+        { count++ }
+        END { print (found ? count + 0 : 0) }
+    ' "$input_file")
+    awk -v skip="$NDJSON_LEADING_PROSE_LINES" '
+        BEGIN { started = 0; fenced = 0; closed = 0; invalid = 0; skipped = 0 }
         {
             sub(/\r$/, "")
             if ($0 ~ /^[[:space:]]*$/) next
+            if (!started && skipped < skip) {
+                skipped++
+                next
+            }
             if (!started) {
                 started = 1
                 if ($0 ~ /^```(jsonl|ndjson)?[[:space:]]*$/) {
@@ -3600,6 +3631,7 @@ process_primary_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_leading_prose "$NDJSON_LEADING_PROSE_LINES" primary "$agent"
     log_escape_repairs "$escape_repairs" primary "$agent"
     if ! jq -s '.' "$records_file" >"$records_array_file"; then
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
@@ -3938,6 +3970,7 @@ process_cross_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_leading_prose "$NDJSON_LEADING_PROSE_LINES" cross-review "$agent"
     log_escape_repairs "$escape_repairs" cross-review "$agent"
     jq -s '.' "$records_file" >"$records_array_file" || {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
@@ -5151,6 +5184,7 @@ process_final_ndjson_output() {
             escape_repairs=$((escape_repairs + 1))
         fi
     done <"$normalized_file"
+    log_leading_prose "$NDJSON_LEADING_PROSE_LINES" final "$FINAL_SYNTHESIZER"
     log_escape_repairs "$escape_repairs" final "$FINAL_SYNTHESIZER"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     # Resolution records travel in the same stream but are validated against

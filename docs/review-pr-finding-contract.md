@@ -378,9 +378,14 @@ keys remain language-independent.
   those records as diagnostics; never publish them as a successful review. They may still seed one
   continuation pass, described below, which republishes them only as part of a merged stream that
   passes the full contract.
+- Prose ahead of the first record is dropped before validation, without a model: an announcement
+  such as "Here is the review:", or the progress notes Codex sends before tool calls, which arrive
+  as agent messages of their own and are joined with the answer. The console counts the lines; the
+  raw artifact keeps them. It is dropped only when a record follows, so a reply that is prose
+  throughout still fails, and prose after the first record still fails the stream.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
-  already a parseable object with a unique `source_id` and every substantive field present. Leading
-  or trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
+  already a parseable object with a unique `source_id` and every substantive field present.
+  Trailing transport prose, fences, record/schema metadata, and a missing or malformed terminal
   completion record are repairable. A finding that lacks only `existing_feedback` is repairable
   too: the baseline records `{"state":"unknown","thread_ids":[]}`, which states honestly that the
   model did not report thread coverage. A JSON-looking record the model finished writing but
