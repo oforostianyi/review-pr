@@ -1367,6 +1367,12 @@ assert_file_contains "$test_root/restore-one-prompt.txt" 'line 2 (finding, sourc
     'the repair prompt names the line the model has to write again'
 assert_file_contains "$test_root/restore-one-prompt.txt" 'every one of them must come back' \
     'and says that a repair leaving it out is rejected'
+# The list itself stays with the stability check. Shown to the model as a key
+# of the baseline, it was copied into the model's own complete record on 953.
+assert_false 'the baseline the model is shown carries no unparsed key' \
+    grep -q '"unparsed"' "$test_root/restore-one-prompt.txt"
+assert_eq 1 "$(jq '.unparsed | length' "$test_root/restore-one-baseline.json")" \
+    'while the baseline the check reads keeps it'
 write_primary_finding_repair_prompt "$test_root/clean-repair-prompt.txt" invalid_json_line_1 \
     "$repair_baseline" "$repairable_preamble"
 assert_false 'a draft whose every record parsed gets no such paragraph' \

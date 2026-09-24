@@ -5298,6 +5298,14 @@ readonly REPAIR_RESTORATION_JQ_DEFS='
         and all($lost[] | select((named | length) > 0); named as $ids | any($restored[]; key | IN($ids[])));
 '
 
+# The baseline as the repair prompt shows it. Its unparsed list is bookkeeping for
+# the stability check, described to the model in prose instead: shown as a key
+# beside findings and completion, it was copied into the model's own complete
+# record, which failed the repair on a key the contract does not have.
+preserved_baseline_for_prompt() {
+    jq 'del(.unparsed)' "$1"
+}
+
 # The paragraph a repair prompt gains when the draft held records that did not
 # parse. The prompt otherwise tells the model to add nothing, and a model that
 # obeyed would drop exactly the records the repair exists to put back.
@@ -5420,7 +5428,7 @@ Preserve every finding exactly and in the same order. Do not add, remove, split,
 Finish with exactly one complete record whose finding_count is the number of findings you output. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.$(unparsed_records_repair_note "$baseline_file")
 
 ===== BEGIN PRESERVED BASELINE =====
-$(cat -- "$baseline_file")
+$(preserved_baseline_for_prompt "$baseline_file")
 ===== END PRESERVED BASELINE =====
 
 ===== BEGIN REJECTED NDJSON DRAFT =====
@@ -5670,7 +5678,7 @@ Preserve every output finding exactly and in the same order. Do not add, remove,
 Finish with exactly one complete record whose finding_count is the number of findings you output. Preserve safe completion content or use the exact empty values in the baseline. Output nothing after complete.$(unparsed_records_repair_note "$baseline_file")
 
 ===== BEGIN PRESERVED BASELINE =====
-$(cat -- "$baseline_file")
+$(preserved_baseline_for_prompt "$baseline_file")
 ===== END PRESERVED BASELINE =====
 
 ===== BEGIN REJECTED NDJSON DRAFT =====
@@ -5966,7 +5974,7 @@ You may only remove transport prose/fences and repair record/schema metadata or 
 The complete preserved-content baseline is authoritative:
 
 ===== BEGIN PRESERVED BASELINE =====
-$(cat -- "$baseline_file")
+$(preserved_baseline_for_prompt "$baseline_file")
 ===== END PRESERVED BASELINE =====
 
 ===== BEGIN REJECTED NDJSON DRAFT =====
