@@ -5528,22 +5528,32 @@ unparsed_records_repair_note() {
     ' "$baseline_file"
 }
 
-# A repair baseline is compared with what validation makes of the repaired
-# stream, and validation fills in the keys that only say how a finding is
-# presented. A baseline built from the raw draft held the raw values instead:
-# an undefined existing_feedback, or a verdict without its optional keys, made a
-# faithful repair fail the stability check or the baseline refuse the draft.
+# A repair baseline is compared with what processing makes of the repaired
+# stream, and processing changes a draft before validating it: it fills in the
+# keys that only say how a finding is presented, and in a cross-review or final
+# synthesis it corrects a source_refs agent key to the one owner of its
+# source_id. A baseline built from the raw draft held the raw values instead:
+# an undefined existing_feedback, a verdict without its optional keys, or a
+# mislabelled agent key made a faithful repair fail the stability check or the
+# baseline refuse the draft.
 normalize_repair_baseline_records() {
-    local phase=$1 parsed_file=$2 array_file
+    local phase=$1 parsed_file=$2 expected_refs_file=${3:-} array_file corrected_file
 
     new_temp_file "${phase}-baseline-array"; array_file=$NEW_TEMP_FILE
     jq -s '.' "$parsed_file" >"$array_file" 2>/dev/null || return 1
     fill_presentation_defaults "$phase" "" "$array_file" true
+    if [[ -n "$expected_refs_file" && -s "$expected_refs_file" ]]; then
+        new_temp_file "${phase}-baseline-source-ref-agents"; corrected_file=$NEW_TEMP_FILE
+        if normalize_ndjson_source_ref_agents "$array_file" "$expected_refs_file" "$corrected_file" 2>/dev/null \
+            && [[ -s "$corrected_file" ]]; then
+            mv -- "$corrected_file" "$array_file"
+        fi
+    fi
     jq -c '.[]' "$array_file" >"$parsed_file" 2>/dev/null
 }
 
 build_final_repair_baseline() {
-    local input_file=$1 baseline_file=$2 parsed_file unparsed_file line trimmed
+    local input_file=$1 baseline_file=$2 expected_refs_file=${3:-} parsed_file unparsed_file line trimmed
     local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file 'final-repair-parsed'; parsed_file=$NEW_TEMP_FILE
@@ -5571,7 +5581,7 @@ build_final_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_repair_baseline_records final "$parsed_file" || return 1
+    normalize_repair_baseline_records final "$parsed_file" "$expected_refs_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -5741,14 +5751,16 @@ attempt_final_ndjson_repair() {
     local output_file=$1 log_file=$2 usage_file=$3 usage_json_file=$4 started_at=$5 error_log=$6
     local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
     local baseline_file repair_prompt repair_output repair_log repair_usage repair_usage_json combined_usage_json
-    local repair_pid heartbeat_pid repair_status repair_stop_reason
+    local repair_pid heartbeat_pid repair_status repair_stop_reason refs_file
     local diagnostic_base="${error_log%.log}-schema-repair"
     local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
     local output_diagnostic="${diagnostic_base}-invalid-raw.ndjson"
     local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
 
     new_temp_file 'final-repair-baseline'; baseline_file=$NEW_TEMP_FILE
-    if ! build_final_repair_baseline "$output_file" "$baseline_file"; then
+    new_temp_file 'final-repair-refs'; refs_file=$NEW_TEMP_FILE
+    build_final_expected_refs "$refs_file" || : >"$refs_file"
+    if ! build_final_repair_baseline "$output_file" "$baseline_file" "$refs_file"; then
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi
@@ -5807,7 +5819,7 @@ attempt_final_ndjson_repair() {
 }
 
 build_cross_repair_baseline() {
-    local input_file=$1 baseline_file=$2 parsed_file unparsed_file line trimmed
+    local input_file=$1 baseline_file=$2 expected_refs_file=${3:-} parsed_file unparsed_file line trimmed
     local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file "cross-repair-parsed"; parsed_file=$NEW_TEMP_FILE
@@ -5835,7 +5847,7 @@ build_cross_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_repair_baseline_records cross "$parsed_file" || return 1
+    normalize_repair_baseline_records cross "$parsed_file" "$expected_refs_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -5997,7 +6009,7 @@ attempt_cross_ndjson_repair() {
     local agent=$1 attempt=$2 output_file=$3 log_file=$4 usage_file=$5 usage_json_file=$6 started_at=$7
     local original_failure_reason=$FINDING_CONTRACT_FAILURE_REASON
     local baseline_file repair_prompt repair_output repair_log repair_usage repair_usage_json combined_usage_json
-    local scratch_raw scratch_findings repair_pid heartbeat_pid repair_status repair_stop_reason
+    local scratch_raw scratch_findings repair_pid heartbeat_pid repair_status repair_stop_reason refs_file
     local actual_raw=${CROSS_RAW_OUTPUTS[$agent]} actual_findings=${CROSS_FINDINGS_OUTPUTS[$agent]}
     local diagnostic_base="${ERROR_LOGS[$agent]%.log}-schema-repair-attempt-${attempt}"
     local source_diagnostic="${diagnostic_base}-source-raw.ndjson"
@@ -6005,7 +6017,9 @@ attempt_cross_ndjson_repair() {
     local log_diagnostic="${diagnostic_base}.log" usage_diagnostic="${diagnostic_base}-usage.json"
 
     new_temp_file "cross-${agent}-repair-baseline"; baseline_file=$NEW_TEMP_FILE
-    if ! build_cross_repair_baseline "$output_file" "$baseline_file"; then
+    new_temp_file "cross-${agent}-repair-refs"; refs_file=$NEW_TEMP_FILE
+    build_cross_expected_refs "$agent" "$refs_file" || : >"$refs_file"
+    if ! build_cross_repair_baseline "$output_file" "$baseline_file" "$refs_file"; then
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi

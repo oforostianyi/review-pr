@@ -443,6 +443,24 @@ fill_presentation_defaults cross alpha "$test_root/cross-uncertain-records.json"
 validate_cross_ndjson_records "$test_root/cross-uncertain-records.json" "$test_root/cross-uncertain-validated.json" alpha "$cross_expected_refs"
 assert_true 'so a repair that keeps the draft as it was passes the stability check' \
     validate_cross_repair_stability "$test_root/cross-uncertain-baseline.json" "$test_root/cross-uncertain-validated.json"
+# Processing also corrects a source_refs agent key to the one owner of its
+# source_id before it validates. A baseline that kept the wrong key compared a
+# faithful repair of the draft with the draft itself, and refused the repair.
+mislabelled_draft="$test_root/cross-mislabelled-draft.ndjson"
+{
+    jq -c '.[0] | .source_refs = [{agent: "gamma", source_id: "beta:F-001"}] | .contributing_agents = ["gamma"]' "$cross_records"
+    jq -c '.[1]' "$cross_records"
+} >"$mislabelled_draft"
+assert_true 'a draft citing a source under the wrong agent still yields a repair baseline' \
+    build_cross_repair_baseline "$mislabelled_draft" "$test_root/cross-mislabelled-baseline.json" "$cross_expected_refs"
+assert_eq 'beta beta' "$(jq -r '.findings[0] | "\(.source_refs[0].agent) \(.contributing_agents[0])"' "$test_root/cross-mislabelled-baseline.json")" \
+    'with the agent key corrected as processing corrects it'
+jq -s '.' "$mislabelled_draft" >"$test_root/cross-mislabelled-records.json"
+fill_presentation_defaults cross alpha "$test_root/cross-mislabelled-records.json" true
+normalize_ndjson_source_ref_agents "$test_root/cross-mislabelled-records.json" "$cross_expected_refs" "$test_root/cross-mislabelled-corrected.json"
+validate_cross_ndjson_records "$test_root/cross-mislabelled-corrected.json" "$test_root/cross-mislabelled-validated.json" alpha "$cross_expected_refs"
+assert_true 'so a repair that keeps such a draft as it was passes the stability check' \
+    validate_cross_repair_stability "$test_root/cross-mislabelled-baseline.json" "$test_root/cross-mislabelled-validated.json"
 confirmed_records="$test_root/cross-confirmed-no-scenario.json"
 jq '.[0] |= del(.failure_scenario)' "$cross_records" >"$confirmed_records"
 fill_presentation_defaults cross alpha "$confirmed_records"
@@ -726,6 +744,17 @@ changed_final_flag="$test_root/final-changed-rejection-flag.json"
 jq '.findings[0].include_in_rejected_summary = true' "$final_canonical" >"$changed_final_flag"
 assert_false 'final repair stability rejects changes to rejection presentation decisions' \
     validate_final_repair_stability "$final_repair_baseline" "$changed_final_flag"
+# The final synthesis corrects a mislabelled agent key before it validates too,
+# so its baseline must hold the corrected key as well.
+final_mislabelled="$test_root/final-mislabelled.ndjson"
+{
+    jq -c '.[0] | .source_refs[0].agent = "gamma" | .contributing_agents = ["gamma"]' "$final_records"
+    jq -c '.[1]' "$final_records"
+} >"$final_mislabelled"
+assert_true 'a final draft citing a source under the wrong agent yields a repair baseline' \
+    build_final_repair_baseline "$final_mislabelled" "$test_root/final-mislabelled-baseline.json" "$final_expected_refs"
+assert_true 'that a faithful repair of it matches' \
+    validate_final_repair_stability "$test_root/final-mislabelled-baseline.json" "$final_canonical"
 
 # A final synthesis that stopped early is continued on the same terms as a
 # cross-review, with one extra rule: a draft that already decided disputes is
