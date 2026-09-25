@@ -393,7 +393,7 @@ keys remain language-independent.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Trailing
   transport prose, fences, record/schema metadata, and a missing or malformed terminal completion
-  record are repairable. Two keys that only say how a finding is presented are not failed on at all:
+  record are repairable. Keys that only say how a finding is presented are not failed on at all:
   a finding without `existing_feedback` gets `{"state":"unknown","thread_ids":[]}`, which states
   honestly that the model did not report thread coverage -- and so does one whose `existing_feedback`
   the contract does not define, a state of the model's own or a confirmed thread without a thread
@@ -403,8 +403,10 @@ keys remain language-independent.
   A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
   `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
   CONFIRMED finding owes both and still fails without them.
-  Both are filled in before validation, without a model, and the console says so, as is a key a
-  `complete` record carries that the contract does not define, which is dropped. Any other missing
+  All of these are filled in before validation, without a model, and the console says so; a key a
+  `complete` record carries that the contract does not define is dropped the same way. A repair
+  baseline gets the same values, and the same correction of a mislabelled `source_refs` agent key,
+  so a repair that keeps a draft as it was still matches its baseline. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
   finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
   or a brace that closes the record early so that the rest of it reads as junk, of which nothing
