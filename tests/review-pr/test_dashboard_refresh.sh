@@ -64,4 +64,34 @@ assert_true 'an idle refresher stops at once rather than finishing its wait' \
 assert_false 'and it draws no further frame on the way out' \
     grep -q FRAME-BEGIN "$refresh_frames"
 
+# log() hands its lines to the renderer, but a warning from gh, git or jq went
+# straight into the frame and every later redraw stranded a copy of its top line.
+# While the table is up the run's stderr goes to the message file instead, and
+# it is the terminal again once the table is down.
+capture_case="$suite_root/stderr-capture"
+mkdir -p -- "$capture_case"
+DASHBOARD_MESSAGE_FILE="$capture_case/messages.txt"
+: >"$DASHBOARD_MESSAGE_FILE"
+exec {test_stderr}>&2
+exec 2>"$capture_case/terminal.txt"
+capture_dashboard_stderr
+printf 'a warning written straight to stderr\n' >&2
+sh -c 'printf "and one from a child process" >&2'
+restore_dashboard_stderr
+printf 'after the table\n' >&2
+exec 2>&"$test_stderr" {test_stderr}>&-
+assert_file_contains "$DASHBOARD_MESSAGE_FILE" 'a warning written straight to stderr' \
+    'a line written to stderr while the table is up is held for the renderer'
+assert_file_contains "$DASHBOARD_MESSAGE_FILE" 'and one from a child process' \
+    'and so is one from a child process'
+assert_false 'neither reaches the terminal under the frame' \
+    grep -q 'warning written straight' "$capture_case/terminal.txt"
+assert_file_contains "$capture_case/terminal.txt" 'after the table' \
+    'and stderr is the terminal again once the table is down'
+flushed="$capture_case/flushed.txt"
+flush_dashboard_messages 2>"$flushed"
+assert_eq 2 "$(wc -l <"$flushed" | tr -d ' ')" \
+    'the renderer prints the held lines, closing one that had no newline'
+assert_false 'and empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

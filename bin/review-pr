@@ -277,6 +277,7 @@ DASHBOARD_COLOR_ENABLED=false
 DASHBOARD_SHOW_PID=true
 DASHBOARD_ACTIVE=false
 DASHBOARD_MESSAGE_FILE=""
+DASHBOARD_TERMINAL_FD=""
 RUN_HISTORY_FILE=""
 RUN_HISTORY_STARTED_AT=0
 # The agent column, in characters. The label is trimmed to it and the row prints
@@ -659,8 +660,12 @@ cleanup() {
             kill "$DASHBOARD_PID" 2>/dev/null || true
             wait "$DASHBOARD_PID" 2>/dev/null || true
         fi
+        restore_dashboard_stderr
         printf '\033[?25h\n' >&2
         DASHBOARD_ACTIVE=false
+        # Whatever the run said last while the table was up -- the ERROR line of
+        # a die, for one -- would otherwise go down with the temporary files.
+        flush_dashboard_messages
     fi
 
     for pid in "${RUNNING_PIDS[@]}"; do
@@ -8199,8 +8204,7 @@ render_dashboard_snapshot() {
     # the frame that follows stays exactly one frame tall.
     if [[ -s "${DASHBOARD_MESSAGE_FILE:-/dev/null}" ]]; then
         printf '\033[0J' >&2
-        cat -- "$DASHBOARD_MESSAGE_FILE" >&2
-        : >"$DASHBOARD_MESSAGE_FILE"
+        flush_dashboard_messages
     fi
 
     while IFS='|' read -r section label status pid started_at finished_at tokens; do
@@ -8358,6 +8362,36 @@ start_dashboard() {
     DASHBOARD_ACTIVE=true
     dashboard_refresh_loop &
     DASHBOARD_PID=$!
+    capture_dashboard_stderr
+}
+
+# log() already hands its lines to the renderer while the table is up, but
+# anything else written to stderr -- a gh or git warning, a jq complaint, a
+# helper that prints -- still went straight into the frame. Each such line
+# pushed the frame up a row, and every later redraw stranded a copy of its top
+# line: the headers seen two and three times. So the run's own stderr goes to the
+# message file while the table is up, and the renderer, started before the
+# switch, is the only one left writing to the terminal.
+capture_dashboard_stderr() {
+    [[ -n "$DASHBOARD_MESSAGE_FILE" && -z "$DASHBOARD_TERMINAL_FD" ]] || return 0
+    exec {DASHBOARD_TERMINAL_FD}>&2
+    exec 2>>"$DASHBOARD_MESSAGE_FILE"
+}
+
+restore_dashboard_stderr() {
+    [[ -n "$DASHBOARD_TERMINAL_FD" ]] || return 0
+    exec 2>&"$DASHBOARD_TERMINAL_FD"
+    exec {DASHBOARD_TERMINAL_FD}>&-
+    DASHBOARD_TERMINAL_FD=""
+}
+
+# Prints and clears what the run said while the table was up. A captured line
+# need not end in a newline, and the frame must still start on a line of its own.
+flush_dashboard_messages() {
+    [[ -s "${DASHBOARD_MESSAGE_FILE:-/dev/null}" ]] || return 0
+    cat -- "$DASHBOARD_MESSAGE_FILE" >&2
+    [[ -z "$(tail -c 1 -- "$DASHBOARD_MESSAGE_FILE")" ]] || printf '\n' >&2
+    : >"$DASHBOARD_MESSAGE_FILE"
 }
 
 # A frame is redrawn by moving the cursor up its own height, so the frame below
@@ -8405,14 +8439,12 @@ stop_dashboard() {
 
     kill "$DASHBOARD_PID" 2>/dev/null || true
     wait "$DASHBOARD_PID" 2>/dev/null || true
+    restore_dashboard_stderr
     render_dashboard_snapshot true
     printf '\033[?25h\n' >&2
     DASHBOARD_ACTIVE=false
     DASHBOARD_PID=""
-    if [[ -s "${DASHBOARD_MESSAGE_FILE:-/dev/null}" ]]; then
-        cat -- "$DASHBOARD_MESSAGE_FILE" >&2
-        : >"$DASHBOARD_MESSAGE_FILE"
-    fi
+    flush_dashboard_messages
 }
 
 heartbeat_agent() {
