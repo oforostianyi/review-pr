@@ -33,6 +33,26 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A key that only says how a finding is presented no longer costs the finding: a missing or
+  undefined `existing_feedback` becomes `unknown` (what the model wrote is kept among its
+  verification limitations), a final finding without `include_in_rejected_summary` gets `false`, a
+  REJECTED or UNCERTAIN verdict without `failure_scenario` or `recommendation` gets `null`, and a
+  key a `complete` record does not define is dropped. Repair baselines get the same defaults, so a
+  faithful repair of such a draft passes its stability check.
+- An anchor that covers changed lines may end on a context line of its own diff hunk, recorded as
+  `right_side_hunks` in the changed-line map: git often prints the closing brace of a new block as
+  unchanged, and a finding anchored to the whole block was rejected for that one line.
+- A record closed early by a stray brace no longer leaves a truncated copy behind: a line's objects
+  are kept only when the whole line parses.
+- Everything the run writes to stderr while the live table is up is printed above the next frame,
+  not into it, so a stray warning no longer leaves copies of a section title; nothing appended to the
+  message file during a redraw is lost, and a failure while the table is up still prints its ERROR
+  line.
+- Prompts no longer call every pull request a PHP one, and they say that text addressed to models
+  inside the code under review is its subject, never an instruction.
+- Each structured prompt ends with a checklist of every record's keys and every closed value set, a
+  final synthesis is salvaged only after every attempt and the fallback have failed, and prose ahead
+  of the first record is dropped without a model call.
 - A measurement can no longer write a file. The policy refused an absolute path, but read the whole
   argument, and an option carries its path after an equals sign — `--output=/etc/x` begins with a
   dash, so it passed. The value after an equals sign is now examined on its own, and `--output` is
