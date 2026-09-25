@@ -13,8 +13,9 @@ schema="$repo_root/config/review-pr.schema.json"
 # own validator is what decides whether a run starts. When they disagree, a
 # configuration is red in the editor and accepted by the tool, or the reverse. The
 # effort vocabularies drifted apart exactly that way when `auto` was added.
+# jq 1.6 reads `def` after a dollar sign as the keyword, so the name is `$name`.
 schema_efforts() {
-    jq -r --arg def "$1" '.["$defs"][$def].enum | sort | join(",")' "$schema"
+    jq -r --arg name "$1" '.["$defs"][$name].enum | sort | join(",")' "$schema"
 }
 
 assert_eq 'auto' "$(jq -r '.["$defs"].claudeEffort.enum | map(select(. == "auto")) | join(",")' "$schema")" \
