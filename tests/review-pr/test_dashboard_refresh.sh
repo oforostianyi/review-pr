@@ -92,6 +92,15 @@ flushed="$capture_case/flushed.txt"
 flush_dashboard_messages 2>"$flushed"
 assert_eq 2 "$(wc -l <"$flushed" | tr -d ' ')" \
     'the renderer prints the held lines, closing one that had no newline'
-assert_false 'and empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
+# Emptying the file after printing it lost whatever a writer appended between
+# the two; the renderer now reads on from where it stopped.
+printf 'written after the first flush\n' >>"$DASHBOARD_MESSAGE_FILE"
+flush_dashboard_messages 2>"$flushed"
+assert_eq 'written after the first flush' "$(cat "$flushed")" \
+    'a later flush prints only what came after the last one'
+flush_dashboard_messages 2>"$flushed"
+assert_false 'and prints nothing twice' test -s "$flushed"
+flush_dashboard_messages true 2>"$flushed"
+assert_false 'the last flush, when the table is down, empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
