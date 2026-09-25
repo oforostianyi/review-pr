@@ -137,8 +137,13 @@ DASHBOARD_MESSAGE_FILE="$teardown_case/stop-messages.txt"
 : >"$DASHBOARD_MESSAGE_FILE"
 exec {test_stderr}>&2
 exec 2>"$teardown_case/stop-terminal.txt"
-sleep 30 &
+# The stand-in refresher is started with no EXIT trap to inherit: killed before
+# it became sleep, a child holding the suite's trap would remove the suite root.
+suite_exit_trap=$(trap -p EXIT)
+trap - EXIT
+sleep 5 &
 DASHBOARD_PID=$!
+eval "$suite_exit_trap"
 DASHBOARD_ACTIVE=true
 capture_dashboard_stderr
 printf 'written while the table was up\n' >&2
