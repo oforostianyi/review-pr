@@ -379,9 +379,12 @@ keys remain language-independent.
   continuation pass, described below, which republishes them only as part of a merged stream that
   passes the full contract.
 - Every structured phase prompt ends with a `BEFORE YOU SEND` block that restates the keys of each
-  record the phase may emit. The lists appear earlier in the contract too, but that is mid-prompt,
-  under the skill and the repository facts, and a model that answers after dozens of tool calls may
-  rebuild a record from memory and drop a key. Valid fixtures are tested against the same lists.
+  record the phase may emit and every closed value set -- classification, severity, anchor kind,
+  feedback state and, for resolutions, dispute kind, status, verification method and basis, with
+  basis told apart from how a dispute was checked. The lists appear earlier in the contract too, but
+  that is mid-prompt, under the skill and the repository facts, and a model that answers after
+  dozens of tool calls may rebuild a record from memory, drop a key or coin a value. Valid fixtures
+  are tested against the key lists, and the value sets against the validators' own.
 - Prose ahead of the first record is dropped before validation, without a model: an announcement
   such as "Here is the review:", or the progress notes Codex sends before tool calls, which arrive
   as agent messages of their own and are joined with the answer. The console counts the lines; the
@@ -390,15 +393,24 @@ keys remain language-independent.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Trailing
   transport prose, fences, record/schema metadata, and a missing or malformed terminal completion
-  record are repairable. Two keys that only say how a finding is presented are not failed on at all:
+  record are repairable. Keys that only say how a finding is presented are not failed on at all:
   a finding without `existing_feedback` gets `{"state":"unknown","thread_ids":[]}`, which states
-  honestly that the model did not report thread coverage, and a final finding without
+  honestly that the model did not report thread coverage -- and so does one whose `existing_feedback`
+  the contract does not define, a state of the model's own or a confirmed thread without a thread
+  id, with what the model wrote kept among the finding's verification limitations in the language
+  of the report -- and a final finding without
   `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
-  Both are filled in before validation, without a model, and the console says so, as is a key a
-  `complete` record carries that the contract does not define, which is dropped. Any other missing
+  A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
+  `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
+  CONFIRMED finding owes both and still fails without them.
+  All of these are filled in before validation, without a model, and the console says so; a key a
+  `complete` record carries that the contract does not define is dropped the same way. A repair
+  baseline gets the same values, and the same correction of a mislabelled `source_refs` agent key,
+  so a repair that keeps a draft as it was still matches its baseline. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
-  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array --
-  is left out of the baseline and handed back to the repair pass, which sees the broken record in
+  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
+  or a brace that closes the record early so that the rest of it reads as junk, of which nothing
+  is kept -- is left out of the baseline and handed back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
   position, its record kind, and the ids it names. The repair prompt lists them, and a repair must
   bring back every one -- the preserved records unchanged and in order, plus exactly one restored

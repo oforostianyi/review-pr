@@ -245,8 +245,11 @@ assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/message-frame.txt")" \
 assert_eq "$((DASHBOARD_LINE_COUNT + 1))" \
     "$(wc -l <"$CASE_DIR/message-frame.txt" | tr -d ' ')" \
     'the frame keeps its height and the message adds exactly its own line'
-assert_eq '0' "$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')" \
-    'a printed message is not printed again on the next frame'
+# The file is read on from where the renderer stopped rather than emptied, so a
+# line appended while it prints is not lost; the next frame still skips it.
+render_dashboard_snapshot false 2>"$CASE_DIR/message-frame-2.txt"
+assert_false 'a printed message is not printed again on the next frame' \
+    grep -q 'something happened while the table was up' "$CASE_DIR/message-frame-2.txt"
 DASHBOARD_MESSAGE_FILE=""
 
 AGENT_LABELS[wide]='An unusually long agent label'

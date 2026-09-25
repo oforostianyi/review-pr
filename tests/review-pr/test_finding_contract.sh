@@ -414,6 +414,58 @@ assert_true 'and a repair that writes that finding again is accepted' \
 jq '.findings = [] | .finding_count = 0' "$cross_canonical" >"$test_root/cross-dirty-dropped.json"
 assert_false 'while one that drops it is rejected' \
     validate_cross_repair_stability "$test_root/cross-dirty-baseline.json" "$test_root/cross-dirty-dropped.json"
+# A REJECTED or UNCERTAIN verdict may leave its failure scenario and
+# recommendation empty, so leaving the keys out says the same; a CONFIRMED
+# finding owes both, and still fails without them.
+uncertain_records="$test_root/cross-uncertain-no-scenario.json"
+jq '.[0] |= (.classification = "UNCERTAIN" | .severity = null | del(.failure_scenario, .recommendation))' \
+    "$cross_records" >"$uncertain_records"
+fill_presentation_defaults cross alpha "$uncertain_records"
+assert_eq 'null null' "$(jq -r '.[0] | "\(.failure_scenario) \(.recommendation)"' "$uncertain_records")" \
+    'an uncertain verdict that left out its failure scenario and recommendation gets null for both'
+assert_true 'and validates as the empty verdict it is' \
+    validate_cross_ndjson_records "$uncertain_records" "$test_root/cross-uncertain-canonical.json" alpha "$cross_expected_refs"
+# The repair baseline goes through the same defaults as validation, or a faithful
+# repair of such a draft fails the stability check, and a verdict without its
+# optional keys makes the baseline refuse the draft outright.
+uncertain_draft="$test_root/cross-uncertain-draft.ndjson"
+{
+    jq -c '.[0] | .classification = "UNCERTAIN" | .severity = null | del(.failure_scenario, .recommendation)
+        | .existing_feedback = {state: "existing-review-body", thread_ids: []}' "$cross_records"
+    jq -c '.[1]' "$cross_records"
+} >"$uncertain_draft"
+assert_true 'a verdict without its optional keys still yields a repair baseline' \
+    build_cross_repair_baseline "$uncertain_draft" "$test_root/cross-uncertain-baseline.json"
+assert_eq 'null unknown' "$(jq -r '.findings[0] | "\(.failure_scenario) \(.existing_feedback.state)"' "$test_root/cross-uncertain-baseline.json")" \
+    'with the same defaults validation applies'
+jq -s '.' "$uncertain_draft" >"$test_root/cross-uncertain-records.json"
+fill_presentation_defaults cross alpha "$test_root/cross-uncertain-records.json" true
+validate_cross_ndjson_records "$test_root/cross-uncertain-records.json" "$test_root/cross-uncertain-validated.json" alpha "$cross_expected_refs"
+assert_true 'so a repair that keeps the draft as it was passes the stability check' \
+    validate_cross_repair_stability "$test_root/cross-uncertain-baseline.json" "$test_root/cross-uncertain-validated.json"
+# Processing also corrects a source_refs agent key to the one owner of its
+# source_id before it validates. A baseline that kept the wrong key compared a
+# faithful repair of the draft with the draft itself, and refused the repair.
+mislabelled_draft="$test_root/cross-mislabelled-draft.ndjson"
+{
+    jq -c '.[0] | .source_refs = [{agent: "gamma", source_id: "beta:F-001"}] | .contributing_agents = ["gamma"]' "$cross_records"
+    jq -c '.[1]' "$cross_records"
+} >"$mislabelled_draft"
+assert_true 'a draft citing a source under the wrong agent still yields a repair baseline' \
+    build_cross_repair_baseline "$mislabelled_draft" "$test_root/cross-mislabelled-baseline.json" "$cross_expected_refs"
+assert_eq 'beta beta' "$(jq -r '.findings[0] | "\(.source_refs[0].agent) \(.contributing_agents[0])"' "$test_root/cross-mislabelled-baseline.json")" \
+    'with the agent key corrected as processing corrects it'
+jq -s '.' "$mislabelled_draft" >"$test_root/cross-mislabelled-records.json"
+fill_presentation_defaults cross alpha "$test_root/cross-mislabelled-records.json" true
+normalize_ndjson_source_ref_agents "$test_root/cross-mislabelled-records.json" "$cross_expected_refs" "$test_root/cross-mislabelled-corrected.json"
+validate_cross_ndjson_records "$test_root/cross-mislabelled-corrected.json" "$test_root/cross-mislabelled-validated.json" alpha "$cross_expected_refs"
+assert_true 'so a repair that keeps such a draft as it was passes the stability check' \
+    validate_cross_repair_stability "$test_root/cross-mislabelled-baseline.json" "$test_root/cross-mislabelled-validated.json"
+confirmed_records="$test_root/cross-confirmed-no-scenario.json"
+jq '.[0] |= del(.failure_scenario)' "$cross_records" >"$confirmed_records"
+fill_presentation_defaults cross alpha "$confirmed_records"
+assert_false 'while a confirmed finding still fails without its failure scenario' \
+    validate_cross_ndjson_records "$confirmed_records" "$test_root/cross-confirmed-canonical.json" alpha "$cross_expected_refs"
 
 REVIEW_AGENTS=(alpha)
 CROSS_FINDINGS_OUTPUTS[alpha]="$cross_canonical"
@@ -692,6 +744,17 @@ changed_final_flag="$test_root/final-changed-rejection-flag.json"
 jq '.findings[0].include_in_rejected_summary = true' "$final_canonical" >"$changed_final_flag"
 assert_false 'final repair stability rejects changes to rejection presentation decisions' \
     validate_final_repair_stability "$final_repair_baseline" "$changed_final_flag"
+# The final synthesis corrects a mislabelled agent key before it validates too,
+# so its baseline must hold the corrected key as well.
+final_mislabelled="$test_root/final-mislabelled.ndjson"
+{
+    jq -c '.[0] | .source_refs[0].agent = "gamma" | .contributing_agents = ["gamma"]' "$final_records"
+    jq -c '.[1]' "$final_records"
+} >"$final_mislabelled"
+assert_true 'a final draft citing a source under the wrong agent yields a repair baseline' \
+    build_final_repair_baseline "$final_mislabelled" "$test_root/final-mislabelled-baseline.json" "$final_expected_refs"
+assert_true 'that a faithful repair of it matches' \
+    validate_final_repair_stability "$test_root/final-mislabelled-baseline.json" "$final_canonical"
 
 # A final synthesis that stopped early is continued on the same terms as a
 # cross-review, with one extra rule: a draft that already decided disputes is
@@ -1242,10 +1305,68 @@ replace_first_literal '"contributing_agents":["codex"]' '"contributing_agents":[
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$foreign_provenance"
 assert_invalid_contract foreign-primary-provenance 'schema_or_completeness_validation_failed: finding[F-001].contributing_agents' "$foreign_provenance"
 
+# A confirmed thread with no thread id, or a state the contract does not have,
+# is feedback nobody can check: it is recorded as unknown, and what the model
+# wrote is kept among the finding's verification limitations.
 missing_thread_id="$test_root/missing-thread-id.ndjson"
 replace_first_literal '"state":"new","thread_ids":[]' '"state":"confirmed-existing","thread_ids":[]' \
     <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$missing_thread_id"
-assert_invalid_contract missing-existing-thread-id 'schema_or_completeness_validation_failed: finding[F-001].existing_feedback' "$missing_thread_id"
+REPORT_STEM=fixture-missing-thread-id
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-missing-thread-id-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-missing-thread-id-codex-findings.json"
+assert_true 'a confirmed thread with no thread id no longer costs the finding' \
+    process_primary_ndjson_output "$missing_thread_id" codex
+assert_eq 'unknown' "$(jq -r '.findings[0].existing_feedback.state' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'it is recorded as unknown'
+assert_true 'and what the model wrote is kept among the verification limitations' \
+    grep -q 'was reported as {\\"state\\":\\"confirmed-existing\\"' "${PRIMARY_FINDINGS_OUTPUTS[codex]}"
+own_state="$test_root/own-feedback-state.ndjson"
+replace_first_literal '"state":"new","thread_ids":[]' '"state":"existing-review-body","thread_ids":[]' \
+    <"$test_dir/fixtures/primary-findings-valid.ndjson" >"$own_state"
+REPORT_STEM=fixture-own-feedback-state
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-findings.json"
+PRIMARY_REVIEW_LANGUAGE=UA
+assert_true 'a feedback state of the model'"'"'s own is accepted the same way' \
+    process_primary_ndjson_output "$own_state" codex
+assert_true 'with the note in the language of the report' \
+    grep -q 'Наявний відгук модель описала як' "${PRIMARY_FINDINGS_OUTPUTS[codex]}"
+PRIMARY_REVIEW_LANGUAGE=EN
+
+# The closing checklist lists every closed value set as the validators hold it,
+# so the model reads the exact choices last, and the lists cannot drift apart.
+# Each set is looked for in every place that holds a copy of it, not anywhere in
+# the file: a copy elsewhere would pass while one of them drifted. The copy in
+# EXISTING_FEEDBACK_JQ_DEFS matters most, because it drifts silently: a state it
+# lacks is rewritten to unknown before any validator sees it. A new copy of a
+# set belongs in its list here.
+value_set_in() {
+    local value_set=$1 source_text=$2 literal
+    literal="IN($(sed 's/\([^, ][^,]*\)/"\1"/g' <<<"$value_set"))"
+    grep -Fq -- "$literal" <<<"$source_text"
+}
+for holder in validate_primary_ndjson_records validate_cross_ndjson_records validate_final_ndjson_records \
+    describe_ndjson_validation_failure; do
+    assert_true "${holder} holds exactly ${SEVERITY_VALUES}" value_set_in "$SEVERITY_VALUES" "$(declare -f "$holder")"
+    assert_true "${holder} holds exactly ${FEEDBACK_STATE_VALUES}" value_set_in "$FEEDBACK_STATE_VALUES" "$(declare -f "$holder")"
+done
+assert_true "the presentation defaults keep exactly ${FEEDBACK_STATE_VALUES}" \
+    value_set_in "$FEEDBACK_STATE_VALUES" "$EXISTING_FEEDBACK_JQ_DEFS"
+for holder in validate_cross_ndjson_records validate_final_ndjson_records describe_ndjson_validation_failure; do
+    assert_true "${holder} holds exactly ${CLASSIFICATION_VALUES}" value_set_in "$CLASSIFICATION_VALUES" "$(declare -f "$holder")"
+done
+for value_set in "$DISPUTE_KIND_VALUES" "$RESOLUTION_STATUS_VALUES" "$VERIFICATION_METHOD_VALUES" "$BASIS_VALUES"; do
+    assert_true "the resolution rules enforce exactly ${value_set}" value_set_in "$value_set" "$RESOLUTION_JQ_DEFS"
+done
+DISPUTE_RESOLUTION_ENABLED=true
+checklist_final="$test_root/checklist-final.txt"
+: >"$checklist_final"
+append_record_checklist_to_prompt "$checklist_final" final
+assert_file_contains "$checklist_final" "- basis: ${BASIS_VALUES} -- the kind of rule the decision rests on, never how it was checked." \
+    'the final checklist tells basis apart from how a dispute was checked'
+assert_file_contains "$checklist_final" "- verification_method: ${VERIFICATION_METHOD_VALUES}" \
+    'and names every verification method'
+DISPUTE_RESOLUTION_ENABLED=false
 
 # The closing checklist restates the key lists where a model reads them last, so
 # a list that drifted from what the validators accept would teach the very
@@ -1390,6 +1511,27 @@ assert_eq 1 "$NDJSON_BASELINE_DIRTY_RECORDS" \
     'and the record it could not read is counted, not silently forgotten'
 assert_false 'a stream torn off mid-record is still refused outright' \
     build_primary_repair_baseline "$test_root/baseline-torn.ndjson" "$test_root/baseline-torn.md"
+
+# A record closed early by a stray brace parses as a shorter record followed by
+# junk, and jq printed the shorter record before it failed on the junk. On 29024
+# that truncated finding stood in the repair baseline with fields missing and
+# refused the repair; in salvage it was counted twice, as an unreadable line and
+# as a finding that failed the contract. Nothing of such a line is kept now.
+early_close_file="$test_root/early-close-appended.ndjson"
+: >"$early_close_file"
+assert_false 'a line with junk after its first object does not count as parsed' \
+    append_json_line '{"record":"finding","limitations":["text."]},"existing_feedback":{"state":"new"}}' "$early_close_file"
+assert_false 'and leaves nothing behind' test -s "$early_close_file"
+early_close_line=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson" \
+    | sed 's/\],"existing_feedback"/]},"existing_feedback"/')
+printf '%s\n%s\n%s\n' "$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson")" "$early_close_line" \
+    "$(sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson")" >"$test_root/early-close.ndjson"
+assert_true 'such a line leaves the rest of the stream a repair baseline' \
+    build_primary_repair_baseline "$test_root/early-close.ndjson" "$test_root/early-close-baseline.json"
+assert_eq 'F-001' "$(jq -r '[.findings[].source_id] | join(",")' "$test_root/early-close-baseline.json")" \
+    'without a truncated copy of the broken record in it'
+assert_eq 'F-002' "$(jq -r '.unparsed[0].source_ids[0]' "$test_root/early-close-baseline.json")" \
+    'which is named instead, for the repair to write again'
 
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the
