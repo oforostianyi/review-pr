@@ -3391,6 +3391,19 @@ repair_lone_json_escapes() {
 # A repaired line is a line the model wrote wrongly. A stream that needed repairs
 # is not the same as one that parsed as written, and the count was being kept and
 # then discarded, so nothing distinguished them in the log.
+# Appends the JSON objects on one line to a file, and only when the whole line
+# parses. jq prints each value as soon as it has read it, so a record closed
+# early by a stray brace -- '{..."]},"existing_feedback":{...}}' -- came out
+# whole up to that brace before jq failed on the rest. The truncated record was
+# kept while the line was also counted as unreadable, and in a repair baseline
+# it stood as a finding with fields missing, which refused the repair outright.
+append_json_line() {
+    local line=$1 output_file=$2 parsed
+
+    parsed=$(jq -e -c 'select(type == "object")' <<<"$line" 2>/dev/null) || return 1
+    printf '%s\n' "$parsed" >>"$output_file"
+}
+
 log_escape_repairs() {
     local count=$1 phase=$2 agent=$3
     local noun=escapes
@@ -3784,10 +3797,10 @@ process_primary_ndjson_output() {
     : >"$records_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
-        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
+        if ! append_json_line "$line" "$records_file"; then
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
-                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                || ! append_json_line "$repaired_line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     continue
@@ -4127,10 +4140,10 @@ process_cross_ndjson_output() {
     : >"$records_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
-        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
+        if ! append_json_line "$line" "$records_file"; then
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
-                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                || ! append_json_line "$repaired_line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     continue
@@ -5351,10 +5364,10 @@ process_final_ndjson_output() {
     : >"$records_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
-        if ! jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null; then
+        if ! append_json_line "$line" "$records_file"; then
             repaired_line=$(repair_lone_json_escapes "$line")
             if [[ "$repaired_line" == "$line" ]] \
-                || ! jq -e -c 'select(type == "object")' <<<"$repaired_line" >>"$records_file" 2>/dev/null; then
+                || ! append_json_line "$repaired_line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     # A resolution may name the finding this line held. Every id the
@@ -5529,7 +5542,7 @@ build_final_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+        if append_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -5792,7 +5805,7 @@ build_cross_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+        if append_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -6058,7 +6071,7 @@ build_primary_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if jq -e -c 'select(type == "object")' <<<"$trimmed" >>"$parsed_file" 2>/dev/null; then
+        if append_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -11574,7 +11587,7 @@ parse_contract_test_stream() {
     normalize_primary_ndjson_stream "$raw_file" "$normalized_file" || return 1
     : >"$records_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
-        jq -e -c 'select(type == "object")' <<<"$line" >>"$records_file" 2>/dev/null || return 1
+        append_json_line "$line" "$records_file" || return 1
     done <"$normalized_file"
     jq -s '.' "$records_file" >"$array_file" || return 1
     mv -- "$array_file" "$records_file"

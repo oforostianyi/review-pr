@@ -1447,6 +1447,27 @@ assert_eq 1 "$NDJSON_BASELINE_DIRTY_RECORDS" \
 assert_false 'a stream torn off mid-record is still refused outright' \
     build_primary_repair_baseline "$test_root/baseline-torn.ndjson" "$test_root/baseline-torn.md"
 
+# A record closed early by a stray brace parses as a shorter record followed by
+# junk, and jq printed the shorter record before it failed on the junk. On 29024
+# that truncated finding stood in the repair baseline with fields missing and
+# refused the repair; in salvage it was counted twice, as an unreadable line and
+# as a finding that failed the contract. Nothing of such a line is kept now.
+early_close_file="$test_root/early-close-appended.ndjson"
+: >"$early_close_file"
+assert_false 'a line with junk after its first object does not count as parsed' \
+    append_json_line '{"record":"finding","limitations":["text."]},"existing_feedback":{"state":"new"}}' "$early_close_file"
+assert_false 'and leaves nothing behind' test -s "$early_close_file"
+early_close_line=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson" \
+    | sed 's/\],"existing_feedback"/]},"existing_feedback"/')
+printf '%s\n%s\n%s\n' "$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson")" "$early_close_line" \
+    "$(sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson")" >"$test_root/early-close.ndjson"
+assert_true 'such a line leaves the rest of the stream a repair baseline' \
+    build_primary_repair_baseline "$test_root/early-close.ndjson" "$test_root/early-close-baseline.json"
+assert_eq 'F-001' "$(jq -r '[.findings[].source_id] | join(",")' "$test_root/early-close-baseline.json")" \
+    'without a truncated copy of the broken record in it'
+assert_eq 'F-002' "$(jq -r '.unparsed[0].source_ids[0]' "$test_root/early-close-baseline.json")" \
+    'which is named instead, for the repair to write again'
+
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the
 # record, and the check -- comparing only what the baseline kept -- accepted the

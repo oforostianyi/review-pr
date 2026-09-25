@@ -406,8 +406,9 @@ keys remain language-independent.
   Both are filled in before validation, without a model, and the console says so, as is a key a
   `complete` record carries that the contract does not define, which is dropped. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
-  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array --
-  is left out of the baseline and handed back to the repair pass, which sees the broken record in
+  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
+  or a brace that closes the record early so that the rest of it reads as junk, of which nothing
+  is kept -- is left out of the baseline and handed back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
   position, its record kind, and the ids it names. The repair prompt lists them, and a repair must
   bring back every one -- the preserved records unchanged and in order, plus exactly one restored
