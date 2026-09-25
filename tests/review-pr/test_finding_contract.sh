@@ -1335,18 +1335,26 @@ PRIMARY_REVIEW_LANGUAGE=EN
 
 # The closing checklist lists every closed value set as the validators hold it,
 # so the model reads the exact choices last, and the lists cannot drift apart.
-# Each set is looked for in the validator that owns it, not anywhere in the file:
-# a copy elsewhere would pass while the validator drifted.
+# Each set is looked for in every place that holds a copy of it, not anywhere in
+# the file: a copy elsewhere would pass while one of them drifted. The copy in
+# EXISTING_FEEDBACK_JQ_DEFS matters most, because it drifts silently: a state it
+# lacks is rewritten to unknown before any validator sees it. A new copy of a
+# set belongs in its list here.
 value_set_in() {
     local value_set=$1 source_text=$2 literal
     literal="IN($(sed 's/\([^, ][^,]*\)/"\1"/g' <<<"$value_set"))"
     grep -Fq -- "$literal" <<<"$source_text"
 }
-primary_validator=$(declare -f validate_primary_ndjson_records)
-cross_validator=$(declare -f validate_cross_ndjson_records)
-assert_true "the primary validator enforces exactly ${SEVERITY_VALUES}" value_set_in "$SEVERITY_VALUES" "$primary_validator"
-assert_true "and exactly ${FEEDBACK_STATE_VALUES}" value_set_in "$FEEDBACK_STATE_VALUES" "$primary_validator"
-assert_true "the cross-review validator enforces exactly ${CLASSIFICATION_VALUES}" value_set_in "$CLASSIFICATION_VALUES" "$cross_validator"
+for holder in validate_primary_ndjson_records validate_cross_ndjson_records validate_final_ndjson_records \
+    describe_ndjson_validation_failure; do
+    assert_true "${holder} holds exactly ${SEVERITY_VALUES}" value_set_in "$SEVERITY_VALUES" "$(declare -f "$holder")"
+    assert_true "${holder} holds exactly ${FEEDBACK_STATE_VALUES}" value_set_in "$FEEDBACK_STATE_VALUES" "$(declare -f "$holder")"
+done
+assert_true "the presentation defaults keep exactly ${FEEDBACK_STATE_VALUES}" \
+    value_set_in "$FEEDBACK_STATE_VALUES" "$EXISTING_FEEDBACK_JQ_DEFS"
+for holder in validate_cross_ndjson_records validate_final_ndjson_records describe_ndjson_validation_failure; do
+    assert_true "${holder} holds exactly ${CLASSIFICATION_VALUES}" value_set_in "$CLASSIFICATION_VALUES" "$(declare -f "$holder")"
+done
 for value_set in "$DISPUTE_KIND_VALUES" "$RESOLUTION_STATUS_VALUES" "$VERIFICATION_METHOD_VALUES" "$BASIS_VALUES"; do
     assert_true "the resolution rules enforce exactly ${value_set}" value_set_in "$value_set" "$RESOLUTION_JQ_DEFS"
 done
