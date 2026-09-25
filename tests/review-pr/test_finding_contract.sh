@@ -425,6 +425,24 @@ assert_eq 'null null' "$(jq -r '.[0] | "\(.failure_scenario) \(.recommendation)"
     'an uncertain verdict that left out its failure scenario and recommendation gets null for both'
 assert_true 'and validates as the empty verdict it is' \
     validate_cross_ndjson_records "$uncertain_records" "$test_root/cross-uncertain-canonical.json" alpha "$cross_expected_refs"
+# The repair baseline goes through the same defaults as validation, or a faithful
+# repair of such a draft fails the stability check, and a verdict without its
+# optional keys makes the baseline refuse the draft outright.
+uncertain_draft="$test_root/cross-uncertain-draft.ndjson"
+{
+    jq -c '.[0] | .classification = "UNCERTAIN" | .severity = null | del(.failure_scenario, .recommendation)
+        | .existing_feedback = {state: "existing-review-body", thread_ids: []}' "$cross_records"
+    jq -c '.[1]' "$cross_records"
+} >"$uncertain_draft"
+assert_true 'a verdict without its optional keys still yields a repair baseline' \
+    build_cross_repair_baseline "$uncertain_draft" "$test_root/cross-uncertain-baseline.json"
+assert_eq 'null unknown' "$(jq -r '.findings[0] | "\(.failure_scenario) \(.existing_feedback.state)"' "$test_root/cross-uncertain-baseline.json")" \
+    'with the same defaults validation applies'
+jq -s '.' "$uncertain_draft" >"$test_root/cross-uncertain-records.json"
+fill_presentation_defaults cross alpha "$test_root/cross-uncertain-records.json" true
+validate_cross_ndjson_records "$test_root/cross-uncertain-records.json" "$test_root/cross-uncertain-validated.json" alpha "$cross_expected_refs"
+assert_true 'so a repair that keeps the draft as it was passes the stability check' \
+    validate_cross_repair_stability "$test_root/cross-uncertain-baseline.json" "$test_root/cross-uncertain-validated.json"
 confirmed_records="$test_root/cross-confirmed-no-scenario.json"
 jq '.[0] |= del(.failure_scenario)' "$cross_records" >"$confirmed_records"
 fill_presentation_defaults cross alpha "$confirmed_records"

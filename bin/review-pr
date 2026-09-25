@@ -3443,7 +3443,7 @@ readonly EXISTING_FEEDBACK_JQ_DEFS='
 # failure_scenario and its verdict was dropped. Such keys are filled with null.
 # A CONFIRMED finding owes both, and still fails without them.
 fill_presentation_defaults() {
-    local phase=$1 agent=$2 records_file=$3
+    local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
     local filled_file feedback=0 undefined=0 flags=0 optional=0 noun language
 
     case "$phase" in
@@ -3489,6 +3489,7 @@ fill_presentation_defaults() {
                else . end)
         else . end)' "$records_file" >"$filled_file" || return 0
     mv -- "$filled_file" "$records_file"
+    [[ "$quiet" != true ]] || return 0
     if (( feedback > 0 )); then
         noun=findings; (( feedback != 1 )) || noun=finding
         log "Recorded existing_feedback as unknown for ${feedback} ${phase} ${noun}${agent:+ from ${agent}} that left it out"
@@ -5527,6 +5528,20 @@ unparsed_records_repair_note() {
     ' "$baseline_file"
 }
 
+# A repair baseline is compared with what validation makes of the repaired
+# stream, and validation fills in the keys that only say how a finding is
+# presented. A baseline built from the raw draft held the raw values instead:
+# an undefined existing_feedback, or a verdict without its optional keys, made a
+# faithful repair fail the stability check or the baseline refuse the draft.
+normalize_repair_baseline_records() {
+    local phase=$1 parsed_file=$2 array_file
+
+    new_temp_file "${phase}-baseline-array"; array_file=$NEW_TEMP_FILE
+    jq -s '.' "$parsed_file" >"$array_file" 2>/dev/null || return 1
+    fill_presentation_defaults "$phase" "" "$array_file" true
+    jq -c '.[]' "$array_file" >"$parsed_file" 2>/dev/null
+}
+
 build_final_repair_baseline() {
     local input_file=$1 baseline_file=$2 parsed_file unparsed_file line trimmed
     local object_count=0 saw_trailing_prose=false line_number=0
@@ -5556,6 +5571,7 @@ build_final_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
+    normalize_repair_baseline_records final "$parsed_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -5819,6 +5835,7 @@ build_cross_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
+    normalize_repair_baseline_records cross "$parsed_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -6090,6 +6107,7 @@ build_primary_repair_baseline() {
         fi
     done <"$input_file"
     (( object_count > 0 )) || return 1
+    normalize_repair_baseline_records primary "$parsed_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def finding_content:
