@@ -103,4 +103,28 @@ assert_false 'and prints nothing twice' test -s "$flushed"
 flush_dashboard_messages true 2>"$flushed"
 assert_false 'the last flush, when the table is down, empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
 
+# A writer can append while a flush copies: the flush measures the file and a
+# burst lands before the copy is done. The copy read to the file's end and let
+# head cut it short, so tail went on writing into a pipe head had closed, and
+# under pipefail the SIGPIPE ended the shell that was flushing. A stand-in for wc
+# reports the size the file had before a mebibyte arrived.
+burst_case="$suite_root/burst"
+mkdir -p -- "$burst_case"
+DASHBOARD_MESSAGE_FILE="$burst_case/messages.txt"
+printf 'measured line\n' >"$DASHBOARD_MESSAGE_FILE"
+head -c 1048576 /dev/zero | tr '\0' x >>"$DASHBOARD_MESSAGE_FILE"
+set +e
+(
+    set -e
+    wc() { printf '14\n'; }
+    flush_dashboard_messages
+) 2>"$burst_case/flushed.txt"
+burst_status=$?
+set -e
+assert_eq 0 "$burst_status" 'a burst appended during a flush does not end the flushing shell'
+assert_eq 'measured line' "$(cat "$burst_case/flushed.txt")" \
+    'the flush prints exactly what it measured'
+assert_eq 14 "$(cat "${DASHBOARD_MESSAGE_FILE}.offset")" \
+    'and leaves the burst for the next flush'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

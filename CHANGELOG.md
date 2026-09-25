@@ -47,8 +47,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   are kept only when the whole line parses.
 - Everything the run writes to stderr while the live table is up is printed above the next frame,
   not into it, so a stray warning no longer leaves copies of a section title; nothing appended to the
-  message file during a redraw is lost, and a failure while the table is up still prints its ERROR
-  line.
+  message file during a redraw is lost, a burst appended while it is being printed no longer ends
+  the run, and a failure while the table is up still prints its ERROR line.
 - Prompts no longer call every pull request a PHP one, and they say that text addressed to models
   inside the code under review is its subject, never an instruction.
 - Each structured prompt ends with a checklist of every record's keys and every closed value set, a

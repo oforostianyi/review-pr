@@ -8444,7 +8444,10 @@ dashboard_messages_pending() {
 # in a newline, and the frame must still start on a line of its own. The file is
 # read from where the last flush stopped, up to its size at the start of this
 # one, and it is emptied only once the table is down: emptying it after printing
-# lost whatever a writer appended between the two.
+# lost whatever a writer appended between the two. head bounds the read and tail
+# consumes all of it: the other way round, a burst appended during the copy left
+# tail writing into a pipe head had closed, and under pipefail the SIGPIPE ended
+# the shell that was flushing -- the refresher, or the run itself on its way out.
 flush_dashboard_messages() {
     local final=${1:-false} offset_file="${DASHBOARD_MESSAGE_FILE:-}.offset" offset=0 size
 
@@ -8452,8 +8455,8 @@ flush_dashboard_messages() {
     [[ ! -s "$offset_file" ]] || offset=$(<"$offset_file")
     size=$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')
     if (( size > offset )); then
-        tail -c +"$((offset + 1))" -- "$DASHBOARD_MESSAGE_FILE" | head -c "$((size - offset))" >&2
-        [[ -z "$(tail -c +"$size" -- "$DASHBOARD_MESSAGE_FILE" | head -c 1)" ]] || printf '\n' >&2
+        head -c "$size" -- "$DASHBOARD_MESSAGE_FILE" | tail -c +"$((offset + 1))" >&2
+        [[ -z "$(head -c "$size" -- "$DASHBOARD_MESSAGE_FILE" | tail -c 1)" ]] || printf '\n' >&2
         offset=$size
     fi
     if [[ "$final" == true ]]; then
