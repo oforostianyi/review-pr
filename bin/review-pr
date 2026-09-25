@@ -3388,9 +3388,6 @@ repair_lone_json_escapes() {
     printf '%s' "$repaired"
 }
 
-# A repaired line is a line the model wrote wrongly. A stream that needed repairs
-# is not the same as one that parsed as written, and the count was being kept and
-# then discarded, so nothing distinguished them in the log.
 # Appends the JSON objects on one line to a file, and only when the whole line
 # parses. jq prints each value as soon as it has read it, so a record closed
 # early by a stray brace -- '{..."]},"existing_feedback":{...}}' -- came out
@@ -3404,6 +3401,9 @@ append_json_line() {
     printf '%s\n' "$parsed" >>"$output_file"
 }
 
+# A repaired line is a line the model wrote wrongly. A stream that needed repairs
+# is not the same as one that parsed as written, and the count was being kept and
+# then discarded, so nothing distinguished them in the log.
 log_escape_repairs() {
     local count=$1 phase=$2 agent=$3
     local noun=escapes
