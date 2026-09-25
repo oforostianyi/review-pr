@@ -1306,10 +1306,20 @@ PRIMARY_REVIEW_LANGUAGE=EN
 
 # The closing checklist lists every closed value set as the validators hold it,
 # so the model reads the exact choices last, and the lists cannot drift apart.
-for value_set in "$SEVERITY_VALUES" "$CLASSIFICATION_VALUES" "$FEEDBACK_STATE_VALUES" "$DISPUTE_KIND_VALUES" \
-    "$RESOLUTION_STATUS_VALUES" "$VERIFICATION_METHOD_VALUES" "$BASIS_VALUES"; do
+# Each set is looked for in the validator that owns it, not anywhere in the file:
+# a copy elsewhere would pass while the validator drifted.
+value_set_in() {
+    local value_set=$1 source_text=$2 literal
     literal="IN($(sed 's/\([^, ][^,]*\)/"\1"/g' <<<"$value_set"))"
-    assert_true "the validators enforce exactly ${value_set}" grep -Fq -- "$literal" "$repo_root/bin/review-pr"
+    grep -Fq -- "$literal" <<<"$source_text"
+}
+primary_validator=$(declare -f validate_primary_ndjson_records)
+cross_validator=$(declare -f validate_cross_ndjson_records)
+assert_true "the primary validator enforces exactly ${SEVERITY_VALUES}" value_set_in "$SEVERITY_VALUES" "$primary_validator"
+assert_true "and exactly ${FEEDBACK_STATE_VALUES}" value_set_in "$FEEDBACK_STATE_VALUES" "$primary_validator"
+assert_true "the cross-review validator enforces exactly ${CLASSIFICATION_VALUES}" value_set_in "$CLASSIFICATION_VALUES" "$cross_validator"
+for value_set in "$DISPUTE_KIND_VALUES" "$RESOLUTION_STATUS_VALUES" "$VERIFICATION_METHOD_VALUES" "$BASIS_VALUES"; do
+    assert_true "the resolution rules enforce exactly ${value_set}" value_set_in "$value_set" "$RESOLUTION_JQ_DEFS"
 done
 DISPUTE_RESOLUTION_ENABLED=true
 checklist_final="$test_root/checklist-final.txt"
