@@ -127,4 +127,49 @@ assert_eq 'measured line' "$(cat "$burst_case/flushed.txt")" \
 assert_eq 14 "$(cat "${DASHBOARD_MESSAGE_FILE}.offset")" \
     'and leaves the burst for the next flush'
 
+# Both ways the table comes down print what the run said last while it was up:
+# stop_dashboard at the end of a run, and cleanup on the way out of one that
+# died, whose ERROR line went into the message file like every other.
+render_dashboard_snapshot() { :; }
+teardown_case="$suite_root/teardown"
+mkdir -p -- "$teardown_case"
+DASHBOARD_MESSAGE_FILE="$teardown_case/stop-messages.txt"
+: >"$DASHBOARD_MESSAGE_FILE"
+exec {test_stderr}>&2
+exec 2>"$teardown_case/stop-terminal.txt"
+sleep 30 &
+DASHBOARD_PID=$!
+DASHBOARD_ACTIVE=true
+capture_dashboard_stderr
+printf 'written while the table was up\n' >&2
+stop_dashboard
+printf 'written after the table\n' >&2
+exec 2>&"$test_stderr" {test_stderr}>&-
+assert_file_contains "$teardown_case/stop-terminal.txt" 'written while the table was up' \
+    'stop_dashboard prints what the run wrote while the table was up'
+assert_file_contains "$teardown_case/stop-terminal.txt" 'written after the table' \
+    'and hands stderr back to the terminal'
+assert_false 'and empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
+
+cleanup_status=0
+(
+    RUN_HISTORY_FILE=""
+    RUNNING_PIDS=()
+    TEMP_FILES=()
+    LOCK_ACQUIRED=false
+    REPOSITORY_FACTS_PUBLISHING=false
+    CHANGED_LINE_MAP_PUBLISHING=false
+    DASHBOARD_MESSAGE_FILE="$teardown_case/die-messages.txt"
+    : >"$DASHBOARD_MESSAGE_FILE"
+    DASHBOARD_PID=""
+    DASHBOARD_ACTIVE=true
+    trap cleanup EXIT
+    capture_dashboard_stderr
+    die 'the run failed while the table was up'
+) 2>"$teardown_case/die-terminal.txt" || cleanup_status=$?
+assert_eq 1 "$cleanup_status" 'a run that dies with the table up keeps its exit status'
+assert_file_contains "$teardown_case/die-terminal.txt" 'ERROR: the run failed while the table was up' \
+    'and cleanup prints its ERROR line once the table is down'
+assert_false 'and empties the message file' test -s "$teardown_case/die-messages.txt"
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
