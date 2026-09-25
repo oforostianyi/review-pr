@@ -39,7 +39,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   REJECTED or UNCERTAIN verdict without `failure_scenario` or `recommendation` gets `null`, and a
   key a `complete` record does not define is dropped. Repair baselines and the findings a
   continuation keeps get the same defaults and the same correction of a mislabelled `source_refs`
-  agent key, so a faithful repair or continuation of such a draft passes its check.
+  agent key, so a faithful repair or continuation of such a draft passes its check, and the note
+  about an undefined `existing_feedback` is written only once.
 - An anchor that covers changed lines may end on a context line of its own diff hunk, recorded as
   `right_side_hunks` in the changed-line map: git often prints the closing brace of a new block as
   unchanged, and a finding anchored to the whole block was rejected for that one line.

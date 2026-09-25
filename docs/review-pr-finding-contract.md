@@ -407,7 +407,8 @@ keys remain language-independent.
   `complete` record carries that the contract does not define is dropped the same way. A repair
   baseline and the findings a continuation keeps get the same values, and the same correction of a
   mislabelled `source_refs` agent key, so a repair or continuation that keeps a draft as it was
-  still matches them. Any other missing
+  still matches them. The note about an undefined `existing_feedback` is written once, even for a
+  finding that already carries it in either language. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
   finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
   or a brace that closes the record early so that the rest of it reads as junk, of which nothing

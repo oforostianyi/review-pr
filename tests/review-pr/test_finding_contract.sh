@@ -1360,6 +1360,17 @@ assert_true 'a feedback state of the model'"'"'s own is accepted the same way' \
     process_primary_ndjson_output "$own_state" codex
 assert_true 'with the note in the language of the report' \
     grep -q 'Наявний відгук модель описала як' "${PRIMARY_FINDINGS_OUTPUTS[codex]}"
+# A final finding carries a cross-review's limitations forward, and a repair can
+# pair a draft's value with a baseline's limitations: a note already there, in
+# either language, is not written a second time.
+noted_once="$test_root/feedback-noted-once.json"
+jq -n '{state: "existing-review-body", thread_ids: []} as $value | [{
+    record: "finding", existing_feedback: $value,
+    verification_limitations: ["Existing feedback was reported as " + ($value | tojson)
+        + ", which the contract does not define; it is recorded as unknown."]}]' >"$noted_once"
+fill_presentation_defaults primary codex "$noted_once" true
+assert_eq '1 unknown' "$(jq -r '.[0] | "\([.verification_limitations[] | select(test("existing-review-body"))] | length) \(.existing_feedback.state)"' "$noted_once")" \
+    'the note about an undefined existing_feedback is written once, in whichever language came first'
 PRIMARY_REVIEW_LANGUAGE=EN
 
 # The closing checklist lists every closed value set as the validators hold it,
