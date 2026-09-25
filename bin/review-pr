@@ -5091,6 +5091,9 @@ build_continuation_state() {
     fi
     jq -c 'select(type == "object" and .record != "complete")' "$normalized_file" >"$kept_file" 2>/dev/null || return 1
     [[ -s "$kept_file" ]] || return 1
+    # The kept findings are compared with the processed merged stream, and a
+    # source they answered under the wrong agent is answered all the same.
+    normalize_records_as_processed "$phase" "$kept_file" "$expected_refs_file" || return 1
     jq -s --slurpfile expected "$expected_refs_file" '
         ([.[] | (.source_refs // [])[] | objects | {agent, source_id}] | unique_by(.agent, .source_id)) as $seen |
         (($expected[0] // []) | map({agent, source_id}) | unique_by(.agent, .source_id)) as $wanted |
@@ -5528,15 +5531,16 @@ unparsed_records_repair_note() {
     ' "$baseline_file"
 }
 
-# A repair baseline is compared with what processing makes of the repaired
-# stream, and processing changes a draft before validating it: it fills in the
-# keys that only say how a finding is presented, and in a cross-review or final
-# synthesis it corrects a source_refs agent key to the one owner of its
-# source_id. A baseline built from the raw draft held the raw values instead:
-# an undefined existing_feedback, a verdict without its optional keys, or a
-# mislabelled agent key made a faithful repair fail the stability check or the
-# baseline refuse the draft.
-normalize_repair_baseline_records() {
+# Processing changes a draft before it validates it: it fills in the keys that
+# only say how a finding is presented, and in a cross-review or final synthesis
+# it corrects a source_refs agent key to the one owner of its source_id. Every
+# set of records a later check compares with processed output -- a repair
+# baseline, the findings a continuation keeps -- goes through the same changes
+# first. Taken from the raw draft they held the raw values instead: an undefined
+# existing_feedback, a verdict without its optional keys, or a mislabelled agent
+# key made a faithful repair or continuation fail its check, or the baseline
+# refuse the draft. The file holds one record per line and is rewritten in place.
+normalize_records_as_processed() {
     local phase=$1 parsed_file=$2 expected_refs_file=${3:-} array_file corrected_file
 
     new_temp_file "${phase}-baseline-array"; array_file=$NEW_TEMP_FILE
@@ -5581,7 +5585,7 @@ build_final_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_repair_baseline_records final "$parsed_file" "$expected_refs_file" || return 1
+    normalize_records_as_processed final "$parsed_file" "$expected_refs_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -5847,7 +5851,7 @@ build_cross_repair_baseline() {
         (( object_count == 0 )) || saw_trailing_prose=true
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_repair_baseline_records cross "$parsed_file" "$expected_refs_file" || return 1
+    normalize_records_as_processed cross "$parsed_file" "$expected_refs_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def content:
@@ -6121,7 +6125,7 @@ build_primary_repair_baseline() {
         fi
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_repair_baseline_records primary "$parsed_file" || return 1
+    normalize_records_as_processed primary "$parsed_file" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def finding_content:

@@ -405,8 +405,9 @@ keys remain language-independent.
   CONFIRMED finding owes both and still fails without them.
   All of these are filled in before validation, without a model, and the console says so; a key a
   `complete` record carries that the contract does not define is dropped the same way. A repair
-  baseline gets the same values, and the same correction of a mislabelled `source_refs` agent key,
-  so a repair that keeps a draft as it was still matches its baseline. Any other missing
+  baseline and the findings a continuation keeps get the same values, and the same correction of a
+  mislabelled `source_refs` agent key, so a repair or continuation that keeps a draft as it was
+  still matches them. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model
   finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
   or a brace that closes the record early so that the rest of it reads as junk, of which nothing
@@ -445,7 +446,8 @@ keys remain language-independent.
 - A continuation may only append. The orchestrator drops the interrupted pass's own `complete`
   record, concatenates the kept records with the continuation reply, and validates the merged
   stream as one ordinary cross-review. It then compares the leading findings against the kept
-  records field by field, in order. A continuation that rewrites, reorders, or drops a kept
+  records, which have had the same presentation defaults and agent-key correction as the merged
+  stream, field by field, in order. A continuation that rewrites, reorders, or drops a kept
   finding, repeats a kept `source_id`, or answers an unlisted ref is rejected, and the run falls
   back to the ordinary whole-review retry. At most one continuation runs per attempt, and it
   replaces the repair pass for that attempt rather than adding to it.

@@ -320,6 +320,35 @@ dropped_prefix="$test_root/cross-merged-dropped.json"
 jq '.findings = [.findings[1]]' "$merged_canonical" >"$dropped_prefix"
 assert_false 'a continuation that drops a kept finding is rejected' \
     validate_continuation_prefix cross "$continuation_kept" "$dropped_prefix"
+# The kept findings go through what processing does to the merged stream. Kept
+# as written, a finding with an existing_feedback the contract does not define,
+# or one citing a source under the wrong agent, differed from its own place in
+# a faithful continuation, and the whole continuation was refused; the source it
+# had answered under the wrong agent was also asked for a second time.
+odd_truncated_draft="$test_root/cross-odd-truncated.ndjson"
+jq -c '.[0] | .existing_feedback = {state: "existing-review-body", thread_ids: []}
+    | .source_refs = [{agent: "delta", source_id: "beta:F-001"}] | .contributing_agents = ["delta"]' \
+    "$cross_records" >"$odd_truncated_draft"
+assert_true 'a truncated draft with such a finding yields a continuation state' \
+    build_continuation_state cross "$odd_truncated_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+assert_eq 'unknown beta' "$(jq -r '"\(.existing_feedback.state) \(.source_refs[0].agent)"' "$continuation_kept")" \
+    'its kept finding holds what processing publishes'
+assert_eq 'gamma:gamma:F-002' "$(jq -r '.[] | .agent + ":" + .source_id' "$continuation_pending")" \
+    'and the source it answered under the wrong agent is not asked for again'
+odd_merged="$test_root/cross-odd-merged.json"
+{
+    cat "$odd_truncated_draft"
+    jq -c '.[0] | .source_id = "alpha:C-002" | .source_refs = [{agent: "gamma", source_id: "gamma:F-002"}]
+        | .contributing_agents = ["gamma"] | .title = "Continued cross classification"' "$cross_records"
+    jq -c '.[1] | .finding_count = 2' "$cross_records"
+} | jq -s '.' >"$odd_merged"
+fill_presentation_defaults cross alpha "$odd_merged" true
+normalize_ndjson_source_ref_agents "$odd_merged" "$continuation_expected_refs" "$test_root/cross-odd-merged-corrected.json"
+validate_cross_ndjson_records "$test_root/cross-odd-merged-corrected.json" "$test_root/cross-odd-merged-canonical.json" \
+    alpha "$continuation_expected_refs"
+assert_true 'so a faithful continuation of it keeps its prefix' \
+    validate_continuation_prefix cross "$continuation_kept" "$test_root/cross-odd-merged-canonical.json"
 
 # The merge is mechanical: the kept findings, then whatever the continuation
 # returned, with the usual transport wrapper stripped from the new part only.
