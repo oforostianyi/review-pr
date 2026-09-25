@@ -400,6 +400,9 @@ keys remain language-independent.
   id, with what the model wrote kept among the finding's verification limitations in the language
   of the report -- and a final finding without
   `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
+  A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
+  `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
+  CONFIRMED finding owes both and still fails without them.
   Both are filled in before validation, without a model, and the console says so, as is a key a
   `complete` record carries that the contract does not define, which is dropped. Any other missing
   key still fails its record, because it would have to be made up. A JSON-looking record the model

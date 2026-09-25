@@ -414,6 +414,22 @@ assert_true 'and a repair that writes that finding again is accepted' \
 jq '.findings = [] | .finding_count = 0' "$cross_canonical" >"$test_root/cross-dirty-dropped.json"
 assert_false 'while one that drops it is rejected' \
     validate_cross_repair_stability "$test_root/cross-dirty-baseline.json" "$test_root/cross-dirty-dropped.json"
+# A REJECTED or UNCERTAIN verdict may leave its failure scenario and
+# recommendation empty, so leaving the keys out says the same; a CONFIRMED
+# finding owes both, and still fails without them.
+uncertain_records="$test_root/cross-uncertain-no-scenario.json"
+jq '.[0] |= (.classification = "UNCERTAIN" | .severity = null | del(.failure_scenario, .recommendation))' \
+    "$cross_records" >"$uncertain_records"
+fill_presentation_defaults cross alpha "$uncertain_records"
+assert_eq 'null null' "$(jq -r '.[0] | "\(.failure_scenario) \(.recommendation)"' "$uncertain_records")" \
+    'an uncertain verdict that left out its failure scenario and recommendation gets null for both'
+assert_true 'and validates as the empty verdict it is' \
+    validate_cross_ndjson_records "$uncertain_records" "$test_root/cross-uncertain-canonical.json" alpha "$cross_expected_refs"
+confirmed_records="$test_root/cross-confirmed-no-scenario.json"
+jq '.[0] |= del(.failure_scenario)' "$cross_records" >"$confirmed_records"
+fill_presentation_defaults cross alpha "$confirmed_records"
+assert_false 'while a confirmed finding still fails without its failure scenario' \
+    validate_cross_ndjson_records "$confirmed_records" "$test_root/cross-confirmed-canonical.json" alpha "$cross_expected_refs"
 
 REVIEW_AGENTS=(alpha)
 CROSS_FINDINGS_OUTPUTS[alpha]="$cross_canonical"

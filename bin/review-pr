@@ -3419,9 +3419,14 @@ readonly EXISTING_FEEDBACK_JQ_DEFS='
          else true end);
 '
 
+# A REJECTED or UNCERTAIN verdict in a cross-review or final synthesis may leave
+# its failure scenario and recommendation empty, so a record that leaves the
+# keys out says the same thing; on 29044 a cross-reviewer left out
+# failure_scenario and its verdict was dropped. Such keys are filled with null.
+# A CONFIRMED finding owes both, and still fails without them.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3
-    local filled_file feedback=0 undefined=0 flags=0 noun language
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 noun language
 
     case "$phase" in
         primary) language=$PRIMARY_REVIEW_LANGUAGE ;;
@@ -3435,7 +3440,11 @@ fill_presentation_defaults() {
     if [[ "$phase" == final ]]; then
         flags=$(jq '[.[] | select(.record == "finding" and (has("include_in_rejected_summary") | not))] | length' "$records_file" 2>/dev/null) || return 0
     fi
-    (( feedback + undefined + flags > 0 )) || return 0
+    if [[ "$phase" != primary ]]; then
+        optional=$(jq '[.[] | select(.record == "finding" and (.classification | IN("REJECTED", "UNCERTAIN"))
+            and ((has("failure_scenario") and has("recommendation")) | not))] | length' "$records_file" 2>/dev/null) || return 0
+    fi
+    (( feedback + undefined + flags + optional > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
     jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS"'
         def undefined_note($value):
@@ -3456,6 +3465,10 @@ fill_presentation_defaults() {
                end)
             | (if $phase == "final" and (has("include_in_rejected_summary") | not)
                then . + {include_in_rejected_summary: false} else . end)
+            | (if $phase != "primary" and (.classification | IN("REJECTED", "UNCERTAIN"))
+               then (if has("failure_scenario") then . else . + {failure_scenario: null} end)
+                    | (if has("recommendation") then . else . + {recommendation: null} end)
+               else . end)
         else . end)' "$records_file" >"$filled_file" || return 0
     mv -- "$filled_file" "$records_file"
     if (( feedback > 0 )); then
@@ -3469,6 +3482,10 @@ fill_presentation_defaults() {
     if (( flags > 0 )); then
         noun=findings; (( flags != 1 )) || noun=finding
         log "Set include_in_rejected_summary to false for ${flags} final ${noun}${agent:+ from ${agent}} that left it out"
+    fi
+    if (( optional > 0 )); then
+        noun=verdicts; (( optional != 1 )) || noun=verdict
+        log "Set a missing failure_scenario or recommendation to null for ${optional} rejected or uncertain ${phase} ${noun}${agent:+ from ${agent}}"
     fi
 }
 
