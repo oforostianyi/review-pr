@@ -1599,6 +1599,10 @@ assert_false 'a line broken by a bare word is left for the repair pass' \
     repair_json_brackets "${bracket_fixture%\}},oops}"
 assert_false 'and so is one cut off inside a string' \
     repair_json_brackets '{"record":"finding","claim":"half a sen'
+# A line that ends inside an array was cut off: closing it would publish the
+# record as whole without the entries that never came.
+assert_false 'a record cut off after an array entry is not closed as if it were whole' \
+    repair_json_brackets '{"record":"complete","schema_version":1,"finding_count":0,"summary":"s","verification_limitations":[],"positive_evidence":["first","second"'
 bracket_stream="$test_root/bracket-stream.ndjson"
 {
     sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson"
@@ -1618,6 +1622,7 @@ assert_eq 2 "$(jq '.findings | length' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" 'w
 # it may quote code where the escape is real.
 presentation_records="$test_root/presentation-records.json"
 jq -s '[(.[0] | .title = "Before \\u2192 after" | .evidence += ["Quoted \\u201cas written\\u201d"]
+    | .recommendation = "Stop emitting `\\u2192`; write \\u201cthe arrow\\u201d itself."
     | .anchor = {kind: "pr-level", file: "src/Unanchored.php", start: null, "end": null}), .[2]]' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$presentation_records"
 PRIMARY_REVIEW_LANGUAGE=EN
@@ -1625,6 +1630,8 @@ fill_presentation_defaults primary codex "$presentation_records" true
 assert_eq 'Before → after' "$(jq -r '.[0].title' "$presentation_records")" \
     'a character escaped twice in a title is decoded'
 assert_true 'but not in the evidence' grep -qF 'Quoted \\u201cas written\\u201d' "$presentation_records"
+assert_eq 'Stop emitting `\u2192`; write “the arrow” itself.' "$(jq -r '.[0].recommendation' "$presentation_records")" \
+    'nor inside a code span, where a finding quotes the escape on purpose'
 assert_eq 'null' "$(jq -r '.[0].anchor.file' "$presentation_records")" \
     'a pr-level anchor loses the file it cannot carry'
 assert_eq 'File: `src/Unanchored.php`.' "$(jq -r '.[0].evidence[-1]' "$presentation_records")" \

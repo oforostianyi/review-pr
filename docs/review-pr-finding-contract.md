@@ -410,16 +410,16 @@ keys remain language-independent.
   still matches them. The note about an undefined `existing_feedback` is written once, even for a
   finding that already carries it in either language. A character the model escaped twice, the six
   characters `\u2192` where it meant the arrow, is decoded in a title, claim, failure scenario,
-  recommendation or summary; evidence keeps it as written, since a quote of code may hold a real
-  escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
+  recommendation or summary; evidence, and a `code span` anywhere, keep it as written, since a quote
+  of code may hold a real escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
   names instead. Any other missing
   key still fails its record, because it would have to be made up. A record whose brackets alone
   are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
   the end, an array opened without its bracket -- is mended without a model when exactly one
   reading of it parses as one object: brackets outside strings are counted, one too many is tried
-  away closer by closer and one or two too few are tried on the end, and the reading that keeps the
+  away closer by closer and one or two too few closing braces are tried on the end, and the reading that keeps the
   most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
-  otherwise, is not mended. A JSON-looking record the model finished writing but mis-punctuated in
+  otherwise, is not mended, and neither is one that ends inside an array: that record was cut off. A JSON-looking record the model finished writing but mis-punctuated in
   a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
   back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
@@ -439,7 +439,8 @@ keys remain language-independent.
   `{"record":"amendment","source_id":...}` line per finding. The orchestrator sets only the fields
   asked for, and only in the shape the contract expects, so every other field stays as the draft
   wrote it, then validates the merged stream as an ordinary primary review. When an amendment was
-  tried the schema repair is skipped, and a failed amendment goes on to salvage.
+  tried the schema repair is skipped, and a failed amendment goes on to salvage with whatever it did
+  set, so only a finding that is still incomplete is dropped.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,

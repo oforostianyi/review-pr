@@ -11,7 +11,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   repository open, before any repair. The orchestrator sets only the fields it asked for, so the
   rest of the finding stays as written. On ListingSyncer 957 pi lost seven of twelve findings to a
   missing recommendation, and on Tools 29072 claude lost two to line numbers past the end of a new
-  file; salvage dropped them all.
+  file; salvage dropped them all. An amendment that fixes some of them hands salvage the merged stream,
+  so only a finding that is still incomplete is dropped.
 
 - `--run last` selects the most recent full run of the pull request, for a resume, a `--rerun-final`
   and `findings` alike, so an identifier no longer has to be copied out of a directory listing. It is
@@ -43,10 +44,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - A record whose brackets alone are wrong is mended without a model when only one reading of it
   parses: closed early by a stray brace (Tools 29049), a closing brace doubled (29050) or left out
   (29074) at the end, an array opened without its bracket (ListingSyncer 957). Each had cost a
-  repair pass or, in salvage, the record.
+  repair pass or, in salvage, the record. A line that ends inside an array is left alone: it was cut
+  off, and closing it would publish the record without its missing entries.
 - A character a model escaped twice no longer prints as `\u2192` in a title, claim, failure
   scenario, recommendation or summary, and a repair that writes the character its draft escaped no
-  longer fails its stability check (29049). Evidence keeps such text as written.
+  longer fails its stability check (29049). Evidence and code spans keep such text as written.
 - A `pr-level` anchor that names a file with no lines drops the file into the evidence instead of
   costing the finding (ListingSyncer 958).
 - A key that only says how a finding is presented no longer costs the finding: a missing or

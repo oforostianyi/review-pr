@@ -3409,7 +3409,9 @@ append_json_line() {
 # 957). Brackets outside strings are counted; one closer too many and each
 # closing bracket is tried away in turn, and a bracket is tried after each key
 # whose value is always an array but starts as a string; one or two too few and
-# the missing closers are tried on the end. A bracket removed too early can also parse, by pulling the
+# closing braces are tried on the end. A closing bracket is never added: a line
+# that ends inside an array is a record cut off, whose missing entries no bracket
+# brings back, and mending it published the cut record as whole. A bracket removed too early can also parse, by pulling the
 # keys that follow into the object it left open (the anchor swallowing the
 # evidence), so the reading that keeps the most keys on the record itself wins,
 # and between two that keep as many, the one whose lists are lists: a lone
@@ -3452,8 +3454,8 @@ repair_json_brackets() {
                 candidates+=("${line/\"${key}\":\"/\"${key}\":[\"}")
             done
             ;;
-        -1) candidates=("${line}}" "${line}]") ;;
-        -2) candidates=("${line}]}" "${line}}}") ;;
+        -1) candidates=("${line}}") ;;
+        -2) candidates=("${line}}}") ;;
         *) return 1 ;;
     esac
     for candidate in "${candidates[@]}"; do
@@ -3540,15 +3542,20 @@ readonly EXISTING_FEEDBACK_JQ_DEFS='
 # A model that escapes a character twice writes the six characters \u2192 where
 # it meant the arrow, and the report printed them so (956). Only an escape of a
 # printable character outside ASCII is decoded; a surrogate half or a control
-# character is left as written.
+# character is left as written, and so is anything inside a `code span`, where a
+# finding quotes an escape on purpose.
 readonly LITERAL_UNICODE_JQ_DEFS='
+    def decode_literal_unicode_text:
+        gsub("\\\\u(?<h>[0-9a-fA-F]{4})";
+            (.h | ascii_downcase | explode
+                | map(if . >= 97 then . - 87 else . - 48 end)
+                | reduce .[] as $d (0; . * 16 + $d)) as $cp
+            | if $cp >= 160 and ($cp < 55296 or $cp > 57343) then [$cp] | implode else "\\u" + .h end);
     def decode_literal_unicode:
         if type == "string" and test("\\\\u[0-9a-fA-F]{4}") then
-            gsub("\\\\u(?<h>[0-9a-fA-F]{4})";
-                (.h | ascii_downcase | explode
-                    | map(if . >= 97 then . - 87 else . - 48 end)
-                    | reduce .[] as $d (0; . * 16 + $d)) as $cp
-                | if $cp >= 160 and ($cp < 55296 or $cp > 57343) then [$cp] | implode else "\\u" + .h end)
+            split("`") | . as $parts
+            | [range(length) as $i | if $i % 2 == 0 then ($parts[$i] | decode_literal_unicode_text) else $parts[$i] end]
+            | join("`")
         else . end;
 '
 
@@ -6705,7 +6712,15 @@ attempt_primary_ndjson_amendment() {
         PRIMARY_RAW_OUTPUTS[$agent]=$actual_raw
         PRIMARY_FINDINGS_OUTPUTS[$agent]=$actual_findings
         rm -f -- "$scratch_raw" "$scratch_findings"
-        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; amendment_remained_invalid"
+        # What the amendment did set is kept: salvage reads the merged stream, so
+        # only a finding that is still incomplete is dropped, not every finding
+        # the amendment was asked about.
+        assert_new_target "$source_diagnostic"
+        cp -- "$output_file" "$source_diagnostic"
+        cp -- "$merged_file" "$output_file"
+        noun=fields; (( set_count != 1 )) || noun=field
+        activity_log "Kept ${set_count} amended ${noun} from ${agent} for salvage; the amended stream is still invalid"
+        FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; amendment_left_findings_invalid"
     elif (( status != 0 )); then
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; amendment_exit_${status}"
     elif [[ "$stop_reason" == length ]]; then

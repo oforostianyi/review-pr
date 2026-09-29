@@ -458,6 +458,22 @@ case "$behavior" in
         emit_valid_ndjson_primary | jq -c 'if .record == "finding" then del(.recommendation) else . end'
         write_usage null 58
         ;;
+    # Two findings without a recommendation, of which the amendment below answers
+    # only the first: what it did set must survive salvage.
+    ndjson-two-missing-recommendations)
+        {
+            emit_valid_ndjson_primary | jq -c 'select(.record == "finding") | del(.recommendation)'
+            emit_valid_ndjson_primary | jq -c 'select(.record == "finding") | del(.recommendation)
+                | .source_id = (.source_id | sub("F-001$"; "F-002")) | .title = "Second fixture defect"'
+            emit_valid_ndjson_primary | jq -c 'select(.record == "complete") | .finding_count = 2'
+        }
+        write_usage null 58
+        ;;
+    amendment-first-only)
+        prompt_block_lines 'FINDINGS TO AMEND' | head -n 1 | jq -c '{record: "amendment", source_id,
+            recommendation: "Mock amendment: correct the changed branch."}'
+        write_usage null 21
+        ;;
     # Answers an amendment pass with each field it was asked for, for every
     # finding the prompt lists, plus a key it was not asked for, which the
     # orchestrator must ignore.

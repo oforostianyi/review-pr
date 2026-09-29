@@ -1742,6 +1742,59 @@ run_ndjson_amendment_case() {
         'primary usage includes the review and the amendment'
 }
 
+run_ndjson_partial_amendment_case() {
+    local case_dir="$suite_root/ndjson-partial-amendment"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local capture="$case_dir/captured-prompts"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest
+    local work_dir
+    local stem
+    local source_diagnostic
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured primary amendment.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1"} | .reporting.comparison_sections.final = "none"' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' 'ndjson-two-missing-recommendations' >"$scenarios/beta-primary-review"
+    printf '%s\n' 'amendment-first-only' >"$scenarios/beta-primary-findings-amendment"
+
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'an amendment that fixes one of two findings still lets the pipeline complete'
+    assert_eq 1 "$(jq '.findings | length' "$work_dir/${stem}-beta-findings.json")" \
+        'salvage keeps the finding the amendment fixed'
+    assert_eq 'Mock amendment: correct the changed branch.' \
+        "$(jq -r '.findings[0].recommendation' "$work_dir/${stem}-beta-findings.json")" \
+        'with the field the amendment set'
+    assert_file_contains "$case_dir/stderr.log" 'Kept 1 amended field from beta for salvage' \
+        'and the log says the amendment was kept for salvage'
+}
+
 run_ndjson_unsafe_schema_repair_case() {
     local case_dir="$suite_root/ndjson-unsafe-schema-repair"
     local reviews="$case_dir/reviews"
@@ -2169,6 +2222,7 @@ run_ndjson_cross_resume_case
 run_ndjson_preamble_case
 run_ndjson_schema_repair_case
 run_ndjson_amendment_case
+run_ndjson_partial_amendment_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case
 run_ndjson_unsafe_final_repair_case
