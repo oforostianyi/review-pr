@@ -125,6 +125,28 @@
         }
       }
     },
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Subscription limits checked before a run starts. Each provider is off until it is configured here.",
+      "properties": {
+        "codex": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minimum_remaining_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "A run that would start a Codex agent is refused when any Codex rate-limit window reports less than this share left. The quota is read through `codex app-server` with Codex's own login; when it cannot be read, the run goes on with a warning.",
+              "examples": [
+                15
+              ]
+            }
+          }
+        }
+      }
+    },
     "reporting": {
       "type": "object",
       "additionalProperties": false,

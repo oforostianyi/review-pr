@@ -597,6 +597,31 @@ review-pr https://github.com/YOUR-ORG/YOUR-REPOSITORY/pull/123
 
 The command fetches and detaches the dedicated checkout at the exact PR head. It refuses tracked changes and never operates on another checkout.
 
+## Check the Codex quota before a run
+
+A review can spend a large share of a Codex subscription window. `review-pr quota` reads the limits Codex itself reports, through `codex app-server` and the login Codex already holds; nothing reads or stores a token:
+
+```bash
+review-pr quota
+review-pr quota codex --json
+```
+
+```text
+Codex (team)
+  5h             80% left   resets Tue 29 Sep 21:12
+  weekly         70% left   resets Sat 03 Oct 10:30
+```
+
+Windows are named by their length, every rate-limit bucket Codex returns is kept, and a field it does not send stays `null` rather than becoming zero. A reading is cached for a minute under `~/.cache/review-pr/`. The command exits 0 whenever the quota was read, however little is left; 1 when it is unavailable (Codex missing or logged out) and 2 when the answer has a shape review-pr does not know.
+
+To refuse a run that would start a Codex agent below a threshold, set it in the configuration:
+
+```json
+"quota": {"codex": {"minimum_remaining_percent": 15}}
+```
+
+Every window counts: the run stops before it starts, naming the window and its reset time. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
+
 ## Hand a finished review to a fixing agent
 
 The final report is written for a human. An agent that will do the fixing needs the actionable part, not the prose, so `findings` prints it as JSON:

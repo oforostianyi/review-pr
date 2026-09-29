@@ -179,6 +179,9 @@ NDJSON_LEADING_PROSE_LINES=0
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 PRIMARY_AMENDMENT_TRIED=false
+QUOTA_MODE=false
+QUOTA_JSON=false
+QUOTA_CODEX_MINIMUM=""
 NDJSON_SALVAGE_DROPPED_IDS=()
 NDJSON_SALVAGE_UNREADABLE_IDS=()
 NDJSON_SALVAGE_UNPARSEABLE_LINES=0
@@ -327,6 +330,195 @@ MIGRATION_VERIFICATION_INSTRUCTION='Database-migration verification rule: distin
 
 EXISTING_FEEDBACK_INSTRUCTION='Existing-feedback rule: use the supplied GitHub review-thread state to distinguish a genuinely new finding from confirmation of feedback already present on the pull request. When an unresolved thread already covers the same concrete occurrence, identify the finding as confirmation of existing feedback rather than newly discovered feedback. A resolved or outdated thread is historical context only and must not automatically suppress a new or recurring occurrence; compare its path, code, and failure scenario with the current diff. If thread state is partial, unavailable, or unmapped, state that limitation and do not infer that there are no unresolved threads.'
 
+# Codex reports its own subscription limits through its app server, the way its
+# Settings page does, and it answers with the login it already holds: nothing
+# here reads, stores or passes on a token. The answer is normalized to windows
+# named by their length, never by their place in a list, and a field Codex does
+# not send stays null rather than becoming a zero, so an answer that changed
+# shape reads as unknown instead of as an exhausted quota.
+readonly CODEX_QUOTA_NORMALIZE_JQ='
+    def window_name:
+        if . == null then null
+        elif . == 300 then "5h"
+        elif . == 10080 then "weekly"
+        elif . % 1440 == 0 then "\(. / 1440)d"
+        elif . % 60 == 0 then "\(. / 60)h"
+        else "\(.)m" end;
+    def instant: if type == "number" then todate else null end;
+    def window($bucket; $slot):
+        select(type == "object") |
+        {bucket: $bucket, slot: $slot,
+         name: ((.windowDurationMins | window_name) // $slot),
+         window_minutes: (.windowDurationMins // null),
+         used_percent: (.usedPercent // null),
+         remaining_percent: (if (.usedPercent | type) == "number" then ([0, 100 - .usedPercent] | max) else null end),
+         reset_at: (.resetsAt | instant), reset_epoch: (.resetsAt // null)};
+    .result as $result |
+    (($result.rateLimitsByLimitId // {}) | [.[] | objects]) as $by_id |
+    (if ($by_id | length) > 0 then $by_id else [$result.rateLimits | objects] end) as $buckets |
+    if ($buckets | length) == 0 then error("no rate-limit snapshot") else . end |
+    {provider: "codex", available: true,
+     plan: ($buckets[0].planType // null),
+     windows: [$buckets[] | (.limitId // "codex") as $bucket |
+        (.primary | window($bucket; "primary")),
+        (.secondary | window($bucket; "secondary")),
+        (.individualLimit | select(type == "object") |
+            {bucket: $bucket, slot: "spend-control", name: "spend control", window_minutes: null,
+             used: (.used // null), limit: (.limit // null), used_percent: null,
+             remaining_percent: (.remainingPercent // null),
+             reset_at: (.resetsAt | instant), reset_epoch: (.resetsAt // null)})],
+     credits: ($buckets[0].credits // null),
+     checked_at: (now | todate), source: "codex-app-server"}
+'
+
+# Asks a short-lived `codex app-server` for its rate limits and prints the raw
+# response line. Returns 1 when Codex is missing or does not answer, and the
+# caller treats that as unknown.
+codex_app_server_rate_limits() {
+    local directory fifo output writer pid deadline response=""
+    local timeout=${REVIEW_PR_QUOTA_TIMEOUT_SECONDS:-20}
+
+    command -v codex >/dev/null 2>&1 || return 1
+    command -v mkfifo >/dev/null 2>&1 || return 1
+    directory=$(mktemp -d "${TMPDIR:-/tmp}/review-pr-quota.XXXXXX") || return 1
+    fifo="$directory/in"
+    output="$directory/out"
+    mkfifo -- "$fifo" || { rm -rf -- "$directory"; return 1; }
+    : >"$output"
+    codex app-server <"$fifo" >"$output" 2>/dev/null &
+    pid=$!
+    exec {writer}>"$fifo"
+    # A write goes through a subshell: if the app server has already gone, the
+    # SIGPIPE ends that subshell, not the run.
+    ( printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"review-pr\",\"version\":\"${REVIEW_PR_VERSION}\"}}}" >&"$writer" ) 2>/dev/null || true
+    deadline=$((SECONDS + timeout))
+    while (( SECONDS < deadline )) && ! grep -q '"id":1[,}]' "$output" 2>/dev/null; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    if grep -q '"id":1[,}]' "$output" 2>/dev/null; then
+        ( printf '%s\n' '{"jsonrpc":"2.0","method":"initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}' >&"$writer" ) 2>/dev/null || true
+        while (( SECONDS < deadline )) && ! grep -q '"id":2[,}]' "$output" 2>/dev/null; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        response=$(grep '"id":2[,}]' "$output" 2>/dev/null | head -n 1)
+    fi
+    exec {writer}>&-
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf -- "$directory"
+    [[ -n "$response" ]] || return 1
+    printf '%s\n' "$response"
+}
+
+# Prints the normalized Codex quota. Several agents starting together share one
+# reading: a reading younger than a minute is served from the cache. Returns 1
+# when the quota is unavailable -- Codex missing, logged out, or silent -- and 2
+# when Codex answered in a shape the normalizer does not know.
+read_codex_quota() {
+    local cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/review-pr" cache_file raw normalized message
+
+    cache_file="${cache_dir}/quota-codex.json"
+    if [[ -s "$cache_file" ]] && jq -e --argjson now "$(date +%s)" \
+        '.available == true and ((.checked_at | fromdate) > ($now - 60))' "$cache_file" >/dev/null 2>&1; then
+        cat -- "$cache_file"
+        return 0
+    fi
+    if ! raw=$(codex_app_server_rate_limits); then
+        jq -n '{provider: "codex", available: false, windows: [], checked_at: (now | todate),
+            source: "codex-app-server", error: "Codex is not installed or its app server did not answer"}'
+        return 1
+    fi
+    if message=$(jq -r 'select(.error != null) | .error.message // "the app server returned an error"' <<<"$raw" 2>/dev/null) \
+        && [[ -n "$message" ]]; then
+        jq -n --arg error "$message" '{provider: "codex", available: false, windows: [], checked_at: (now | todate),
+            source: "codex-app-server", error: $error}'
+        return 1
+    fi
+    if ! normalized=$(jq -c "$CODEX_QUOTA_NORMALIZE_JQ" <<<"$raw" 2>/dev/null) || [[ -z "$normalized" ]]; then
+        jq -n '{provider: "codex", available: false, windows: [], checked_at: (now | todate),
+            source: "codex-app-server", error: "the rate-limit answer has a shape review-pr does not know"}'
+        return 2
+    fi
+    if mkdir -p -- "$cache_dir" 2>/dev/null; then
+        printf '%s\n' "$normalized" >"${cache_file}.tmp.$$" 2>/dev/null && mv -- "${cache_file}.tmp.$$" "$cache_file" 2>/dev/null
+    fi
+    printf '%s\n' "$normalized"
+}
+
+format_quota_reset() {
+    local epoch=$1
+
+    [[ "$epoch" =~ ^[0-9]+$ ]] || return 0
+    review_pr_date -d "@${epoch}" '+%a %d %b %H:%M' 2>/dev/null \
+        || review_pr_date -r "$epoch" '+%a %d %b %H:%M' 2>/dev/null || true
+}
+
+# `review-pr quota [codex] [--json]`. Exit 0 when the quota was read, whatever it
+# says: a spent quota is data, not a failure. 1 means unavailable, 2 a shape the
+# normalizer does not know.
+show_quota() {
+    local quota status=0 name remaining reset_epoch reset line
+
+    quota=$(read_codex_quota) || status=$?
+    if [[ "$QUOTA_JSON" == true ]]; then
+        jq '.' <<<"$quota"
+        return "$status"
+    fi
+    if (( status != 0 )); then
+        printf 'Codex: quota unavailable (%s)\n' "$(jq -r '.error' <<<"$quota")"
+        return "$status"
+    fi
+    printf 'Codex%s\n' "$(jq -r 'if .plan then " (\(.plan))" else "" end' <<<"$quota")"
+    while IFS=$'\t' read -r name remaining reset_epoch; do
+        reset=$(format_quota_reset "$reset_epoch")
+        line=$(printf '  %-14s %s' "$name" "${remaining:-?}% left")
+        printf '%s%s\n' "$line" "${reset:+   resets ${reset}}"
+    done < <(jq -r '.windows[] | [(if .bucket == "codex" then .name else .bucket + " " + .name end),
+        (.remaining_percent // "" | tostring), (.reset_epoch // "" | tostring)] | @tsv' <<<"$quota")
+    return 0
+}
+
+# The agents a run starts: every reviewer and both synthesizers, or only the
+# synthesizers for a --rerun-final.
+run_uses_codex() {
+    local scope=$1 agent
+    local -a agents=("$FINAL_SYNTHESIZER")
+
+    [[ -z "$FALLBACK_SYNTHESIZER" ]] || agents+=("$FALLBACK_SYNTHESIZER")
+    [[ "$scope" != all ]] || agents+=("${REVIEW_AGENTS[@]}")
+    for agent in "${agents[@]}"; do
+        [[ -n "$agent" && "$(agent_type "$agent")" == codex ]] && return 0
+    done
+    return 1
+}
+
+# With quota.codex.minimum_remaining_percent set, a run that would start Codex
+# is refused when any window it reports has less left, and says which and when
+# it resets. An unreadable quota is not an exhausted one: the run goes on, and
+# the log says the check could not be made.
+check_codex_quota_before_run() {
+    local scope=$1 quota status=0 low summary
+
+    [[ -n "$QUOTA_CODEX_MINIMUM" ]] || return 0
+    run_uses_codex "$scope" || return 0
+    quota=$(read_codex_quota) || status=$?
+    if (( status != 0 )); then
+        log "WARNING: the Codex quota could not be read ($(jq -r '.error // "unknown error"' <<<"$quota")); going on without the check"
+        return 0
+    fi
+    summary=$(jq -r '[.windows[] | select(.remaining_percent != null) | "\(.name) \(.remaining_percent)% left"] | join(", ")' <<<"$quota")
+    low=$(jq -r --argjson minimum "$QUOTA_CODEX_MINIMUM" '[.windows[]
+        | select(.remaining_percent != null and .remaining_percent < $minimum)
+        | "\(.name) has \(.remaining_percent)% left" + (if .reset_at then " until \(.reset_at)" else "" end)] | join("; ")' <<<"$quota")
+    if [[ -n "$low" ]]; then
+        die "Codex quota is below quota.codex.minimum_remaining_percent (${QUOTA_CODEX_MINIMUM}%): ${low}. Not starting a run that uses Codex"
+    fi
+    log "Codex quota: ${summary:-no windows reported}"
+}
+
 usage() {
     cat >&2 <<EOF
 Usage: ${0##*/} [--config <file>] <pull-request-number>
@@ -335,6 +527,7 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
        ${0##*/} [--config <file>] contract-test [--agent <name>]... [--phase <primary|cross|final|all>] [--output <directory>]
        ${0##*/} [--config <file>] findings [--run <timestamp>] [--include <confirmed|uncertain|all>] <pull-request-number>
+       ${0##*/} [--config <file>] quota [codex] [--json]
        ${0##*/} --version
 EOF
 }
@@ -806,8 +999,17 @@ describe_configuration_problems() {
         . as $config
         | [
             (if type != "object" then "the configuration is \(type), not an object" else empty end),
-            ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"])[]
+            ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "quota", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"])[]
                 | "unknown top-level key \(tojson)"),
+            (if .quota == null then empty
+             elif (.quota | type) != "object" or ((.quota | keys) - ["codex"] | length) > 0
+             then "quota may hold only codex"
+             elif (.quota.codex | type) != "object" or ((.quota.codex | keys) - ["minimum_remaining_percent"] | length) > 0
+             then "quota.codex may hold only minimum_remaining_percent"
+             elif (.quota.codex.minimum_remaining_percent | type) != "number"
+                  or .quota.codex.minimum_remaining_percent < 0 or .quota.codex.minimum_remaining_percent > 100
+             then "quota.codex.minimum_remaining_percent is \(.quota.codex.minimum_remaining_percent | tojson); it must be a number from 0 to 100"
+             else empty end),
             (if (.timezone != null) and ((.timezone | type) != "string")
              then "timezone is \(.timezone | tojson); it must be a timezone name such as \"Europe/Warsaw\""
              else empty end),
@@ -952,7 +1154,7 @@ die_with_configuration_problems() {
             (if has("skills") then (.skills | valid_skill_map) else true end);
 
         type == "object" and
-        ((keys - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"]) | length == 0) and
+        ((keys - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "quota", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"]) | length == 0) and
         (if has("timezone") then (.timezone | type == "string") else true end) and
         (if has("language") then (.language | type == "string" and valid_language) else true end) and
         (if has("review_repository") then (.review_repository | type == "string" and startswith("/")) else true end) and
@@ -995,6 +1197,12 @@ die_with_configuration_problems() {
                 (if has("primary") then (.primary | type == "string" and valid_language_override) else true end) and
                 (if has("cross_review") then (.cross_review | type == "string" and valid_language_override) else true end) and
                 (if has("final") then (.final | type == "string" and valid_language_override) else true end))
+         else true end) and
+        (if has("quota") then
+            (.quota | type == "object" and ((keys - ["codex"]) | length == 0) and
+                (if has("codex") then (.codex | type == "object" and ((keys - ["minimum_remaining_percent"]) | length == 0) and
+                    (.minimum_remaining_percent | type == "number" and . >= 0 and . <= 100))
+                 else true end))
          else true end) and
         (if has("reporting") then
             (.reporting |
@@ -1151,6 +1359,7 @@ die_with_configuration_problems() {
     fi
 
     REVIEW_PR_TIMEZONE=$(jq -r '.timezone // ""' "$CONFIG_FILE")
+    QUOTA_CODEX_MINIMUM=$(jq -r '.quota.codex.minimum_remaining_percent // ""' "$CONFIG_FILE")
     if [[ -n "$REVIEW_PR_TIMEZONE" ]] && ! timezone_is_known "$REVIEW_PR_TIMEZONE"; then
         die_with_configuration_problems \
             "timezone is $(jq -n --arg zone "$REVIEW_PR_TIMEZONE" '$zone | tojson' -r); no zone of that name is installed"
@@ -12228,6 +12437,14 @@ while (( $# > 0 )); do
             FINDINGS_MODE=true
             shift
             ;;
+        quota)
+            QUOTA_MODE=true
+            shift
+            ;;
+        --json)
+            QUOTA_JSON=true
+            shift
+            ;;
         --include)
             (( $# >= 2 )) || die "--include requires confirmed, uncertain, or all"
             case $2 in
@@ -12309,6 +12526,13 @@ if [[ "$CONTRACT_TEST_MODE" == true ]]; then
         || die 'contract-test cannot be combined with PR workflow options'
     if run_contract_test; then exit 0; else exit 1; fi
 fi
+if [[ "$QUOTA_MODE" == true ]]; then
+    (( $# == 0 )) || [[ $# == 1 && "$1" == codex ]] || die 'quota takes an optional provider, and codex is the one it knows'
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] \
+        || die 'quota cannot be combined with PR workflow options'
+    if show_quota; then exit 0; else exit $?; fi
+fi
+[[ "$QUOTA_JSON" == false ]] || die '--json is only valid for the quota subcommand'
 activate_default_repository
 
 if [[ "$SHOW_CONFIG" == false && $# == 1 ]]; then
@@ -12367,6 +12591,12 @@ if (( $# != 1 )); then
 fi
 
 [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || die "Pull-request number must be a positive integer"
+
+if [[ "$RERUN_FINAL" == true ]]; then
+    check_codex_quota_before_run synthesizers
+else
+    check_codex_quota_before_run all
+fi
 
 open_run_history
 

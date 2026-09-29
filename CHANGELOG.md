@@ -6,6 +6,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- `review-pr quota [codex] [--json]` reports the Codex subscription limits as Codex itself sees them,
+  through `codex app-server` and `account/rateLimits/read` with Codex's own login: each window named by
+  its length, every bucket kept, a missing field left null rather than read as zero, and a reading
+  cached for a minute. With `quota.codex.minimum_remaining_percent` set, a run that would start a
+  Codex agent is refused while any window has less left, naming the window and when it resets; a
+  quota that cannot be read lets the run go on with a warning. Until now the Codex quota could not be
+  measured at all.
+
 - A primary finding written whole but for its `recommendation` or `failure_scenario`, or anchored to
   lines the pull request did not change, is sent back to its agent for those fields alone, with the
   repository open, before any repair. The orchestrator sets only the fields it asked for, so the
