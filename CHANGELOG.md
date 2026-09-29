@@ -33,6 +33,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A record whose brackets alone are wrong is mended without a model when only one reading of it
+  parses: closed early by a stray brace (Tools 29049), a closing brace doubled (29050) or left out
+  (29074) at the end, an array opened without its bracket (ListingSyncer 957). Each had cost a
+  repair pass or, in salvage, the record.
+- A character a model escaped twice no longer prints as `\u2192` in a title, claim, failure
+  scenario, recommendation or summary, and a repair that writes the character its draft escaped no
+  longer fails its stability check (29049). Evidence keeps such text as written.
+- A `pr-level` anchor that names a file with no lines drops the file into the evidence instead of
+  costing the finding (ListingSyncer 958).
 - A key that only says how a finding is presented no longer costs the finding: a missing or
   undefined `existing_feedback` becomes `unknown` (what the model wrote is kept among its
   verification limitations), a final finding without `include_in_rejected_summary` gets `false`, a

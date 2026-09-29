@@ -408,11 +408,20 @@ keys remain language-independent.
   baseline and the findings a continuation keeps get the same values, and the same correction of a
   mislabelled `source_refs` agent key, so a repair or continuation that keeps a draft as it was
   still matches them. The note about an undefined `existing_feedback` is written once, even for a
-  finding that already carries it in either language. Any other missing
-  key still fails its record, because it would have to be made up. A JSON-looking record the model
-  finished writing but mis-punctuated -- a stray bracket closing a string as if it were an array,
-  or a brace that closes the record early so that the rest of it reads as junk, of which nothing
-  is kept -- is left out of the baseline and handed back to the repair pass, which sees the broken record in
+  finding that already carries it in either language. A character the model escaped twice, the six
+  characters `\u2192` where it meant the arrow, is decoded in a title, claim, failure scenario,
+  recommendation or summary; evidence keeps it as written, since a quote of code may hold a real
+  escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
+  names instead. Any other missing
+  key still fails its record, because it would have to be made up. A record whose brackets alone
+  are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
+  the end, an array opened without its bracket -- is mended without a model when exactly one
+  reading of it parses as one object: brackets outside strings are counted, one too many is tried
+  away closer by closer and one or two too few are tried on the end, and the reading that keeps the
+  most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
+  otherwise, is not mended. A JSON-looking record the model finished writing but mis-punctuated in
+  a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
+  back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
   position, its record kind, and the ids it names. The repair prompt lists them, and a repair must
   bring back every one -- the preserved records unchanged and in order, plus exactly one restored
@@ -427,8 +436,10 @@ keys remain language-independent.
   `severity`, `category`, `contributing_agents`, `verification_limitations`, and
   `existing_feedback`. No finding may be added (other than one restored from an unparsed line),
   removed, reordered, split, merged, translated, or rewritten. Preserve valid completion prose; when
-  none is safely recoverable, require an empty summary and arrays. If stability cannot be
-  established, fail closed instead of publishing repair.
+  none is safely recoverable, require an empty summary and arrays. Both sides are compared with
+  twice-escaped characters decoded, so a repair that writes the character its draft escaped has not
+  changed the finding. If stability cannot be established, fail closed instead of publishing
+  repair.
 - Cross-review repair applies the same rule and additionally freezes `source_refs`, classification,
   severity, and contributing agents. The repaired stream must still cover every canonical primary
   `{agent, source_id}` input and may not introduce an unknown source ref.

@@ -433,7 +433,7 @@ assert_false 'cross-review repair stability rejects reclassification' \
     validate_cross_repair_stability "$cross_repair_baseline" "$changed_cross_canonical"
 cross_dirty="$test_root/cross-dirty.ndjson"
 {
-    jq -c '.[0]' "$cross_records" | sed 's/}$/]}/'
+    jq -c '.[0]' "$cross_records" | sed 's/}$/,oops}/'
     jq -c '.[1]' "$cross_records"
 } >"$cross_dirty"
 assert_true 'a cross-review with an unreadable finding still yields a repair baseline' \
@@ -942,8 +942,10 @@ assert_eq 'D1' "$(jq -r '[.[].dispute_id] | join(",")' "$orphan_root/disputes.js
 # A finding can also be lost with a line that did not parse, and a resolution may
 # name it. Salvage keeps every id such a line names, so that resolution goes with
 # the line instead of the phase failing over a finding it already counted as lost.
+# A stray bracket would now be mended without a model, so the fixtures break a
+# record with a bare word, which no count of brackets can fix.
 unreadable_final="$test_root/final-unreadable-finding.ndjson"
-sed '/"record":"finding"/ s/}$/]}/' "$pipeline_resolution_fixture" >"$unreadable_final"
+sed '/"record":"finding"/ s/}$/,oops}/' "$pipeline_resolution_fixture" >"$unreadable_final"
 run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$unreadable_final" || true
 assert_true 'salvage keeps the ids an unreadable finding line names' \
     grep -qx 'FINAL-001' <<<"$(printf '%s\n' "${NDJSON_SALVAGE_UNREADABLE_IDS[@]}")"
@@ -998,7 +1000,7 @@ assert_false 'repair stability rejects a changed resolution decision' \
 # A resolution that did not parse is held to the same rule as a finding: a
 # repair that dropped it would leave its dispute undecided without a word.
 dirty_resolution_stream="$test_root/final-dirty-resolution.ndjson"
-sed '/"record":"resolution"/ s/}$/]}/' "$pipeline_resolution_fixture" >"$dirty_resolution_stream"
+sed '/"record":"resolution"/ s/}$/,oops}/' "$pipeline_resolution_fixture" >"$dirty_resolution_stream"
 assert_true 'a final stream with an unreadable resolution still yields a repair baseline' \
     build_final_repair_baseline "$dirty_resolution_stream" "$test_root/final-dirty-resolution-baseline.json"
 assert_eq 'resolution dispute:beta:beta:F-001' \
@@ -1539,7 +1541,9 @@ assert_false 'and neither is transport prose' \
 
 baseline_valid=$(head -n 1 -- "$test_dir/fixtures/primary-findings-valid.ndjson")
 baseline_complete=$(tail -n 1 -- "$test_dir/fixtures/primary-findings-valid.ndjson")
-baseline_dirty='{"record":"finding","schema_version":1,"source_id":"F-009","recommendation":"text."],"classification":null}'
+# A stray bracket is mended without a model now, so the record that needs the
+# repair pass is broken by a bare word.
+baseline_dirty='{"record":"finding","schema_version":1,"source_id":"F-009","recommendation":"text.",oops,"classification":null}'
 baseline_torn='{"record":"finding","schema_version":1,"source_id":"F-009","claim":"half a sen'
 
 printf '%s\n%s\n%s\n' "$baseline_valid" "$baseline_dirty" "$baseline_complete" >"$test_root/baseline-dirty.ndjson"
@@ -1566,12 +1570,80 @@ early_close_line=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson
     | sed 's/\],"existing_feedback"/]},"existing_feedback"/')
 printf '%s\n%s\n%s\n' "$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson")" "$early_close_line" \
     "$(sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson")" >"$test_root/early-close.ndjson"
+# The brace that closed it early is now taken away without a model (29049), so
+# the baseline holds the whole record, never the truncated one.
 assert_true 'such a line leaves the rest of the stream a repair baseline' \
     build_primary_repair_baseline "$test_root/early-close.ndjson" "$test_root/early-close-baseline.json"
-assert_eq 'F-001' "$(jq -r '[.findings[].source_id] | join(",")' "$test_root/early-close-baseline.json")" \
-    'without a truncated copy of the broken record in it'
-assert_eq 'F-002' "$(jq -r '.unparsed[0].source_ids[0]' "$test_root/early-close-baseline.json")" \
-    'which is named instead, for the repair to write again'
+assert_eq 'F-001,F-002' "$(jq -r '[.findings[].source_id] | join(",")' "$test_root/early-close-baseline.json")" \
+    'with the mended record in it'
+assert_eq "$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.existing_feedback')" \
+    "$(jq -c '.findings[1].existing_feedback' "$test_root/early-close-baseline.json")" \
+    'whole, down to the keys that followed the stray brace'
+assert_eq 0 "$(jq '.unparsed | length' "$test_root/early-close-baseline.json")" \
+    'and nothing left for the repair to write again'
+
+# Brackets the model got wrong are mended without a model when only one reading
+# of the line parses as a record: closed early (29049), a brace doubled (29050)
+# or left out (29074) at the end, an array opened without its bracket (957).
+bracket_fixture=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson")
+bracket_expected=$(jq -c . <<<"$bracket_fixture")
+assert_eq "$bracket_expected" "$(repair_json_brackets "${bracket_fixture}}")" \
+    'a closing brace doubled at the end is taken away'
+assert_eq "$bracket_expected" "$(repair_json_brackets "${bracket_fixture%\}}")" \
+    'a closing brace left out is put back'
+assert_eq "$bracket_expected" "$(repair_json_brackets "$(sed 's/\],"existing_feedback"/]},"existing_feedback"/' <<<"$bracket_fixture")")" \
+    'a record closed early is closed where it ends, not where the anchor ends'
+assert_eq "$bracket_expected" "$(repair_json_brackets "$(sed 's/"evidence":\["/"evidence":"/' <<<"$bracket_fixture")")" \
+    'an array opened without its bracket gets it'
+assert_false 'a line broken by a bare word is left for the repair pass' \
+    repair_json_brackets "${bracket_fixture%\}},oops}"
+assert_false 'and so is one cut off inside a string' \
+    repair_json_brackets '{"record":"finding","claim":"half a sen'
+bracket_stream="$test_root/bracket-stream.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    sed 's/\],"existing_feedback"/]},"existing_feedback"/' <<<"$bracket_fixture"
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$bracket_stream"
+REPORT_STEM=fixture-bracket-stream
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-bracket-stream-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-bracket-stream-codex-findings.json"
+bracket_log=$(process_primary_ndjson_output "$bracket_stream" codex 2>&1) && bracket_status=0 || bracket_status=$?
+assert_eq 0 "$bracket_status" 'a stream with a record closed early passes without a repair pass'
+assert_true 'and the log says a record was mended' grep -q 'Repaired the brackets of 1 record' <<<"$bracket_log"
+assert_eq 2 "$(jq '.findings | length' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" 'with both findings kept'
+
+# Prose the model escaped twice is decoded, and a pr-level anchor that names a
+# file hands the file to the evidence; evidence itself is left as written, since
+# it may quote code where the escape is real.
+presentation_records="$test_root/presentation-records.json"
+jq -s '[(.[0] | .title = "Before \\u2192 after" | .evidence += ["Quoted \\u201cas written\\u201d"]
+    | .anchor = {kind: "pr-level", file: "src/Unanchored.php", start: null, "end": null}), .[2]]' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$presentation_records"
+PRIMARY_REVIEW_LANGUAGE=EN
+fill_presentation_defaults primary codex "$presentation_records" true
+assert_eq 'Before → after' "$(jq -r '.[0].title' "$presentation_records")" \
+    'a character escaped twice in a title is decoded'
+assert_true 'but not in the evidence' grep -qF 'Quoted \\u201cas written\\u201d' "$presentation_records"
+assert_eq 'null' "$(jq -r '.[0].anchor.file' "$presentation_records")" \
+    'a pr-level anchor loses the file it cannot carry'
+assert_eq 'File: `src/Unanchored.php`.' "$(jq -r '.[0].evidence[-1]' "$presentation_records")" \
+    'which the evidence names instead'
+
+# A repair that writes the character where its draft escaped it twice has not
+# changed the finding (29049).
+escaped_draft="$test_root/escaped-draft.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.evidence[0] += " \\u201cquoted\\u201d"'
+    sed -n '2,3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$escaped_draft"
+build_primary_repair_baseline "$escaped_draft" "$test_root/escaped-baseline.json"
+jq '.findings[0].evidence[0] += " “quoted”"' "$valid_canonical" >"$test_root/escaped-canonical.json"
+assert_true 'a repair that decoded a twice-escaped character keeps its baseline' \
+    validate_primary_repair_stability "$test_root/escaped-baseline.json" "$test_root/escaped-canonical.json"
+jq '.findings[0].evidence[0] += " “requoted”"' "$valid_canonical" >"$test_root/escaped-changed.json"
+assert_false 'while one that changed the words does not' \
+    validate_primary_repair_stability "$test_root/escaped-baseline.json" "$test_root/escaped-changed.json"
 
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the
@@ -1583,7 +1655,7 @@ assert_eq '{"line":2,"record":"finding","source_ids":["F-009"],"dispute_ids":[]}
 fixture_first=$(sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson")
 fixture_second=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson")
 fixture_complete=$(sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson")
-printf '%s\n%s\n%s\n' "$fixture_first" "${fixture_second%\}}]}" "$fixture_complete" >"$test_root/restore-one.ndjson"
+printf '%s\n%s\n%s\n' "$fixture_first" "${fixture_second%\}},oops}" "$fixture_complete" >"$test_root/restore-one.ndjson"
 build_primary_repair_baseline "$test_root/restore-one.ndjson" "$test_root/restore-one-baseline.json"
 assert_true 'a repair that writes the unreadable finding again is accepted' \
     validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$valid_canonical"
@@ -1597,7 +1669,7 @@ jq '.findings[0].claim = "The repair rewrote the claim."' "$valid_canonical" >"$
 assert_false 'and restoring one record does not license changing another' \
     validate_primary_repair_stability "$test_root/restore-one-baseline.json" "$test_root/restore-one-rewritten.json"
 
-printf '%s\n%s\n%s\n' "${fixture_first%\}}]}" "${fixture_second%\}}]}" "$fixture_complete" >"$test_root/restore-two.ndjson"
+printf '%s\n%s\n%s\n' "${fixture_first%\}},oops}" "${fixture_second%\}},oops}" "$fixture_complete" >"$test_root/restore-two.ndjson"
 build_primary_repair_baseline "$test_root/restore-two.ndjson" "$test_root/restore-two-baseline.json"
 assert_true 'every unreadable finding written again is accepted' \
     validate_primary_repair_stability "$test_root/restore-two-baseline.json" "$valid_canonical"
@@ -1606,7 +1678,7 @@ assert_false 'one of two written again is not' \
 
 # The terminal record is restored the same way: its summary comes back from the
 # draft instead of being replaced by the baseline's empty placeholder.
-printf '%s\n%s\n%s\n' "$fixture_first" "$fixture_second" "${fixture_complete%\}}]}" >"$test_root/restore-complete.ndjson"
+printf '%s\n%s\n%s\n' "$fixture_first" "$fixture_second" "${fixture_complete%\}},oops}" >"$test_root/restore-complete.ndjson"
 build_primary_repair_baseline "$test_root/restore-complete.ndjson" "$test_root/restore-complete-baseline.json"
 assert_true 'a complete record written again with the summary the draft gave is accepted' \
     validate_primary_repair_stability "$test_root/restore-complete-baseline.json" "$valid_canonical"

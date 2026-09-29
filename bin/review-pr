@@ -3401,6 +3401,102 @@ append_json_line() {
     printf '%s\n' "$parsed" >>"$output_file"
 }
 
+# A record the model finished writing but bracketed wrongly: closed early so the
+# rest reads as junk ('..."]},"existing_feedback":{...}}', 29049), an array ended
+# before its last strings, a closing brace doubled at the end (29050) or left out
+# (29074), an array opened without its bracket ('"positive_evidence":"a","b"]',
+# 957). Brackets outside strings are counted; one closer too many and each
+# closing bracket is tried away in turn, and a bracket is tried after each key
+# whose value is always an array but starts as a string; one or two too few and
+# the missing closers are tried on the end. A bracket removed too early can also parse, by pulling the
+# keys that follow into the object it left open (the anchor swallowing the
+# evidence), so the reading that keeps the most keys on the record itself wins,
+# and between two that keep as many, the one whose lists are lists: a lone
+# evidence string closed by a stray bracket reads as a string or as an array.
+# The line is repaired only when that reading is unique: the content stays the
+# model's own, character for character, and a line that could be read two ways
+# is left for the repair pass.
+repair_json_brackets() {
+    local line=$1
+    local length=${#line} index character candidate parsed keys key
+    local in_string=false escaped=false openers=0 closers=0 result="" best_keys=-1 tied=false
+    local -a closer_positions=() candidates=()
+
+    for (( index = 0; index < length; index++ )); do
+        character=${line:index:1}
+        if [[ "$in_string" == true ]]; then
+            if [[ "$escaped" == true ]]; then
+                escaped=false
+            elif [[ "$character" == '\' ]]; then
+                escaped=true
+            elif [[ "$character" == '"' ]]; then
+                in_string=false
+            fi
+            continue
+        fi
+        case "$character" in
+            '"') in_string=true ;;
+            '{' | '[') openers=$((openers + 1)) ;;
+            '}' | ']') closers=$((closers + 1)); closer_positions+=("$index") ;;
+        esac
+    done
+    [[ "$in_string" == false ]] || return 1
+    case $((closers - openers)) in
+        1)
+            for index in "${closer_positions[@]}"; do
+                candidates+=("${line:0:index}${line:index+1}")
+            done
+            for key in evidence positive_evidence verification_limitations source_refs contributing_agents thread_ids; do
+                [[ "$line" == *"\"${key}\":\""* ]] || continue
+                candidates+=("${line/\"${key}\":\"/\"${key}\":[\"}")
+            done
+            ;;
+        -1) candidates=("${line}}" "${line}]") ;;
+        -2) candidates=("${line}]}" "${line}}}") ;;
+        *) return 1 ;;
+    esac
+    for candidate in "${candidates[@]}"; do
+        parsed=$(jq -e -c 'select(type == "object")' <<<"$candidate" 2>/dev/null) || continue
+        [[ "$parsed" != *$'\n'* ]] || continue
+        [[ "$parsed" != "$result" ]] || continue
+        keys=$(jq '(keys | length) * 10 + ([.evidence, .positive_evidence, .verification_limitations,
+            .source_refs, .contributing_agents] | map(select(type == "array")) | length)' <<<"$parsed")
+        if (( keys > best_keys )); then
+            result=$parsed best_keys=$keys tied=false
+        elif (( keys == best_keys )); then
+            tied=true
+        fi
+    done
+    [[ -n "$result" && "$tied" == false ]] || return 1
+    printf '%s' "$result"
+}
+
+# Appends a line that did not parse as written once a repair that keeps its
+# content makes it parse: first a backslash JSON does not know is doubled, then
+# the brackets are counted. JSON_LINE_REPAIR names the repair that worked.
+append_repaired_json_line() {
+    local line=$1 output_file=$2 escaped repaired
+
+    JSON_LINE_REPAIR=""
+    escaped=$(repair_lone_json_escapes "$line")
+    if [[ "$escaped" != "$line" ]] && append_json_line "$escaped" "$output_file"; then
+        JSON_LINE_REPAIR=escapes
+        return 0
+    fi
+    repaired=$(repair_json_brackets "$escaped") || return 1
+    append_json_line "$repaired" "$output_file" || return 1
+    JSON_LINE_REPAIR=brackets
+}
+
+log_bracket_repairs() {
+    local count=$1 phase=$2 agent=$3
+    local noun=records
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=record
+    log "Repaired the brackets of ${count} ${noun} in the ${phase} stream from ${agent}"
+}
+
 # A repaired line is a line the model wrote wrongly. A stream that needed repairs
 # is not the same as one that parsed as written, and the count was being kept and
 # then discarded, so nothing distinguished them in the log.
@@ -3440,6 +3536,21 @@ readonly EXISTING_FEEDBACK_JQ_DEFS='
          else true end);
 '
 
+# A model that escapes a character twice writes the six characters \u2192 where
+# it meant the arrow, and the report printed them so (956). Only an escape of a
+# printable character outside ASCII is decoded; a surrogate half or a control
+# character is left as written.
+readonly LITERAL_UNICODE_JQ_DEFS='
+    def decode_literal_unicode:
+        if type == "string" and test("\\\\u[0-9a-fA-F]{4}") then
+            gsub("\\\\u(?<h>[0-9a-fA-F]{4})";
+                (.h | ascii_downcase | explode
+                    | map(if . >= 97 then . - 87 else . - 48 end)
+                    | reduce .[] as $d (0; . * 16 + $d)) as $cp
+                | if $cp >= 160 and ($cp < 55296 or $cp > 57343) then [$cp] | implode else "\\u" + .h end)
+        else . end;
+'
+
 # A REJECTED or UNCERTAIN verdict in a cross-review or final synthesis may leave
 # its failure scenario and recommendation empty, so a record that leaves the
 # keys out says the same thing; on 29044 a cross-reviewer left out
@@ -3447,7 +3558,7 @@ readonly EXISTING_FEEDBACK_JQ_DEFS='
 # A CONFIRMED finding owes both, and still fails without them.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local filled_file feedback=0 undefined=0 flags=0 optional=0 noun language
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 noun language
 
     case "$phase" in
         primary) language=$PRIMARY_REVIEW_LANGUAGE ;;
@@ -3465,9 +3576,21 @@ fill_presentation_defaults() {
         optional=$(jq '[.[] | select(.record == "finding" and (.classification | IN("REJECTED", "UNCERTAIN"))
             and ((has("failure_scenario") and has("recommendation")) | not))] | length' "$records_file" 2>/dev/null) || return 0
     fi
-    (( feedback + undefined + flags + optional > 0 )) || return 0
+    escapes=$(jq "$LITERAL_UNICODE_JQ_DEFS"'
+        [.[] | select(.record == "finding" or .record == "complete")
+            | select(any([.title, .claim, .failure_scenario, .recommendation, .summary][] | strings;
+                . != decode_literal_unicode))] | length' "$records_file" 2>/dev/null) || return 0
+    pr_level_files=$(jq '[.[] | select(.record == "finding" and (.anchor | type) == "object"
+        and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
+        and .anchor.start == null and .anchor["end"] == null)] | length' "$records_file" 2>/dev/null) || return 0
+    (( feedback + undefined + flags + optional + escapes + pr_level_files > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
-    jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS"'
+    jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS"'
+        def file_note($file):
+            if $language == "UA" then "Файл: `" + $file + "`." else "File: `" + $file + "`." end;
+        def decode_prose:
+            reduce ("title", "claim", "failure_scenario", "recommendation", "summary") as $key (.;
+                if (.[$key] | type) == "string" then .[$key] |= decode_literal_unicode else . end);
         def undefined_note_in($lang; $value):
             if $lang == "UA" then
                 "Наявний відгук модель описала як " + ($value | tojson) + ", чого контракт не передбачає; записано як unknown."
@@ -3493,6 +3616,15 @@ fill_presentation_defaults() {
                then (if has("failure_scenario") then . else . + {failure_scenario: null} end)
                     | (if has("recommendation") then . else . + {recommendation: null} end)
                else . end)
+            | decode_prose
+            | (if (.anchor | type) == "object" and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
+                  and .anchor.start == null and .anchor["end"] == null
+               then .anchor.file as $file
+                    | .anchor.file = null
+                    | (if (.evidence | type) != "array" or any(.evidence[]; type == "string" and contains($file)) then .
+                       else .evidence += [file_note($file)] end)
+               else . end)
+        elif .record == "complete" then decode_prose
         else . end)' "$records_file" >"$filled_file" || return 0
     mv -- "$filled_file" "$records_file"
     [[ "$quiet" != true ]] || return 0
@@ -3511,6 +3643,14 @@ fill_presentation_defaults() {
     if (( optional > 0 )); then
         noun=verdicts; (( optional != 1 )) || noun=verdict
         log "Set a missing failure_scenario or recommendation to null for ${optional} rejected or uncertain ${phase} ${noun}${agent:+ from ${agent}}"
+    fi
+    if (( escapes > 0 )); then
+        noun=records; (( escapes != 1 )) || noun=record
+        log "Decoded characters escaped twice in the prose of ${escapes} ${phase} ${noun}${agent:+ from ${agent}}"
+    fi
+    if (( pr_level_files > 0 )); then
+        noun=anchors; (( pr_level_files != 1 )) || noun=anchor
+        log "Moved the file of ${pr_level_files} pr-level ${noun} in the ${phase} stream${agent:+ from ${agent}} into its evidence"
     fi
 }
 
@@ -3783,8 +3923,7 @@ process_primary_ndjson_output() {
     local records_array_file
     local line
     local line_number=0
-    local repaired_line
-    local escape_repairs=0
+    local escape_repairs=0 bracket_repairs=0
     local raw_target=${PRIMARY_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-raw.ndjson}
     local findings_target=${PRIMARY_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-findings.json}
 
@@ -3805,9 +3944,7 @@ process_primary_ndjson_output() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! append_json_line "$line" "$records_file"; then
-            repaired_line=$(repair_lone_json_escapes "$line")
-            if [[ "$repaired_line" == "$line" ]] \
-                || ! append_json_line "$repaired_line" "$records_file"; then
+            if ! append_repaired_json_line "$line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     continue
@@ -3815,11 +3952,16 @@ process_primary_ndjson_output() {
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
-            escape_repairs=$((escape_repairs + 1))
+            if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
+                escape_repairs=$((escape_repairs + 1))
+            else
+                bracket_repairs=$((bracket_repairs + 1))
+            fi
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" primary "$agent"
     log_escape_repairs "$escape_repairs" primary "$agent"
+    log_bracket_repairs "$bracket_repairs" primary "$agent"
     if ! jq -s '.' "$records_file" >"$records_array_file"; then
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -4121,8 +4263,7 @@ process_cross_ndjson_output() {
     local agent=$2
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local line_number=0
-    local repaired_line
-    local escape_repairs=0
+    local escape_repairs=0 bracket_repairs=0
     local raw_target=${CROSS_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson}
     local findings_target=${CROSS_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json}
 
@@ -4148,9 +4289,7 @@ process_cross_ndjson_output() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! append_json_line "$line" "$records_file"; then
-            repaired_line=$(repair_lone_json_escapes "$line")
-            if [[ "$repaired_line" == "$line" ]] \
-                || ! append_json_line "$repaired_line" "$records_file"; then
+            if ! append_repaired_json_line "$line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     continue
@@ -4158,11 +4297,16 @@ process_cross_ndjson_output() {
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
-            escape_repairs=$((escape_repairs + 1))
+            if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
+                escape_repairs=$((escape_repairs + 1))
+            else
+                bracket_repairs=$((bracket_repairs + 1))
+            fi
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" cross-review "$agent"
     log_escape_repairs "$escape_repairs" cross-review "$agent"
+    log_bracket_repairs "$bracket_repairs" cross-review "$agent"
     jq -s '.' "$records_file" >"$records_array_file" || {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -5116,6 +5260,9 @@ validate_continuation_prefix() {
     local phase=$1 kept_file=$2 canonical_file=$3
     local rejected_summary_key=''
 
+    decoded_comparison_copy "$kept_file"; kept_file=$DECODED_COPY
+    decoded_comparison_copy "$canonical_file"; canonical_file=$DECODED_COPY
+
     [[ "$phase" != final ]] || rejected_summary_key='include_in_rejected_summary,'
     jq -e -s --slurpfile canonical "$canonical_file" "
         def content:
@@ -5351,8 +5498,7 @@ process_final_ndjson_output() {
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local resolutions_file disputes_file resolutions_canonical_file diagnostics_file
     local line_number=0
-    local repaired_line
-    local escape_repairs=0
+    local escape_repairs=0 bracket_repairs=0
 
     FINDING_CONTRACT_FAILURE_REASON=""
     FINAL_PROCESSED_RESOLUTIONS_FILE=""
@@ -5375,9 +5521,7 @@ process_final_ndjson_output() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         if ! append_json_line "$line" "$records_file"; then
-            repaired_line=$(repair_lone_json_escapes "$line")
-            if [[ "$repaired_line" == "$line" ]] \
-                || ! append_json_line "$repaired_line" "$records_file"; then
+            if ! append_repaired_json_line "$line" "$records_file"; then
                 if [[ "$NDJSON_SALVAGE_MODE" == true ]]; then
                     NDJSON_SALVAGE_UNPARSEABLE_LINES=$((NDJSON_SALVAGE_UNPARSEABLE_LINES + 1))
                     # A resolution may name the finding this line held. Every id the
@@ -5391,11 +5535,16 @@ process_final_ndjson_output() {
                 FINDING_CONTRACT_FAILURE_REASON="invalid_json_line_${line_number}"
                 return 1
             fi
-            escape_repairs=$((escape_repairs + 1))
+            if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
+                escape_repairs=$((escape_repairs + 1))
+            else
+                bracket_repairs=$((bracket_repairs + 1))
+            fi
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" final "$FINAL_SYNTHESIZER"
     log_escape_repairs "$escape_repairs" final "$FINAL_SYNTHESIZER"
+    log_bracket_repairs "$bracket_repairs" final "$FINAL_SYNTHESIZER"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     # Resolution records travel in the same stream but are validated against
     # the detected disputes, not as findings.
@@ -5577,7 +5726,7 @@ build_final_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if append_json_line "$trimmed" "$parsed_file"; then
+        if append_json_line "$trimmed" "$parsed_file" || append_repaired_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -5632,6 +5781,9 @@ build_final_repair_baseline() {
 
 validate_final_repair_stability() {
     local baseline_file=$1 canonical_file=$2 resolutions_file=${3:-}
+    decoded_comparison_copy "$baseline_file"; baseline_file=$DECODED_COPY
+    decoded_comparison_copy "$canonical_file"; canonical_file=$DECODED_COPY
+    if [[ -n "$resolutions_file" ]]; then decoded_comparison_copy "$resolutions_file"; resolutions_file=$DECODED_COPY; fi
     jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
@@ -5843,7 +5995,7 @@ build_cross_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if append_json_line "$trimmed" "$parsed_file"; then
+        if append_json_line "$trimmed" "$parsed_file" || append_repaired_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -5894,6 +6046,8 @@ build_cross_repair_baseline() {
 
 validate_cross_repair_stability() {
     local baseline_file=$1 canonical_file=$2
+    decoded_comparison_copy "$baseline_file"; baseline_file=$DECODED_COPY
+    decoded_comparison_copy "$canonical_file"; canonical_file=$DECODED_COPY
     jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def content:
             {source_id, source_refs, title, claim, anchor, evidence, failure_scenario,
@@ -6112,7 +6266,7 @@ build_primary_repair_baseline() {
         trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
         [[ -n "$trimmed" ]] || continue
         [[ "$trimmed" == '```' || "$trimmed" == '```jsonl' || "$trimmed" == '```ndjson' ]] && continue
-        if append_json_line "$trimmed" "$parsed_file"; then
+        if append_json_line "$trimmed" "$parsed_file" || append_repaired_json_line "$trimmed" "$parsed_file"; then
             [[ "$saw_trailing_prose" == false ]] || return 1
             object_count=$((object_count + 1))
             continue
@@ -6181,9 +6335,24 @@ build_primary_repair_baseline() {
     ' "$parsed_file" >"$baseline_file" 2>/dev/null
 }
 
+# A character escaped twice is the same text either way: a repair that writes
+# the arrow where its draft had \u2192 has not changed what the finding says, and
+# on 29049 a faithful final repair was refused for three such quotes. Both sides
+# of a comparison are read with those escapes decoded.
+decoded_comparison_copy() {
+    local source_file=$1
+
+    new_temp_file 'comparison-decoded'; DECODED_COPY=$NEW_TEMP_FILE
+    jq -c "$LITERAL_UNICODE_JQ_DEFS"' walk(decode_literal_unicode)' "$source_file" >"$DECODED_COPY" 2>/dev/null \
+        || cp -- "$source_file" "$DECODED_COPY"
+}
+
 validate_primary_repair_stability() {
     local baseline_file=$1
     local canonical_file=$2
+
+    decoded_comparison_copy "$baseline_file"; baseline_file=$DECODED_COPY
+    decoded_comparison_copy "$canonical_file"; canonical_file=$DECODED_COPY
 
     jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
         def finding_content:
