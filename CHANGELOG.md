@@ -6,6 +6,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- A primary finding written whole but for its `recommendation` or `failure_scenario`, or anchored to
+  lines the pull request did not change, is sent back to its agent for those fields alone, with the
+  repository open, before any repair. The orchestrator sets only the fields it asked for, so the
+  rest of the finding stays as written. On ListingSyncer 957 pi lost seven of twelve findings to a
+  missing recommendation, and on Tools 29072 claude lost two to line numbers past the end of a new
+  file; salvage dropped them all.
+
 - `--run last` selects the most recent full run of the pull request, for a resume, a `--rerun-final`
   and `findings` alike, so an identifier no longer has to be copied out of a directory listing. It is
   resolved once, before anything looks a run up, and the chosen run is logged — a command that picks

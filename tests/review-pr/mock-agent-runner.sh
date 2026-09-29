@@ -452,6 +452,20 @@ case "$behavior" in
         printf '%s\n' 'That completes the requested structured review.'
         write_usage null 58
         ;;
+    # A finding written whole but for its recommendation, as pi did on 957:
+    # only an amendment by its author can bring it back.
+    ndjson-missing-recommendation)
+        emit_valid_ndjson_primary | jq -c 'if .record == "finding" then del(.recommendation) else . end'
+        write_usage null 58
+        ;;
+    # Answers an amendment pass with each field it was asked for, for every
+    # finding the prompt lists, plus a key it was not asked for, which the
+    # orchestrator must ignore.
+    amendment-from-prompt)
+        prompt_block_lines 'FINDINGS TO AMEND' | jq -c '{record: "amendment", source_id,
+            recommendation: "Mock amendment: correct the changed branch.", claim: "An amendment may not rewrite the claim."}'
+        write_usage null 21
+        ;;
     cross-ndjson-trailing-prose)
         emit_valid_ndjson_cross
         printf '%s\n' 'That completes the requested structured cross-review.'

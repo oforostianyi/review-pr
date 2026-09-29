@@ -430,6 +430,16 @@ keys remain language-independent.
   line as lost. A `complete` record restored this way keeps the summary the draft wrote. A record
   torn off mid-token, unknown record types, duplicate completion records, and other missing
   substantive finding fields remain ineligible because recovery would require guessing what was cut.
+- A primary finding written whole but for a field its author can still supply -- a missing or empty
+  `recommendation` or `failure_scenario`, or an anchor on lines the pull request did not change --
+  is amended before any repair, because a repair may not write content. The gate is the validation
+  diagnostic: every problem it names must be such a field of a finding, and a finding may miss no
+  other key. The agent gets one pass with the repository open and a prompt that lists each finding
+  with the fields to write (and the changed-line map when an anchor is asked for); it answers one
+  `{"record":"amendment","source_id":...}` line per finding. The orchestrator sets only the fields
+  asked for, and only in the shape the contract expects, so every other field stays as the draft
+  wrote it, then validates the merged stream as an ordinary primary review. When an amendment was
+  tried the schema repair is skipped, and a failed amendment goes on to salvage.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,

@@ -1645,6 +1645,40 @@ jq '.findings[0].evidence[0] += " “requoted”"' "$valid_canonical" >"$test_ro
 assert_false 'while one that changed the words does not' \
     validate_primary_repair_stability "$test_root/escaped-baseline.json" "$test_root/escaped-changed.json"
 
+# A finding written whole but for a field its author can still supply is sent
+# back for that field alone; anything else wrong keeps it out of an amendment.
+amend_valid="$test_dir/fixtures/primary-findings-valid.ndjson"
+amend_draft="$test_root/amend-draft.ndjson"
+{ sed -n '1p' "$amend_valid" | jq -c 'del(.recommendation)'; sed -n '2,3p' "$amend_valid"; } >"$amend_draft"
+assert_true 'a finding without its recommendation can be amended' \
+    build_primary_amendment_request codex "$amend_draft" "$test_root/amend-records.ndjson" "$test_root/amend-request.json"
+assert_eq '[{"source_id":"F-001","fields":["recommendation"]}]' "$(jq -c . "$test_root/amend-request.json")" \
+    'and the request names that field alone'
+{ sed -n '1p' "$amend_valid" | jq -c '.anchor.start = 900 | .anchor["end"] = 905'; sed -n '2,3p' "$amend_valid"; } >"$test_root/amend-anchor.ndjson"
+assert_true 'so can one anchored to lines the pull request did not change' \
+    build_primary_amendment_request codex "$test_root/amend-anchor.ndjson" "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json"
+assert_eq 'anchor' "$(jq -r '.[0].fields | join(",")' "$test_root/amend-anchor-request.json")" \
+    'whose request asks for the anchor'
+{ sed -n '1p' "$amend_valid" | jq -c 'del(.recommendation, .title)'; sed -n '2,3p' "$amend_valid"; } >"$test_root/amend-title.ndjson"
+assert_false 'a finding that also lost its title is not amended: a title is not the model'"'"'s to supply again' \
+    build_primary_amendment_request codex "$test_root/amend-title.ndjson" "$test_root/amend-title-records.ndjson" "$test_root/amend-title-request.json"
+assert_false 'nor is a stream that parses and validates' \
+    build_primary_amendment_request codex "$amend_valid" "$test_root/amend-clean-records.ndjson" "$test_root/amend-clean-request.json"
+printf '%s\n' 'Here are the amendments:' \
+    '{"record":"amendment","source_id":"F-001","recommendation":"Retry the payload once more.","claim":"Rewritten."}' \
+    '{"record":"amendment","source_id":"F-002","recommendation":"Not asked for."}' >"$test_root/amend-reply.ndjson"
+assert_eq 1 "$(merge_primary_amendments "$test_root/amend-records.ndjson" "$test_root/amend-request.json" "$test_root/amend-reply.ndjson" "$test_root/amend-merged.ndjson")" \
+    'an amendment sets the one field it was asked for'
+assert_eq "Retry the payload once more.|$(sed -n '1p' "$amend_valid" | jq -r '.claim')" \
+    "$(jq -r 'select(.source_id == "F-001") | .recommendation + "|" + .claim' "$test_root/amend-merged.ndjson")" \
+    'and leaves the claim it was not asked for as the draft wrote it'
+assert_eq "$(sed -n '2p' "$amend_valid" | jq -c '.recommendation')" \
+    "$(jq -c 'select(.source_id == "F-002") | .recommendation' "$test_root/amend-merged.ndjson")" \
+    'and a finding it was not asked about untouched'
+printf '%s\n' '{"record":"amendment","source_id":"F-001","anchor":"src/Changed.php:10"}' >"$test_root/amend-bad-anchor.ndjson"
+assert_eq 0 "$(merge_primary_amendments "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json" "$test_root/amend-bad-anchor.ndjson" "$test_root/amend-bad-merged.ndjson")" \
+    'an anchor given in a shape the contract does not know is not set'
+
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the
 # record, and the check -- comparing only what the baseline kept -- accepted the
