@@ -55,6 +55,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A finding anchored on the right file in the wrong directory keeps its anchor. It moves to the one
+  changed file of that name whose changed lines hold it, in the primary, cross-review and final
+  streams alike, and the log names both paths. On Tools 28816 pi wrote
+  `.../Service/GeoLocationCoordinatesPopulator.php` for `.../Service/Location/`, and the schema
+  repair dropped four findings; the final wrote `src/Includes/AddressFinder.php` for
+  `src/Includes/Services/`, and its first attempt was thrown away.
+
 - A record whose brackets alone are wrong is mended without a model when only one reading of it
   parses: closed early by a stray brace (Tools 29049), a closing brace doubled (29050) or left out
   (29074) at the end, an array opened without its bracket (ListingSyncer 957). Each had cost a

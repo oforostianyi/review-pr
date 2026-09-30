@@ -3769,6 +3769,64 @@ readonly LITERAL_UNICODE_JQ_DEFS='
         else . end;
 '
 
+# Whether a changed-line anchor lands on a file of the changed-line map: the file
+# must be inline-anchorable, and its last line must be a changed line, or the
+# anchor must overlap a changed range and end inside the same hunk. Every
+# validator and the path correction below read the same rule.
+readonly CHANGED_LINE_ANCHOR_JQ_DEFS='
+    def fits_changed_file($anchor):
+        .inline_anchorable == true and
+        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
+         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
+             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])));
+'
+
+# A model can name the right file in the wrong directory. On 28816 pi anchored
+# four findings on .../Service/GeoLocationCoordinatesPopulator.php, which lives in
+# .../Service/Location/, and the schema repair dropped all four; the final did
+# the same with src/Includes/AddressFinder.php for src/Includes/Services/, and
+# its first attempt was thrown away. A changed-line anchor whose file is not in
+# the changed-line map moves to the one changed file with the same name whose
+# changed lines hold the anchor, aloud. With no such file, or with two, the
+# anchor is left as written and fails as before.
+resolve_anchor_paths() {
+    local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
+    local resolved_file corrections count noun=anchors
+
+    [[ -s "$CHANGED_LINE_MAP_FILE" ]] || return 0
+    local defs="$CHANGED_LINE_ANCHOR_JQ_DEFS"'
+        def basename: split("/") | last;
+        def corrected_path:
+            . as $anchor
+            | if type == "object" and .kind == "changed-line"
+                  and (.file | type) == "string" and (.file | length) > 0
+                  and (.start | type) == "number" and (.["end"] | type) == "number" and .start <= .["end"]
+                  and (any($changed_lines[0].files[]; .path == $anchor.file) | not)
+              then [$changed_lines[0].files[]
+                      | select((.path | basename) == ($anchor.file | basename) and fits_changed_file($anchor))
+                      | .path]
+                   | if length == 1 then .[0] else null end
+              else null end;
+    '
+    corrections=$(jq -r --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" "$defs"'
+        [.[] | select(.record == "finding" and (.anchor | type) == "object")
+            | {from: .anchor.file, to: (.anchor | corrected_path)} | select(.to != null)]
+        | if length == 0 then empty
+          else "\(length)\t" + (unique | map("\(.from) -> \(.to)") | join("; ")) end' \
+        "$records_file" 2>/dev/null) || return 0
+    [[ -n "$corrections" ]] || return 0
+    new_temp_file "${phase}-anchor-paths"; resolved_file=$NEW_TEMP_FILE
+    jq --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" "$defs"'
+        map(if .record == "finding" and (.anchor | type) == "object" then (.anchor | corrected_path) as $path
+                | if $path == null then . else .anchor.file = $path end
+            else . end)' "$records_file" >"$resolved_file" || return 0
+    mv -- "$resolved_file" "$records_file"
+    [[ "$quiet" != true ]] || return 0
+    count=${corrections%%$'\t'*}
+    (( count != 1 )) || noun=anchor
+    log "Corrected the file path of ${count} ${phase} ${noun}${agent:+ from ${agent}} to the one changed file of that name: ${corrections#*$'\t'}"
+}
+
 # A REJECTED or UNCERTAIN verdict in a cross-review or final synthesis may leave
 # its failure scenario and recommendation empty, so a record that leaves the
 # keys out says the same thing; on 29044 a cross-reviewer left out
@@ -3778,6 +3836,7 @@ fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
     local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 noun language
 
+    resolve_anchor_paths "$phase" "$agent" "$records_file" "$quiet"
     case "$phase" in
         primary) language=$PRIMARY_REVIEW_LANGUAGE ;;
         cross) language=$CROSS_REVIEW_LANGUAGE ;;
@@ -4009,7 +4068,7 @@ validate_primary_ndjson_records() {
     local agent=$3
 
     [[ -s "$CHANGED_LINE_MAP_FILE" ]] || return 1
-    jq -e --arg agent "$agent" --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" '
+    jq -e --arg agent "$agent" --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" "$CHANGED_LINE_ANCHOR_JQ_DEFS"'
         def string_array:
             type == "array" and all(.[]; type == "string");
         def exact_keys($allowed):
@@ -4024,12 +4083,7 @@ validate_primary_ndjson_records() {
                 (.["end"] | type == "number" and floor == . and . >= 1) and
                 (.start <= .["end"]) and
                 (. as $anchor |
-                    any($changed_lines[0].files[];
-                        .path == $anchor.file and
-                        .inline_anchorable == true and
-                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
-                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
-                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
+                    any($changed_lines[0].files[]; .path == $anchor.file and fits_changed_file($anchor)))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false
@@ -4352,7 +4406,7 @@ validate_cross_ndjson_records() {
     jq -e --arg agent "$agent" \
         --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
         --slurpfile expected_refs "$expected_refs_file" \
-        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" '
+        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" "$CHANGED_LINE_ANCHOR_JQ_DEFS"'
         def string_array:
             type == "array" and all(.[]; type == "string");
         def exact_keys($allowed):
@@ -4367,12 +4421,7 @@ validate_cross_ndjson_records() {
                 (.["end"] | type == "number" and floor == . and . >= 1) and
                 (.start <= .["end"]) and
                 (. as $anchor |
-                    any($changed_lines[0].files[];
-                        .path == $anchor.file and
-                        .inline_anchorable == true and
-                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
-                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
-                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
+                    any($changed_lines[0].files[]; .path == $anchor.file and fits_changed_file($anchor)))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false
@@ -4688,7 +4737,7 @@ validate_final_ndjson_records() {
     jq -e \
         --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
         --slurpfile expected_refs "$expected_refs_file" \
-        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" '
+        --argjson allow_partial_coverage "$NDJSON_ALLOW_PARTIAL_COVERAGE" "$CHANGED_LINE_ANCHOR_JQ_DEFS"'
         def string_array:
             type == "array" and all(.[]; type == "string");
         def exact_keys($allowed):
@@ -4703,11 +4752,7 @@ validate_final_ndjson_records() {
                 (.["end"] | type == "number" and floor == . and . >= 1) and
                 (.start <= .["end"]) and
                 (. as $anchor |
-                    any($changed_lines[0].files[];
-                        .path == $anchor.file and .inline_anchorable == true and
-                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
-                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
-                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
+                    any($changed_lines[0].files[]; .path == $anchor.file and fits_changed_file($anchor)))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false end;
@@ -5345,7 +5390,7 @@ describe_ndjson_validation_failure() {
     fi
     jq -r --arg phase "$phase" --arg agent "$agent" \
         --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" \
-        --argjson expected_refs "$expected_refs_json" '
+        --argjson expected_refs "$expected_refs_json" "$CHANGED_LINE_ANCHOR_JQ_DEFS"'
         def string_array:
             type == "array" and all(.[]; type == "string");
         def valid_anchor:
@@ -5358,11 +5403,7 @@ describe_ndjson_validation_failure() {
                 (.["end"] | type == "number" and floor == . and . >= 1) and
                 (.start <= .["end"]) and
                 (. as $anchor |
-                    any($changed_lines[0].files[];
-                        .path == $anchor.file and .inline_anchorable == true and
-                        (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])
-                         or (any(.right_side_ranges[]; .start <= $anchor["end"] and .["end"] >= $anchor.start)
-                             and any((.right_side_hunks // [])[]; .start <= $anchor["end"] and .["end"] >= $anchor["end"])))))
+                    any($changed_lines[0].files[]; .path == $anchor.file and fits_changed_file($anchor)))
             elif .kind == "pr-level" then
                 .file == null and .start == null and .["end"] == null
             else false end;

@@ -1488,6 +1488,43 @@ assert_false 'while a range of context lines alone still fails' \
     process_primary_ndjson_output "$context_stream" codex
 CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
 
+# The right file named in the wrong directory (28816) moves to the one changed
+# file of that name whose changed lines hold the anchor.
+misplaced_stream="$test_root/anchor-misplaced.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor.file = "lib/Changed.php"'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$misplaced_stream"
+REPORT_STEM=fixture-anchor-misplaced
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-anchor-misplaced-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-anchor-misplaced-codex-findings.json"
+misplaced_log=$(process_primary_ndjson_output "$misplaced_stream" codex 2>&1) && misplaced_status=0 || misplaced_status=$?
+assert_eq 0 "$misplaced_status" 'an anchor on the right file in the wrong directory passes without a repair pass'
+assert_eq 'src/Changed.php' "$(jq -r '.findings[0].anchor.file' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'on the changed file of that name'
+assert_true 'and the log names both paths' \
+    grep -qF 'Corrected the file path of 1 primary anchor from codex to the one changed file of that name: lib/Changed.php -> src/Changed.php' <<<"$misplaced_log"
+outside_stream="$test_root/anchor-misplaced-outside.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor = {kind: "changed-line", file: "lib/Changed.php", start: 15, "end": 15}'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$outside_stream"
+assert_false 'an anchor whose lines the same-named file did not change is left to fail' \
+    process_primary_ndjson_output "$outside_stream" codex
+twin_map="$test_root/changed-lines-twins.json"
+jq '.files += [.files[] | select(.path == "src/Changed.php") | .path = "tests/Changed.php"]' \
+    "$test_dir/fixtures/changed-lines-valid.json" >"$twin_map"
+CHANGED_LINE_MAP_FILE=$twin_map
+assert_false 'and so is one that two changed files of that name could hold' \
+    process_primary_ndjson_output "$misplaced_stream" codex
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+misplaced_final="$test_root/anchor-misplaced-final.json"
+jq -s '[.[0] | .anchor.file = "src/Includes/Changed.php" | .classification = "REJECTED"]' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$misplaced_final"
+fill_presentation_defaults final claude "$misplaced_final" true
+assert_eq 'src/Changed.php' "$(jq -r '.[0].anchor.file' "$misplaced_final")" \
+    'the final synthesis gets the same correction (f21 on 28816)'
+
 # A key the complete record does not define is dropped instead of failing the stream.
 extra_complete="$test_root/extra-complete-key.ndjson"
 {
