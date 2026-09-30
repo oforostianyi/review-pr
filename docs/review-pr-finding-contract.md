@@ -419,7 +419,10 @@ keys remain language-independent.
   reading of it parses as one object: brackets outside strings are counted, one too many is tried
   away closer by closer and one or two too few closing braces are tried on the end, and the reading that keeps the
   most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
-  otherwise, is not mended, and neither is one that ends inside an array: that record was cut off. A JSON-looking record the model finished writing but mis-punctuated in
+  otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
+  A record broken across physical lines is joined first: a line that opens a record but does not
+  parse takes the next lines, up to three and none of them opening a record, and the join stands
+  only when it parses as one object. A JSON-looking record the model finished writing but mis-punctuated in
   a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
   back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
@@ -430,9 +433,11 @@ keys remain language-independent.
   line as lost. A `complete` record restored this way keeps the summary the draft wrote. A record
   torn off mid-token, unknown record types, duplicate completion records, and other missing
   substantive finding fields remain ineligible because recovery would require guessing what was cut.
-- A primary finding written whole but for a field its author can still supply -- a missing or empty
+- A finding written whole but for a field its author can still supply -- a missing or empty
   `recommendation` or `failure_scenario`, or an anchor on lines the pull request did not change --
-  is amended before any repair, because a repair may not write content. The gate is the validation
+  is amended before any repair, because a repair may not write content. This holds for primary
+  findings, cross-review verdicts and final findings alike, except that a final finding is never
+  asked for an anchor: the final anchor repair owns that. The gate is the validation
   diagnostic: every problem it names must be such a field of a finding, and a finding may miss no
   other key. The agent gets one pass with the repository open and a prompt that lists each finding
   with the fields to write (and the changed-line map when an anchor is asked for); it answers one

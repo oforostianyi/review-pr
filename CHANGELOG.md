@@ -20,7 +20,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
   rest of the finding stays as written. On ListingSyncer 957 pi lost seven of twelve findings to a
   missing recommendation, and on Tools 29072 claude lost two to line numbers past the end of a new
   file; salvage dropped them all. An amendment that fixes some of them hands salvage the merged stream,
-  so only a finding that is still incomplete is dropped.
+  so only a finding that is still incomplete is dropped. Cross-review verdicts and final findings are amended the same
+  way (a confirmed cross-review verdict with an empty failure scenario, Tools 29077); a final finding
+  is never asked for an anchor, which the final anchor repair owns.
 
 - `--run last` selects the most recent full run of the pull request, for a resume, a `--rerun-final`
   and `findings` alike, so an identifier no longer has to be copied out of a directory listing. It is
@@ -54,6 +56,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
   (29074) at the end, an array opened without its bracket (ListingSyncer 957). Each had cost a
   repair pass or, in salvage, the record. A line that ends inside an array is left alone: it was cut
   off, and closing it would publish the record without its missing entries.
+- A record a model broke across physical lines is joined back into one before the stream is read
+  (pi on Tools 29077), instead of costing both halves in salvage.
 - A character a model escaped twice no longer prints as `\u2192` in a title, claim, failure
   scenario, recommendation or summary, and a repair that writes the character its draft escaped no
   longer fails its stability check (29049). Evidence and code spans keep such text as written.
