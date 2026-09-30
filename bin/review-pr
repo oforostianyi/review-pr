@@ -990,7 +990,7 @@ describe_configuration_problems() {
     jq -r '
         def known_efforts($type):
             if $type == "claude" then ["auto", "low", "medium", "high", "xhigh", "max"]
-            elif $type == "codex" then ["auto", "none", "low", "medium", "high", "xhigh", "max"]
+            elif $type == "codex" then ["auto", "none", "low", "medium", "high", "xhigh", "max", "ultra"]
             elif $type == "pi" then ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
             else null end;
         def enum_problem($where; $value; $allowed):
@@ -1123,7 +1123,7 @@ die_with_configuration_problems() {
         def valid_claude_effort:
             . == "" or . == "auto" or IN("low", "medium", "high", "xhigh", "max");
         def valid_codex_effort:
-            . == "" or . == "auto" or IN("none", "low", "medium", "high", "xhigh", "max");
+            . == "" or . == "auto" or IN("none", "low", "medium", "high", "xhigh", "max", "ultra");
         def valid_pi_thinking:
             . == "" or . == "auto" or IN("off", "minimal", "low", "medium", "high", "xhigh", "max");
         # The agent key is a label the reader chooses; `type` names the adapter that

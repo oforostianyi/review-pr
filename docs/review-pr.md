@@ -268,7 +268,7 @@ rule mechanically, and the configured timeout remains the final wall-clock bound
 `agents.<agent>.effort` applies to that agent's primary and cross-review runs:
 
 - Claude receives `--effort`. Supported configuration values are `low`, `medium`, `high`, `xhigh`, and `max`; its default is determined by Claude Code when the field is empty or omitted.
-- Codex receives `-c model_reasoning_effort="…"`. Supported configuration values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; model availability determines which values the selected model accepts.
+- Codex receives `-c model_reasoning_effort="…"`. Supported configuration values are `none`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; model availability determines which values the selected model accepts.
 - Pi receives `--thinking`. Supported configuration values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; an empty value keeps the current default of the configured provider/model. A bounded level matters for reasoning models behind a local server: a finalizer that spends most of its output budget thinking can hit the output token limit before it prints the contract.
 
 The exact model still decides whether an effort is available. For example, Claude Haiku 4.5 rejects effort, and older Claude models may support only a subset. Leave the field empty for the CLI default, or set `finalization.effort` to `""` to explicitly disable inherited agent effort for final synthesis.

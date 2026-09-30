@@ -658,7 +658,8 @@
         "medium",
         "high",
         "xhigh",
-        "max"
+        "max",
+        "ultra"
       ]
     },
     "prompt": {

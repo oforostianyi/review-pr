@@ -6,6 +6,10 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- `effort` accepts `ultra` for the Codex adapter, the level codex-cli 0.159.0 lists above `max` for
+  `gpt-6.1-sol` and its siblings. The model reference lists `gpt-6.1-sol`, now Codex's default,
+  with `gpt-6-astra` and `gpt-6-luna`, as `model/list` reported them on 2026-09-30.
+
 - `review-pr quota [codex] [--json]` reports the Codex subscription limits as Codex itself sees them,
   through `codex app-server` and `account/rateLimits/read` with Codex's own login: each window named by
   its length, every bucket kept, a missing field left null rather than read as zero, and a reading
