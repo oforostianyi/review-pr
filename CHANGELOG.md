@@ -6,6 +6,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- A Codex attempt that the provider cut short is resumed instead of started over. When its event
+  stream ends in `turn.failed` or an `error` event, the retry runs `codex exec resume` on the same
+  session, which keeps every command and its output and the read-only sandbox, and asks it to finish
+  and deliver the whole output; a session Codex cannot open is followed by a fresh attempt within the
+  same retry. On ListingSyncer 960 gpt-6.1-sol answered "Selected model is at capacity" thirteen
+  minutes into a primary review, and the retry spent thirteen more reading the same files. Codex
+  sessions are therefore recorded under `~/.codex/sessions` whenever a retry is configured.
+
 - `effort` accepts `ultra` for the Codex adapter, the level codex-cli 0.159.0 lists above `max` for
   `gpt-6.1-sol` and its siblings. The model reference lists `gpt-6.1-sol`, now Codex's default,
   with `gpt-6-astra` and `gpt-6-luna`, as `model/list` reported them on 2026-09-30.

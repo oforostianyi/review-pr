@@ -32,6 +32,9 @@ declare -a DASHBOARD_ROWS=()
 declare -a REVIEW_AGENTS=(claude codex pi)
 declare -a CONFIGURED_REVIEWERS=(claude codex pi)
 declare -A DASHBOARD_LABELS=()
+# Codex sessions a provider error cut short, keyed "agent|phase", and the error.
+declare -A CODEX_RESUME_SESSIONS=()
+declare -A CODEX_RESUME_ERRORS=()
 declare -A DASHBOARD_STATUSES=()
 declare -A DASHBOARD_PIDS=()
 declare -A DASHBOARD_STARTED_AT=()
@@ -1923,6 +1926,39 @@ agent_label() {
 # whole stream is validated, and record the deviation in the agent log. The
 # progress notes it sends before tool calls are agent messages too; they come
 # first, and the ndjson normalizer drops them as prose ahead of the first record.
+# A Codex attempt that a provider error cut short is resumed, not started over.
+# On ListingSyncer 960 gpt-6.1-sol answered "Selected model is at capacity"
+# thirteen minutes into a primary review, and the retry spent thirteen more
+# minutes reading the same files. A session that `codex exec` recorded keeps
+# every command and its output up to the failure, and `codex exec resume`
+# continues it with the same sandbox. Only a turn that failed or an error event
+# counts: an attempt that ran to its end and wrote an invalid stream is retried
+# from the start, since resuming it would carry the stream forward.
+note_codex_resumable_session() {
+    local agent=$1 phase=$2 events_file=$3
+    local key="${agent}|${phase}" thread error
+
+    unset 'CODEX_RESUME_SESSIONS[$key]' 'CODEX_RESUME_ERRORS[$key]'
+    [[ -s "$events_file" ]] || return 0
+    thread=$(jq -r 'select(.type? == "thread.started") | .thread_id // empty' "$events_file" 2>/dev/null | head -n 1) || return 0
+    [[ "$thread" =~ ^[0-9A-Za-z][0-9A-Za-z-]{7,63}$ ]] || return 0
+    error=$(jq -r 'select(.type? == "turn.failed" or .type? == "error")
+        | (.error.message? // .message? // "provider error") | tostring' "$events_file" 2>/dev/null | tail -n 1) || return 0
+    [[ -n "$error" ]] || return 0
+    CODEX_RESUME_SESSIONS[$key]=$thread
+    CODEX_RESUME_ERRORS[$key]=${error:0:200}
+}
+
+write_codex_resume_prompt() {
+    local prompt_file=$1
+
+    cat >"$prompt_file" <<'PROMPT'
+Your previous turn in this session stopped on a provider error before you delivered your final output. Continue the same task from where you stopped. Do not start over: reuse what you already read and ran, and check again only what you still need.
+
+Then deliver the complete final output exactly as the original instructions in this session require, from its first record or line to its last, as if it were your first answer. Anything you wrote before the error is discarded, so repeat nothing by reference.
+PROMPT
+}
+
 join_codex_agent_messages() {
     local events_file=$1
     local output_file=$2
@@ -7152,6 +7188,7 @@ preserve_agent_failure_artifacts() {
         activity_log "Failure usage details: ${destination}"
     fi
     agent_kind=$(agent_type "$agent")
+    [[ "$agent_kind" != codex || -z "$phase" ]] || note_codex_resumable_session "$agent" "$phase" "$response_file"
     if [[ ( "$agent_kind" == pi || "$agent_kind" == codex ) && -s "$response_file" ]]; then
         destination="${artifact_base}-events.jsonl"
         assert_new_target "$destination"
@@ -8524,23 +8561,60 @@ start_agent() {
     case "$(agent_type "$agent")" in
         codex)
             local response_file="${usage_file}.events"
+            local resume_key="${agent}|${phase}" resume_session='' resume_prompt=''
+            # A session is recorded only when a retry could resume it.
+            local -a codex_session_arguments=(--ephemeral)
+            (( agent_max_attempts <= 1 )) || codex_session_arguments=()
             TEMP_FILES+=("$response_file")
+            if (( attempt > 1 )) && [[ -n "${CODEX_RESUME_SESSIONS[$resume_key]:-}" ]]; then
+                resume_session=${CODEX_RESUME_SESSIONS[$resume_key]}
+                new_temp_file "codex-${agent}-resume-prompt"; resume_prompt=$NEW_TEMP_FILE
+                write_codex_resume_prompt "$resume_prompt"
+                activity_log "Resuming the Codex session of ${agent} ${phase} attempt $((attempt - 1)) after a provider error (${CODEX_RESUME_ERRORS[$resume_key]:-unknown}), keeping the work it had done: ${resume_session}"
+            fi
+            unset 'CODEX_RESUME_SESSIONS[$resume_key]' 'CODEX_RESUME_ERRORS[$resume_key]'
             (
                 cd "$agent_working_directory"
-                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec \
-                    --sandbox read-only \
-                    --ephemeral \
-                    --color never \
-                    --json \
-                    "${codex_repository_arguments[@]}" \
-                    --cd "$agent_working_directory" \
-                    "${model_arguments[@]}" \
-                    "${effort_arguments[@]}" \
-                    --output-last-message "$output_file" \
-                    - <"$prompt_file" >"$response_file" 2>"$log_file"; then
-                    exit_status=0
-                else
-                    exit_status=$?
+                : >"$log_file"
+                if [[ -n "$resume_session" ]]; then
+                    if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec resume \
+                        "$resume_session" \
+                        --json \
+                        "${codex_repository_arguments[@]}" \
+                        "${model_arguments[@]}" \
+                        "${effort_arguments[@]}" \
+                        --output-last-message "$output_file" \
+                        - <"$resume_prompt" >"$response_file" 2>>"$log_file"; then
+                        exit_status=0
+                    else
+                        exit_status=$?
+                    fi
+                    # A session Codex cannot open never starts a turn; the attempt
+                    # then runs from the start instead of being spent. jq 1.6
+                    # exits 0 for -e on empty input, so the answer is read instead.
+                    if (( exit_status != 0 && exit_status != 124 )) \
+                        && [[ "$(jq -rs 'any(.[]; .type? == "turn.started")' "$response_file" 2>/dev/null)" != true ]]; then
+                        printf 'Codex could not resume session %s (exit %s); starting the attempt over\n' \
+                            "$resume_session" "$exit_status" >>"$log_file"
+                        resume_session=''
+                    fi
+                fi
+                if [[ -z "$resume_session" ]]; then
+                    if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec \
+                        --sandbox read-only \
+                        "${codex_session_arguments[@]}" \
+                        --color never \
+                        --json \
+                        "${codex_repository_arguments[@]}" \
+                        --cd "$agent_working_directory" \
+                        "${model_arguments[@]}" \
+                        "${effort_arguments[@]}" \
+                        --output-last-message "$output_file" \
+                        - <"$prompt_file" >"$response_file" 2>>"$log_file"; then
+                        exit_status=0
+                    else
+                        exit_status=$?
+                    fi
                 fi
                 join_codex_agent_messages "$response_file" "$output_file" "$log_file"
                 extract_token_usage "$response_file" "$usage_file" "$usage_json_file" "$agent" "$phase" "$model" "$effort"
