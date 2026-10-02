@@ -133,6 +133,9 @@
         "codex": {
           "type": "object",
           "additionalProperties": false,
+          "required": [
+            "minimum_remaining_percent"
+          ],
           "properties": {
             "minimum_remaining_percent": {
               "type": "number",

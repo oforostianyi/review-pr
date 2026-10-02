@@ -8,7 +8,7 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 - A Codex attempt that the provider cut short is resumed instead of started over. When its event
   stream ends in `turn.failed` or an `error` event, the retry runs `codex exec resume` on the same
-  session, which keeps every command and its output and the read-only sandbox, and asks it to finish
+  session, which keeps every command and its output, pins the read-only sandbox again, and asks it to finish
   and deliver the whole output; a session Codex cannot open is followed by a fresh attempt within the
   same retry. On ListingSyncer 960 gpt-6.1-sol answered "Selected model is at capacity" thirteen
   minutes into a primary review, and the retry spent thirteen more reading the same files. Codex
@@ -54,8 +54,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 - A failed primary or cross-review attempt is retried as soon as a slot is free, instead of once
   every peer in the phase has finished. On Tools 29054 codex failed seven minutes into its primary
-  review and stood idle for fifteen more while pi finished; `retry.delay_seconds` still sets the
-  pause before the retry starts.
+  review and stood idle for fifteen more while pi finished. `retry.delay_seconds` still sets the
+  pause before the retry starts, and the retry spends it in its own process, so a queued first
+  attempt takes the freed slot at once.
 
 - The model reference in `README.md` is a 2026-09-23 snapshot and gained the models both vendors
   released this week, `claude-opus-5-5` and `gpt-6-sol`. It also gained a Pi row, which the table
@@ -68,12 +69,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- `review-pr quota` prints `?% left` for a window whose share Codex did not report, with its reset
+  time; an empty field used to let the reset epoch slide into the percentage column. Credits Codex
+  sends only with the aggregate snapshot are kept when the per-limit buckets leave them out.
+- The schema requires `quota.codex.minimum_remaining_percent`, as the orchestrator does:
+  `"quota": {"codex": {}}` used to pass in the editor and stop every command at startup.
+
 - A finding anchored on the right file in the wrong directory keeps its anchor. It moves to the one
   changed file of that name whose changed lines hold it, in the primary, cross-review and final
   streams alike, and the log names both paths. On Tools 28816 pi wrote
   `.../Service/GeoLocationCoordinatesPopulator.php` for `.../Service/Location/`, and the schema
   repair dropped four findings; the final wrote `src/Includes/AddressFinder.php` for
-  `src/Includes/Services/`, and its first attempt was thrown away.
+  `src/Includes/Services/`, and its first attempt was thrown away. An anchor whose written path is a
+  real file in the checkout, one the pull request did not change, is left where the model put it.
 
 - A record whose brackets alone are wrong is mended without a model when only one reading of it
   parses: closed early by a stray brace (Tools 29049), a closing brace doubled (29050) or left out

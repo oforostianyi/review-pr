@@ -34,6 +34,8 @@ declare -a CONFIGURED_REVIEWERS=(claude codex pi)
 declare -A DASHBOARD_LABELS=()
 # Codex sessions a provider error cut short, keyed "agent|phase", and the error.
 declare -A CODEX_RESUME_SESSIONS=()
+# The pause a retry spends in its own process before its command runs.
+AGENT_START_DELAY_SECONDS=0
 declare -A CODEX_RESUME_ERRORS=()
 declare -A DASHBOARD_STATUSES=()
 declare -A DASHBOARD_PIDS=()
@@ -371,7 +373,7 @@ readonly CODEX_QUOTA_NORMALIZE_JQ='
              used: (.used // null), limit: (.limit // null), used_percent: null,
              remaining_percent: (.remainingPercent // null),
              reset_at: (.resetsAt | instant), reset_epoch: (.resetsAt // null)})],
-     credits: ($buckets[0].credits // null),
+     credits: ($buckets[0].credits // $result.rateLimits.credits? // null),
      checked_at: (now | todate), source: "codex-app-server"}
 '
 
@@ -476,12 +478,15 @@ show_quota() {
         return "$status"
     fi
     printf 'Codex%s\n' "$(jq -r 'if .plan then " (\(.plan))" else "" end' <<<"$quota")"
+    # Tab is whitespace to read, so two tabs in a row are one separator: an
+    # empty field would shift the reset epoch into the percentage. Unknown
+    # values are written as "?" and "-" instead.
     while IFS=$'\t' read -r name remaining reset_epoch; do
         reset=$(format_quota_reset "$reset_epoch")
-        line=$(printf '  %-14s %s' "$name" "${remaining:-?}% left")
+        line=$(printf '  %-14s %s' "$name" "${remaining}% left")
         printf '%s%s\n' "$line" "${reset:+   resets ${reset}}"
     done < <(jq -r '.windows[] | [(if .bucket == "codex" then .name else .bucket + " " + .name end),
-        (.remaining_percent // "" | tostring), (.reset_epoch // "" | tostring)] | @tsv' <<<"$quota")
+        (.remaining_percent // "?" | tostring), (.reset_epoch // "-" | tostring)] | @tsv' <<<"$quota")
     return 0
 }
 
@@ -1931,7 +1936,7 @@ agent_label() {
 # thirteen minutes into a primary review, and the retry spent thirteen more
 # minutes reading the same files. A session that `codex exec` recorded keeps
 # every command and its output up to the failure, and `codex exec resume`
-# continues it with the same sandbox. Only a turn that failed or an error event
+# continues it, with the read-only sandbox pinned again rather than inherited. Only a turn that failed or an error event
 # counts: an attempt that ran to its end and wrote an invalid stream is retried
 # from the start, since resuming it would carry the stream forward.
 note_codex_resumable_session() {
@@ -3824,10 +3829,12 @@ readonly CHANGED_LINE_ANCHOR_JQ_DEFS='
 # its first attempt was thrown away. A changed-line anchor whose file is not in
 # the changed-line map moves to the one changed file with the same name whose
 # changed lines hold the anchor, aloud. With no such file, or with two, the
-# anchor is left as written and fails as before.
+# anchor is left as written and fails as before. So is one whose written path
+# exists in the checkout: that is a real file the pull request did not change,
+# perhaps named on purpose, and the anchor is not moved to a namesake.
 resolve_anchor_paths() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local resolved_file corrections count noun=anchors
+    local resolved_file corrections count noun=anchors candidates written existing='[]'
 
     [[ -s "$CHANGED_LINE_MAP_FILE" ]] || return 0
     local defs="$CHANGED_LINE_ANCHOR_JQ_DEFS"'
@@ -3838,13 +3845,26 @@ resolve_anchor_paths() {
                   and (.file | type) == "string" and (.file | length) > 0
                   and (.start | type) == "number" and (.["end"] | type) == "number" and .start <= .["end"]
                   and (any($changed_lines[0].files[]; .path == $anchor.file) | not)
+                  and (($existing | index($anchor.file)) | not)
               then [$changed_lines[0].files[]
                       | select((.path | basename) == ($anchor.file | basename) and fits_changed_file($anchor))
                       | .path]
                    | if length == 1 then .[0] else null end
               else null end;
     '
-    corrections=$(jq -r --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" "$defs"'
+    # The written paths that would be moved, checked against the checkout.
+    candidates=$(jq -r --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" --argjson existing '[]' "$defs"'
+        [.[] | select(.record == "finding" and (.anchor | type) == "object")
+            | select((.anchor | corrected_path) != null) | .anchor.file] | unique | .[]' \
+        "$records_file" 2>/dev/null) || return 0
+    [[ -n "$candidates" ]] || return 0
+    if [[ -n "${REVIEW_REPO:-}" && -d "$REVIEW_REPO" ]]; then
+        while IFS= read -r written; do
+            [[ -e "$REVIEW_REPO/$written" ]] || continue
+            existing=$(jq -c --arg path "$written" '. + [$path]' <<<"$existing")
+        done <<<"$candidates"
+    fi
+    corrections=$(jq -r --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" --argjson existing "$existing" "$defs"'
         [.[] | select(.record == "finding" and (.anchor | type) == "object")
             | {from: .anchor.file, to: (.anchor | corrected_path)} | select(.to != null)]
         | if length == 0 then empty
@@ -3852,7 +3872,7 @@ resolve_anchor_paths() {
         "$records_file" 2>/dev/null) || return 0
     [[ -n "$corrections" ]] || return 0
     new_temp_file "${phase}-anchor-paths"; resolved_file=$NEW_TEMP_FILE
-    jq --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" "$defs"'
+    jq --slurpfile changed_lines "$CHANGED_LINE_MAP_FILE" --argjson existing "$existing" "$defs"'
         map(if .record == "finding" and (.anchor | type) == "object" then (.anchor | corrected_path) as $path
                 | if $path == null then . else .anchor.file = $path end
             else . end)' "$records_file" >"$resolved_file" || return 0
@@ -8408,6 +8428,13 @@ run_with_agent_timeout() {
     local now
     local timed_out=false
 
+    # A retry's pause is spent here, in the agent's own background process, so
+    # the phase scheduler goes on starting and reaping its peers meanwhile. It is
+    # spent once: a second command of the same attempt starts at once.
+    if (( ${AGENT_START_DELAY_SECONDS:-0} > 0 )); then
+        sleep "$AGENT_START_DELAY_SECONDS"
+        AGENT_START_DELAY_SECONDS=0
+    fi
     if (( timeout_seconds == 0 )); then
         "$@"
         return
@@ -8597,8 +8624,11 @@ start_agent() {
                 cd "$agent_working_directory"
                 : >"$log_file"
                 if [[ -n "$resume_session" ]]; then
+                    # resume takes no --sandbox; the read-only sandbox is pinned
+                    # through the config override rather than left to the session.
                     if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec resume \
                         "$resume_session" \
+                        -c 'sandbox_mode="read-only"' \
                         --json \
                         "${codex_repository_arguments[@]}" \
                         "${model_arguments[@]}" \
@@ -9489,7 +9519,9 @@ run_review_phase() {
 
     # A failed attempt goes back on the queue and starts as soon as a slot is
     # free. It used to wait for the whole round: on Tools 29054 codex failed
-    # seven minutes in and stood idle for fifteen more while pi finished.
+    # seven minutes in and stood idle for fifteen more while pi finished. Its
+    # retry.delay_seconds is spent in its own process, not here, so the loop
+    # keeps starting first attempts and reaping peers during the pause.
     next_index=0
 
     while (( next_index < ${#round_agents[@]} || ${#active_agents[@]} > 0 )); do
@@ -9498,6 +9530,8 @@ run_review_phase() {
             next_index=$((next_index + 1))
             attempt=$((${attempts[$agent]:-0} + 1))
             attempts[$agent]=$attempt
+            AGENT_START_DELAY_SECONDS=0
+            (( attempt == 1 )) || AGENT_START_DELAY_SECONDS=$RETRY_DELAY_SECONDS
             start_agent \
                 "$agent" \
                 "$phase" \
@@ -9507,6 +9541,7 @@ run_review_phase() {
                 "${TEMP_USAGE_FILES[$agent]}" \
                 "${TEMP_USAGE_JSON_FILES[$agent]}" \
                 "$attempt"
+            AGENT_START_DELAY_SECONDS=0
             phase_pids[$agent]=$STARTED_PID
             pid_agents[$STARTED_PID]=$agent
             phase_started_at[$agent]=$(date +%s)
@@ -9699,7 +9734,6 @@ run_review_phase() {
             retry_now=false
             if (( RETRY_DELAY_SECONDS > 0 )); then
                 activity_log "Retrying ${phase} for: ${agent} after ${RETRY_DELAY_SECONDS}s"
-                sleep "$RETRY_DELAY_SECONDS"
             else
                 activity_log "Retrying ${phase} for: ${agent}"
             fi

@@ -101,8 +101,8 @@ assert_false 'a first attempt that a retry could follow records its session' \
     grep -q -- '--ephemeral' "$FAKE_CODEX_CALLS"
 note_codex_resumable_session codex 'primary review' "$events"
 run_codex_attempt 2
-assert_true 'the retry after a provider error resumes that session' \
-    grep -qx -- "resume ${thread} --json --model gpt-fixture -c model_reasoning_effort=\"xhigh\" --output-last-message ${suite_root}/out -" "$FAKE_CODEX_CALLS"
+assert_true 'the retry after a provider error resumes that session, its read-only sandbox pinned' \
+    grep -qx -- "resume ${thread} -c sandbox_mode=\"read-only\" --json --model gpt-fixture -c model_reasoning_effort=\"xhigh\" --output-last-message ${suite_root}/out -" "$FAKE_CODEX_CALLS"
 assert_true 'and asks it to finish rather than start over' grep -q 'Continue the same task from where you stopped' "$FAKE_CODEX_PROMPTS"
 assert_false 'without sending the review prompt a second time' grep -q 'Review the pull request' "$FAKE_CODEX_PROMPTS"
 assert_eq '' "${CODEX_RESUME_SESSIONS[codex|primary review]:-}" 'the session is resumed once'

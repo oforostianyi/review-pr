@@ -72,6 +72,10 @@ assert_eq '12.50' "$(jq -r '.credits.balance' <<<"$quota")" 'credits are reporte
 assert_eq 'spend control:20' "$(jq -r '.windows[1] | "\(.name):\(.remaining_percent)"' <<<"$quota")" \
     'and a spend-control limit is kept as a window of its own'
 
+fixture '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":5,"windowDurationMins":300},"credits":{"hasCredits":true,"unlimited":false,"balance":"7.00"}},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":5,"windowDurationMins":300}}}}}'
+assert_eq '7.00' "$(read_codex_quota | jq -r '.credits.balance')" \
+    'credits sent only with the aggregate snapshot are kept when the buckets leave them out'
+
 fixture '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"not logged in"}}'
 status=0; quota=$(read_codex_quota) || status=$?
 assert_eq '1|false|not logged in' "${status}|$(jq -r '"\(.available)|\(.error)"' <<<"$quota")" \
@@ -111,6 +115,28 @@ fixture '{"jsonrpc":"2.0","id":2,"error":{"message":"not logged in"}}'
 warning=$(check_codex_quota_before_run all 2>&1) && unknown_status=0 || unknown_status=$?
 assert_eq 0 "$unknown_status" 'an unreadable quota is not an exhausted one: the run goes on'
 assert_true 'and the log says the check could not be made' grep -q 'could not be read' <<<"$warning"
+
+# The command itself: the table, --json, the exit codes and the arguments it
+# refuses. A window without usedPercent prints "?" and keeps its reset time; an
+# empty field once let the epoch slide into the percentage column.
+export XDG_CONFIG_HOME="$suite_root/config"
+quota_cli() { TZ=UTC "$repo_root/bin/review-pr" quota "$@"; }
+fixture '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","planType":"team","primary":{"windowDurationMins":300,"resetsAt":1790709167},"secondary":{"usedPercent":28,"windowDurationMins":10080,"resetsAt":1791016214}}}}'
+cli_status=0; table=$(quota_cli) || cli_status=$?
+assert_eq 0 "$cli_status" 'review-pr quota exits 0 when the quota was read'
+assert_eq $'Codex (team)\n  5h             ?% left   resets Tue 29 Sep 19:12\n  weekly         72% left   resets Sat 03 Oct 08:30' \
+    "$table" 'and prints each window, an unknown share as "?" with its reset time kept'
+assert_eq 'null,72' "$(quota_cli --json | jq -r '[.windows[].remaining_percent | tostring] | join(",")')" \
+    'review-pr quota --json prints the normalized reading'
+fixture '{"jsonrpc":"2.0","id":2,"error":{"message":"not logged in"}}'
+cli_status=0; table=$(quota_cli codex) || cli_status=$?
+assert_eq '1|Codex: quota unavailable (not logged in)' "${cli_status}|${table}" \
+    'an unavailable quota exits 1 and says why'
+fixture '{"jsonrpc":"2.0","id":2,"result":{"somethingElse":true}}'
+cli_status=0; quota_cli >/dev/null || cli_status=$?
+assert_eq 2 "$cli_status" 'an answer of unknown shape exits 2'
+assert_false 'a provider review-pr does not know is refused' quota_cli claude
+assert_false 'and so is an option the command does not take' quota_cli --bogus
 PATH=$original_path
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

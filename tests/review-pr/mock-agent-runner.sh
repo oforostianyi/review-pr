@@ -482,6 +482,21 @@ case "$behavior" in
             recommendation: "Mock amendment: correct the changed branch.", claim: "An amendment may not rewrite the claim."}'
         write_usage null 21
         ;;
+    # A confirmed cross-review verdict without its failure scenario (Tools 29077)
+    # and a final finding without its recommendation: both are amended.
+    cross-ndjson-missing-failure-scenario)
+        emit_valid_ndjson_cross | jq -c 'if .record == "finding" and .classification == "CONFIRMED" then del(.failure_scenario) else . end'
+        write_usage null 58
+        ;;
+    final-ndjson-missing-recommendation)
+        emit_valid_ndjson_final | jq -c 'if .record == "finding" and .classification == "CONFIRMED" then del(.recommendation) else . end'
+        write_usage null 58
+        ;;
+    amendment-scenario-from-prompt)
+        prompt_block_lines 'FINDINGS TO AMEND' | jq -c '{record: "amendment", source_id,
+            failure_scenario: "Mock amendment: a request reaches the changed branch.", claim: "An amendment may not rewrite the claim."}'
+        write_usage null 21
+        ;;
     cross-ndjson-trailing-prose)
         emit_valid_ndjson_cross
         printf '%s\n' 'That completes the requested structured cross-review.'

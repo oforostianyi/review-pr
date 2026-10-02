@@ -1795,6 +1795,75 @@ run_ndjson_partial_amendment_case() {
         'and the log says the amendment was kept for salvage'
 }
 
+# A confirmed cross-review verdict without its failure scenario and a final
+# finding without its recommendation are amended the same way as a primary one,
+# end to end (self-review of 2e3acc4).
+run_ndjson_cross_final_amendment_case() {
+    local case_dir="$suite_root/ndjson-cross-final-amendment"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local capture="$case_dir/captured-prompts"
+    local checkout
+    local config="$case_dir/config.json"
+    local config_temp="$case_dir/config.tmp.json"
+    local manifest
+    local work_dir
+    local stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='Fixture structured cross-review and final amendment.'
+    write_config "$config" "$checkout" "$reviews" 2
+    jq '.reporting.finding_contract = {primary: "ndjson-v1", cross_review: "ndjson-v1", final: "ndjson-v1"} |
+        .reporting.comparison_sections = {cross_review: "none", final: "none"}' \
+        "$config" >"$config_temp"
+    mv -- "$config_temp" "$config"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf '%s\n' 'cross-ndjson-missing-failure-scenario' >"$scenarios/beta-cross-review"
+    printf '%s\n' 'amendment-scenario-from-prompt' >"$scenarios/beta-cross-review-findings-amendment"
+    printf '%s\n' 'final-ndjson-missing-recommendation' >"$scenarios/alpha-final-synthesis"
+    printf '%s\n' 'amendment-from-prompt' >"$scenarios/alpha-final-findings-amendment"
+
+    PATH="$fake_bin:$PATH" \
+        REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
+        REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
+        REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log"
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a cross-review verdict and a final finding with a field left out are amended and the pipeline completes'
+    assert_file_contains "$capture/cross-review-findings-amendment-beta-attempt-1.prompt" 'fields to write: failure_scenario' \
+        'the cross-reviewer is asked for the failure scenario alone'
+    assert_false 'and its schema repair is not run' \
+        test -e "$capture/cross-review-findings-repair-beta-attempt-1.prompt"
+    assert_eq 'Mock amendment: a request reaches the changed branch.' \
+        "$(jq -r '[.findings[] | select(.classification == "CONFIRMED")][0].failure_scenario' "$work_dir/${stem}-cross-beta-findings.json")" \
+        'the published cross-review carries the amended failure scenario'
+    assert_false 'and not the claim the amendment tried to rewrite' \
+        grep -q 'An amendment may not rewrite the claim.' "$work_dir/${stem}-cross-beta-findings.json"
+    assert_file_contains "$capture/final-findings-amendment-alpha-attempt-1.prompt" 'fields to write: recommendation' \
+        'the synthesizer is asked for the recommendation alone'
+    assert_false 'and the final schema repair is not run' \
+        test -e "$capture/final-findings-repair-alpha-attempt-1.prompt"
+    assert_eq 'Mock amendment: correct the changed branch.' \
+        "$(jq -r '[.findings[] | select(.classification == "CONFIRMED")][0].recommendation' "$work_dir/${stem}-final-findings.json")" \
+        'the final findings carry the amended recommendation'
+    assert_file_exists "$(report_root_of "$work_dir")/${stem}-final.md" \
+        'and the final report is published'
+}
+
 run_ndjson_unsafe_schema_repair_case() {
     local case_dir="$suite_root/ndjson-unsafe-schema-repair"
     local reviews="$case_dir/reviews"
@@ -2223,6 +2292,7 @@ run_ndjson_preamble_case
 run_ndjson_schema_repair_case
 run_ndjson_amendment_case
 run_ndjson_partial_amendment_case
+run_ndjson_cross_final_amendment_case
 run_ndjson_unsafe_schema_repair_case
 run_ndjson_resume_case
 run_ndjson_unsafe_final_repair_case

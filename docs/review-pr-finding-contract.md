@@ -414,7 +414,8 @@ keys remain language-independent.
   of code may hold a real escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
   names instead. A `changed-line` anchor whose file is not in the changed-line map moves to the
   one changed file of the same name whose changed lines hold the anchor, and the log names both
-  paths; with no such file, or two, it is left as written and fails as before. Any other missing
+  paths; with no such file, or two, or when the written path is a real file in the checkout that
+  the pull request did not change, it is left as written and fails as before. Any other missing
   key still fails its record, because it would have to be made up. A record whose brackets alone
   are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
   the end, an array opened without its bracket -- is mended without a model when exactly one

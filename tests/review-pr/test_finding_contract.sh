@@ -1518,6 +1518,13 @@ CHANGED_LINE_MAP_FILE=$twin_map
 assert_false 'and so is one that two changed files of that name could hold' \
     process_primary_ndjson_output "$misplaced_stream" codex
 CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+saved_review_repo=${REVIEW_REPO:-}
+REVIEW_REPO="$test_root/checkout-with-namesake"
+mkdir -p -- "$REVIEW_REPO/lib"
+: >"$REVIEW_REPO/lib/Changed.php"
+assert_false 'an anchor on a real file the pull request left unchanged is not moved to its changed namesake' \
+    process_primary_ndjson_output "$misplaced_stream" codex
+REVIEW_REPO=$saved_review_repo
 misplaced_final="$test_root/anchor-misplaced-final.json"
 jq -s '[.[0] | .anchor.file = "src/Includes/Changed.php" | .classification = "REJECTED"]' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$misplaced_final"
