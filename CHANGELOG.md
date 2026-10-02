@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-10-02
+
 ### Added
 
 - A Codex attempt that the provider cut short is resumed instead of started over. When its event
