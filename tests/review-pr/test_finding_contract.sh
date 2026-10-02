@@ -1758,6 +1758,28 @@ printf '%s\n' '{"record":"finding","claim":"half a sen' '{"record":"complete"}' 
 normalize_primary_ndjson_stream "$test_root/split-refused.ndjson" "$test_root/split-refused-normalized.ndjson"
 assert_eq 0 "$NDJSON_JOINED_RECORDS" 'a torn line is never joined with the record that follows it'
 
+# The other way to split one (codex on Tools 29118): the object is closed early,
+# so the first line parses as a record short of fields, and the rest follows on a
+# line that begins with a comma.
+closed_stream="$test_root/split-closed.ndjson"
+{
+    sed -n '1p' "$amend_valid"
+    printf '%s}\n%s\n' "${split_line%%,\"failure_scenario\"*}" ",\"failure_scenario\"${split_line#*,\"failure_scenario\"}"
+    sed -n '3p' "$amend_valid"
+} >"$closed_stream"
+assert_true 'the fixture closes the second record early, so its first half parses' \
+    jq -e '.record == "finding"' <<<"$(sed -n '2p' "$closed_stream")"
+normalize_primary_ndjson_stream "$closed_stream" "$test_root/split-closed-normalized.ndjson"
+assert_eq '1|3' "${NDJSON_JOINED_RECORDS}|$(grep -c '' "$test_root/split-closed-normalized.ndjson")" \
+    'a record closed early and continued on a comma-led line is joined into one'
+assert_eq "$(sed -n '2p' "$amend_valid" | jq -c .)" "$(sed -n '2p' "$test_root/split-closed-normalized.ndjson" | jq -c .)" \
+    'and reads exactly as the record the model meant'
+printf '%s\n%s\n' "$(sed -n '1p' "$amend_valid")" ',"failure_scenario":"half a sen' >"$test_root/split-closed-torn.ndjson"
+normalize_primary_ndjson_stream "$test_root/split-closed-torn.ndjson" "$test_root/split-closed-torn-normalized.ndjson"
+assert_eq 0 "$NDJSON_JOINED_RECORDS" 'a comma-led line that does not complete the record is left as it is'
+assert_eq "$(sed -n '1p' "$amend_valid" | jq -c .)" "$(sed -n '1p' "$test_root/split-closed-torn-normalized.ndjson" | jq -c .)" \
+    'and the record before it keeps its closing brace'
+
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the
 # record, and the check -- comparing only what the baseline kept -- accepted the

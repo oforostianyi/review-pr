@@ -76,7 +76,10 @@ All notable changes to `review-pr` are documented in this file. The project foll
   repair pass or, in salvage, the record. A line that ends inside an array is left alone: it was cut
   off, and closing it would publish the record without its missing entries.
 - A record a model broke across physical lines is joined back into one before the stream is read
-  (pi on Tools 29077), instead of costing both halves in salvage.
+  (pi on Tools 29077), instead of costing both halves in salvage. So is one the model closed early
+  and continued on a line that begins with a comma (codex on Tools 29118 split both of its
+  findings after `"evidence":[...]}` and lost the attempt): the first line's closing brace is taken
+  off, and the join stands only when the whole parses as one object.
 - A character a model escaped twice no longer prints as `\u2192` in a title, claim, failure
   scenario, recommendation or summary, and a repair that writes the character its draft escaped no
   longer fails its stability check (29049). Evidence and code spans keep such text as written.

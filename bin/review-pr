@@ -4000,6 +4000,13 @@ log_leading_prose() {
 # record but does not parse is joined with the lines after it, up to three, as
 # long as none of them opens a record of its own; the join is kept only when it
 # parses as one object, first as written and then with a space at each break.
+# Codex on Tools 29118 split a record the other way: it closed the object after
+# '"evidence":[...]' and went on with a line that began ',"failure_scenario":'.
+# The first line parses on its own as a record short of fields, and the second
+# reads as junk, so the attempt was lost. A line that begins with a comma and a
+# key, after a line that parses and ends in a brace, is joined to that line with
+# the brace taken off, under the same rule: up to three lines, kept only when the
+# whole parses as one object.
 # The file is rewritten in place; NDJSON_JOINED_RECORDS says how many were joined.
 join_split_json_lines() {
     local file=$1 joined_file index next count=0 line candidate spaced total parsed
@@ -4024,6 +4031,19 @@ join_split_json_lines() {
                     candidate=$spaced parsed=true
                 fi
                 if [[ "$parsed" == true ]]; then
+                    printf '%s\n' "$candidate" >>"$joined_file"
+                    count=$((count + 1))
+                    index=$((next + 1))
+                    continue 2
+                fi
+            done
+        elif [[ "${lines[index + 1]:-}" =~ ^[[:space:]]*,[[:space:]]*\" && "$line" =~ \}[[:space:]]*$ ]] \
+            && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line"; then
+            candidate=${line%\}*}
+            for (( next = index + 1; next < total && next <= index + 3; next++ )); do
+                [[ ! "${lines[next]}" =~ ^[[:space:]]*\{ ]] || break
+                candidate+=${lines[next]}
+                if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$candidate"; then
                     printf '%s\n' "$candidate" >>"$joined_file"
                     count=$((count + 1))
                     index=$((next + 1))

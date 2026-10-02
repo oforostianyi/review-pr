@@ -424,7 +424,9 @@ keys remain language-independent.
   otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
   A record broken across physical lines is joined first: a line that opens a record but does not
   parse takes the next lines, up to three and none of them opening a record, and the join stands
-  only when it parses as one object. A JSON-looking record the model finished writing but mis-punctuated in
+  only when it parses as one object. A record closed early and continued on a line that begins
+  with a comma and a key is joined the same way, with the closing brace of the first line taken
+  off. A JSON-looking record the model finished writing but mis-punctuated in
   a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
   back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
