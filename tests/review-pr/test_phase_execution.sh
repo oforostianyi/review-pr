@@ -129,6 +129,43 @@ assert_file_exists "${FINAL_OUTPUTS[beta]}" 'retried agent eventually commits it
 assert_file_exists "$CASE_DIR/beta-error-attempt-1-usage.json" \
     'failed retry usage is preserved for diagnosis'
 
+# A failed attempt is retried as soon as a slot is free, not once every peer has
+# finished (Tools 29054: codex stood idle for fifteen minutes while pi ran on).
+prepare_phase_case retry-early alpha beta
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=2
+run_review_phase 'primary review' alpha beta
+assert_eq 'yes' "$(awk -F '\t' '
+    $1 == "start" && $2 == "beta" { starts++; if (starts == 2) retried = NR }
+    $1 == "end" && $2 == "alpha" { ended = NR }
+    END { print (retried && ended && retried < ended) ? "yes" : "no" }' "$EVENT_LOG")" \
+    'the failed agent starts its retry while a slower peer is still running'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'and the retry commits its report'
+assert_file_exists "${FINAL_OUTPUTS[alpha]}" 'while the slower peer commits its own'
+
+# The retry's pause is its own: a queued first attempt takes the freed slot at
+# once instead of waiting out retry.delay_seconds (self-review of 2e3acc4).
+prepare_phase_case retry-delay alpha beta gamma
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=3
+export REVIEW_PR_MOCK_DELAY_SECONDS=2
+run_review_phase 'primary review' alpha beta gamma
+event_time() { awk -F '\t' -v kind="$1" -v who="$2" -v attempt="$3" \
+    '$1 == kind && $2 == who && $4 == attempt {print $5; exit}' "$EVENT_LOG"; }
+beta_failed=$(event_time start beta 1)
+assert_true 'a queued first attempt starts while the failed one waits out its retry delay' \
+    test "$(( $(event_time start gamma 1) - beta_failed ))" -le 1
+assert_true 'and the retry still waits that delay before it starts' \
+    test "$(( $(event_time start beta 2) - beta_failed ))" -ge 3
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'after which it commits its report'
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+
 prepare_phase_case truncated alpha
 printf 'truncated\n' >"$SCENARIO_DIR/alpha-primary-review"
 MAX_CONCURRENCY=1

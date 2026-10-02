@@ -6,12 +6,35 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Added
 
+- A Codex attempt that the provider cut short is resumed instead of started over. When its event
+  stream ends in `turn.failed` or an `error` event, the retry runs `codex exec resume` on the same
+  session, which keeps every command and its output, pins the read-only sandbox again, and asks it to finish
+  and deliver the whole output; a session Codex cannot open is followed by a fresh attempt within the
+  same retry. On ListingSyncer 960 gpt-6.1-sol answered "Selected model is at capacity" thirteen
+  minutes into a primary review, and the retry spent thirteen more reading the same files. Codex
+  sessions are therefore recorded under `~/.codex/sessions` whenever a retry is configured.
+
+- `effort` accepts `ultra` for the Codex adapter, the level codex-cli 0.159.0 lists above `max` for
+  `gpt-6.1-sol` and its siblings. The model reference lists `gpt-6.1-sol`, now Codex's default,
+  with `gpt-6-astra` and `gpt-6-luna`, as `model/list` reported them on 2026-09-30.
+
+- `review-pr quota [codex] [--json]` reports the Codex subscription limits as Codex itself sees them,
+  through `codex app-server` and `account/rateLimits/read` with Codex's own login: each window named by
+  its length, every bucket kept, a missing field left null rather than read as zero, and a reading
+  cached for a minute. With `quota.codex.minimum_remaining_percent` set, a run that would start a
+  Codex agent is refused while any window has less left, naming the window and when it resets; a
+  quota that cannot be read lets the run go on with a warning. Until now the Codex quota could not be
+  measured at all.
+
 - A primary finding written whole but for its `recommendation` or `failure_scenario`, or anchored to
   lines the pull request did not change, is sent back to its agent for those fields alone, with the
   repository open, before any repair. The orchestrator sets only the fields it asked for, so the
   rest of the finding stays as written. On ListingSyncer 957 pi lost seven of twelve findings to a
   missing recommendation, and on Tools 29072 claude lost two to line numbers past the end of a new
-  file; salvage dropped them all.
+  file; salvage dropped them all. An amendment that fixes some of them hands salvage the merged stream,
+  so only a finding that is still incomplete is dropped. Cross-review verdicts and final findings are amended the same
+  way (a confirmed cross-review verdict with an empty failure scenario, Tools 29077); a final finding
+  is never asked for an anchor, which the final anchor repair owns.
 
 - `--run last` selects the most recent full run of the pull request, for a resume, a `--rerun-final`
   and `findings` alike, so an identifier no longer has to be copied out of a directory listing. It is
@@ -29,6 +52,12 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Changed
 
+- A failed primary or cross-review attempt is retried as soon as a slot is free, instead of once
+  every peer in the phase has finished. On Tools 29054 codex failed seven minutes into its primary
+  review and stood idle for fifteen more while pi finished. `retry.delay_seconds` still sets the
+  pause before the retry starts, and the retry spends it in its own process, so a queued first
+  attempt takes the freed slot at once.
+
 - The model reference in `README.md` is a 2026-09-23 snapshot and gained the models both vendors
   released this week, `claude-opus-5-5` and `gpt-6-sol`. It also gained a Pi row, which the table
   could not describe before: `pi --list-models` reports the provider, context window, maximum output
@@ -40,13 +69,33 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- `review-pr quota` prints `?% left` for a window whose share Codex did not report, with its reset
+  time; an empty field used to let the reset epoch slide into the percentage column. Credits Codex
+  sends only with the aggregate snapshot are kept when the per-limit buckets leave them out.
+- The schema requires `quota.codex.minimum_remaining_percent`, as the orchestrator does:
+  `"quota": {"codex": {}}` used to pass in the editor and stop every command at startup.
+
+- A finding anchored on the right file in the wrong directory keeps its anchor. It moves to the one
+  changed file of that name whose changed lines hold it, in the primary, cross-review and final
+  streams alike, and the log names both paths. On Tools 28816 pi wrote
+  `.../Service/GeoLocationCoordinatesPopulator.php` for `.../Service/Location/`, and the schema
+  repair dropped four findings; the final wrote `src/Includes/AddressFinder.php` for
+  `src/Includes/Services/`, and its first attempt was thrown away. An anchor whose written path is a
+  real file in the checkout, one the pull request did not change, is left where the model put it.
+
 - A record whose brackets alone are wrong is mended without a model when only one reading of it
   parses: closed early by a stray brace (Tools 29049), a closing brace doubled (29050) or left out
   (29074) at the end, an array opened without its bracket (ListingSyncer 957). Each had cost a
-  repair pass or, in salvage, the record.
+  repair pass or, in salvage, the record. A line that ends inside an array is left alone: it was cut
+  off, and closing it would publish the record without its missing entries.
+- A record a model broke across physical lines is joined back into one before the stream is read
+  (pi on Tools 29077), instead of costing both halves in salvage. So is one the model closed early
+  and continued on a line that begins with a comma (codex on Tools 29118 split both of its
+  findings after `"evidence":[...]}` and lost the attempt): the first line's closing brace is taken
+  off, and the join stands only when the whole parses as one object.
 - A character a model escaped twice no longer prints as `\u2192` in a title, claim, failure
   scenario, recommendation or summary, and a repair that writes the character its draft escaped no
-  longer fails its stability check (29049). Evidence keeps such text as written.
+  longer fails its stability check (29049). Evidence and code spans keep such text as written.
 - A `pr-level` anchor that names a file with no lines drops the file into the evidence instead of
   costing the finding (ListingSyncer 958).
 - A key that only says how a finding is presented no longer costs the finding: a missing or

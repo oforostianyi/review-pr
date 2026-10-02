@@ -200,14 +200,14 @@ This table is a convenience snapshot checked on 2026-09-23. Providers can change
 | CLI | Model IDs / slugs in the current reference | How to verify current availability |
 | --- | --- | --- |
 | Claude Code | `claude-opus-5-5`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` | [Anthropic model status](https://docs.anthropic.com/en/docs/about-claude/model-deprecations) and `claude --model <id>`; a subscription or organization may expose only a subset. |
-| Codex | `gpt-6-sol`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex-spark` | [OpenAI Docs model selector](https://learn.chatgpt.com/docs/models) or Codex's `/model`; the visible selection depends on the account and plan. |
+| Codex | `gpt-6.1-sol` (the default), `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`; refreshed on 2026-09-30 from the `model/list` call of `codex app-server` in codex-cli 0.159.0 | [OpenAI Docs model selector](https://learn.chatgpt.com/docs/models) or Codex's `/model`; the visible selection depends on the account and plan. |
 | Google Antigravity (`agy`) | `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.7-flash-low`, `gemini-3.6-flash-high`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-low`, `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium` | Run `agy models`. The official [headless CLI documentation](https://antigravity.google/docs/cli/headless/) lists supported flags and examples; results vary by account and configured provider. |
 
 | Pi | `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.6-flash` from a hosted provider; any local build the runtime serves, for example `dirk-qwen3.8-27b@iq3_s` | Run `pi --list-models [search]`. It prints the provider, context window, maximum output, and whether the model supports a thinking level, for exactly the providers that account has configured. |
 
 Pi is the one CLI whose catalogue is machine-readable per account, so `pi --list-models` is authoritative where the other rows are a snapshot. It also answers the question the table cannot: a model is only worth an `effort` if its `thinking` column says `yes`. `dirk-qwen3.8-27b@iq3_s` supports one and `@iq3_xxs` does not, though both are the same model at different quantisations.
 
-Pi's thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Every adapter also accepts `auto`, which sends no level at all.
+Codex's efforts are `none`, `low`, `medium`, `high`, `xhigh`, `max` and, on the models that list it, `ultra` (the GPT-6 and GPT-5.6 Sol and Terra models on that date; the Luna models and `gpt-5.5` stop at `max` or `xhigh`). Pi's thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Every adapter also accepts `auto`, which sends no level at all.
 
 [Artificial Analysis](https://artificialanalysis.ai) compares these models on independent benchmarks, price and speed, which is the missing half of the picture: this table says what a CLI will accept, not which of them is worth the tokens for a review.
 
@@ -596,6 +596,31 @@ review-pr https://github.com/YOUR-ORG/YOUR-REPOSITORY/pull/123
 ```
 
 The command fetches and detaches the dedicated checkout at the exact PR head. It refuses tracked changes and never operates on another checkout.
+
+## Check the Codex quota before a run
+
+A review can spend a large share of a Codex subscription window. `review-pr quota` reads the limits Codex itself reports, through `codex app-server` and the login Codex already holds; nothing reads or stores a token:
+
+```bash
+review-pr quota
+review-pr quota codex --json
+```
+
+```text
+Codex (team)
+  5h             80% left   resets Tue 29 Sep 21:12
+  weekly         70% left   resets Sat 03 Oct 10:30
+```
+
+Windows are named by their length, every rate-limit bucket Codex returns is kept, and a field it does not send stays `null` rather than becoming zero. A reading is cached for a minute under `~/.cache/review-pr/`. The command exits 0 whenever the quota was read, however little is left; 1 when it is unavailable (Codex missing or logged out) and 2 when the answer has a shape review-pr does not know.
+
+To refuse a run that would start a Codex agent below a threshold, set it in the configuration:
+
+```json
+"quota": {"codex": {"minimum_remaining_percent": 15}}
+```
+
+Every window counts: the run stops before it starts, naming the window and its reset time. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
 
 ## Hand a finished review to a fixing agent
 

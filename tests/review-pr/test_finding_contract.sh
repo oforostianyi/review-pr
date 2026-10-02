@@ -1488,6 +1488,50 @@ assert_false 'while a range of context lines alone still fails' \
     process_primary_ndjson_output "$context_stream" codex
 CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
 
+# The right file named in the wrong directory (28816) moves to the one changed
+# file of that name whose changed lines hold the anchor.
+misplaced_stream="$test_root/anchor-misplaced.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor.file = "lib/Changed.php"'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$misplaced_stream"
+REPORT_STEM=fixture-anchor-misplaced
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-anchor-misplaced-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-anchor-misplaced-codex-findings.json"
+misplaced_log=$(process_primary_ndjson_output "$misplaced_stream" codex 2>&1) && misplaced_status=0 || misplaced_status=$?
+assert_eq 0 "$misplaced_status" 'an anchor on the right file in the wrong directory passes without a repair pass'
+assert_eq 'src/Changed.php' "$(jq -r '.findings[0].anchor.file' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'on the changed file of that name'
+assert_true 'and the log names both paths' \
+    grep -qF 'Corrected the file path of 1 primary anchor from codex to the one changed file of that name: lib/Changed.php -> src/Changed.php' <<<"$misplaced_log"
+outside_stream="$test_root/anchor-misplaced-outside.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.anchor = {kind: "changed-line", file: "lib/Changed.php", start: 15, "end": 15}'
+    sed -n '2,$p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$outside_stream"
+assert_false 'an anchor whose lines the same-named file did not change is left to fail' \
+    process_primary_ndjson_output "$outside_stream" codex
+twin_map="$test_root/changed-lines-twins.json"
+jq '.files += [.files[] | select(.path == "src/Changed.php") | .path = "tests/Changed.php"]' \
+    "$test_dir/fixtures/changed-lines-valid.json" >"$twin_map"
+CHANGED_LINE_MAP_FILE=$twin_map
+assert_false 'and so is one that two changed files of that name could hold' \
+    process_primary_ndjson_output "$misplaced_stream" codex
+CHANGED_LINE_MAP_FILE="$test_dir/fixtures/changed-lines-valid.json"
+saved_review_repo=${REVIEW_REPO:-}
+REVIEW_REPO="$test_root/checkout-with-namesake"
+mkdir -p -- "$REVIEW_REPO/lib"
+: >"$REVIEW_REPO/lib/Changed.php"
+assert_false 'an anchor on a real file the pull request left unchanged is not moved to its changed namesake' \
+    process_primary_ndjson_output "$misplaced_stream" codex
+REVIEW_REPO=$saved_review_repo
+misplaced_final="$test_root/anchor-misplaced-final.json"
+jq -s '[.[0] | .anchor.file = "src/Includes/Changed.php" | .classification = "REJECTED"]' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$misplaced_final"
+fill_presentation_defaults final claude "$misplaced_final" true
+assert_eq 'src/Changed.php' "$(jq -r '.[0].anchor.file' "$misplaced_final")" \
+    'the final synthesis gets the same correction (f21 on 28816)'
+
 # A key the complete record does not define is dropped instead of failing the stream.
 extra_complete="$test_root/extra-complete-key.ndjson"
 {
@@ -1599,6 +1643,10 @@ assert_false 'a line broken by a bare word is left for the repair pass' \
     repair_json_brackets "${bracket_fixture%\}},oops}"
 assert_false 'and so is one cut off inside a string' \
     repair_json_brackets '{"record":"finding","claim":"half a sen'
+# A line that ends inside an array was cut off: closing it would publish the
+# record as whole without the entries that never came.
+assert_false 'a record cut off after an array entry is not closed as if it were whole' \
+    repair_json_brackets '{"record":"complete","schema_version":1,"finding_count":0,"summary":"s","verification_limitations":[],"positive_evidence":["first","second"'
 bracket_stream="$test_root/bracket-stream.ndjson"
 {
     sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson"
@@ -1618,6 +1666,7 @@ assert_eq 2 "$(jq '.findings | length' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" 'w
 # it may quote code where the escape is real.
 presentation_records="$test_root/presentation-records.json"
 jq -s '[(.[0] | .title = "Before \\u2192 after" | .evidence += ["Quoted \\u201cas written\\u201d"]
+    | .recommendation = "Stop emitting `\\u2192`; write \\u201cthe arrow\\u201d itself."
     | .anchor = {kind: "pr-level", file: "src/Unanchored.php", start: null, "end": null}), .[2]]' \
     "$test_dir/fixtures/primary-findings-valid.ndjson" >"$presentation_records"
 PRIMARY_REVIEW_LANGUAGE=EN
@@ -1625,6 +1674,8 @@ fill_presentation_defaults primary codex "$presentation_records" true
 assert_eq 'Before → after' "$(jq -r '.[0].title' "$presentation_records")" \
     'a character escaped twice in a title is decoded'
 assert_true 'but not in the evidence' grep -qF 'Quoted \\u201cas written\\u201d' "$presentation_records"
+assert_eq 'Stop emitting `\u2192`; write “the arrow” itself.' "$(jq -r '.[0].recommendation' "$presentation_records")" \
+    'nor inside a code span, where a finding quotes the escape on purpose'
 assert_eq 'null' "$(jq -r '.[0].anchor.file' "$presentation_records")" \
     'a pr-level anchor loses the file it cannot carry'
 assert_eq 'File: `src/Unanchored.php`.' "$(jq -r '.[0].evidence[-1]' "$presentation_records")" \
@@ -1651,23 +1702,23 @@ amend_valid="$test_dir/fixtures/primary-findings-valid.ndjson"
 amend_draft="$test_root/amend-draft.ndjson"
 { sed -n '1p' "$amend_valid" | jq -c 'del(.recommendation)'; sed -n '2,3p' "$amend_valid"; } >"$amend_draft"
 assert_true 'a finding without its recommendation can be amended' \
-    build_primary_amendment_request codex "$amend_draft" "$test_root/amend-records.ndjson" "$test_root/amend-request.json"
+    build_ndjson_amendment_request primary codex "$amend_draft" "$test_root/amend-records.ndjson" "$test_root/amend-request.json"
 assert_eq '[{"source_id":"F-001","fields":["recommendation"]}]' "$(jq -c . "$test_root/amend-request.json")" \
     'and the request names that field alone'
 { sed -n '1p' "$amend_valid" | jq -c '.anchor.start = 900 | .anchor["end"] = 905'; sed -n '2,3p' "$amend_valid"; } >"$test_root/amend-anchor.ndjson"
 assert_true 'so can one anchored to lines the pull request did not change' \
-    build_primary_amendment_request codex "$test_root/amend-anchor.ndjson" "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json"
+    build_ndjson_amendment_request primary codex "$test_root/amend-anchor.ndjson" "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json"
 assert_eq 'anchor' "$(jq -r '.[0].fields | join(",")' "$test_root/amend-anchor-request.json")" \
     'whose request asks for the anchor'
 { sed -n '1p' "$amend_valid" | jq -c 'del(.recommendation, .title)'; sed -n '2,3p' "$amend_valid"; } >"$test_root/amend-title.ndjson"
 assert_false 'a finding that also lost its title is not amended: a title is not the model'"'"'s to supply again' \
-    build_primary_amendment_request codex "$test_root/amend-title.ndjson" "$test_root/amend-title-records.ndjson" "$test_root/amend-title-request.json"
+    build_ndjson_amendment_request primary codex "$test_root/amend-title.ndjson" "$test_root/amend-title-records.ndjson" "$test_root/amend-title-request.json"
 assert_false 'nor is a stream that parses and validates' \
-    build_primary_amendment_request codex "$amend_valid" "$test_root/amend-clean-records.ndjson" "$test_root/amend-clean-request.json"
+    build_ndjson_amendment_request primary codex "$amend_valid" "$test_root/amend-clean-records.ndjson" "$test_root/amend-clean-request.json"
 printf '%s\n' 'Here are the amendments:' \
     '{"record":"amendment","source_id":"F-001","recommendation":"Retry the payload once more.","claim":"Rewritten."}' \
     '{"record":"amendment","source_id":"F-002","recommendation":"Not asked for."}' >"$test_root/amend-reply.ndjson"
-assert_eq 1 "$(merge_primary_amendments "$test_root/amend-records.ndjson" "$test_root/amend-request.json" "$test_root/amend-reply.ndjson" "$test_root/amend-merged.ndjson")" \
+assert_eq 1 "$(merge_ndjson_amendments "$test_root/amend-records.ndjson" "$test_root/amend-request.json" "$test_root/amend-reply.ndjson" "$test_root/amend-merged.ndjson")" \
     'an amendment sets the one field it was asked for'
 assert_eq "Retry the payload once more.|$(sed -n '1p' "$amend_valid" | jq -r '.claim')" \
     "$(jq -r 'select(.source_id == "F-001") | .recommendation + "|" + .claim' "$test_root/amend-merged.ndjson")" \
@@ -1676,8 +1727,65 @@ assert_eq "$(sed -n '2p' "$amend_valid" | jq -c '.recommendation')" \
     "$(jq -c 'select(.source_id == "F-002") | .recommendation' "$test_root/amend-merged.ndjson")" \
     'and a finding it was not asked about untouched'
 printf '%s\n' '{"record":"amendment","source_id":"F-001","anchor":"src/Changed.php:10"}' >"$test_root/amend-bad-anchor.ndjson"
-assert_eq 0 "$(merge_primary_amendments "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json" "$test_root/amend-bad-anchor.ndjson" "$test_root/amend-bad-merged.ndjson")" \
+assert_eq 0 "$(merge_ndjson_amendments "$test_root/amend-anchor-records.ndjson" "$test_root/amend-anchor-request.json" "$test_root/amend-bad-anchor.ndjson" "$test_root/amend-bad-merged.ndjson")" \
     'an anchor given in a shape the contract does not know is not set'
+
+# A cross-review verdict confirmed with an empty failure scenario (pi on Tools
+# 29077) is amended the same way; so is a final one, but a final synthesis is
+# never asked for an anchor, which its own anchor repair owns.
+cross_amend_draft="$test_root/cross-amend-draft.ndjson"
+{ jq -c '.[0] | .failure_scenario = ""' "$cross_records"; jq -c '.[1]' "$cross_records"; } >"$cross_amend_draft"
+assert_true 'a confirmed cross-review verdict without its failure scenario can be amended' \
+    build_ndjson_amendment_request cross alpha "$cross_amend_draft" "$test_root/cross-amend-records.ndjson" \
+        "$test_root/cross-amend-request.json" "$cross_expected_refs"
+assert_eq '[{"source_id":"alpha:C-001","fields":["failure_scenario"]}]' "$(jq -c . "$test_root/cross-amend-request.json")" \
+    'and the request names the failure scenario'
+final_amend_anchor="$test_root/final-amend-anchor.ndjson"
+{ jq -c '.[0] | .anchor.start = 900 | .anchor["end"] = 905' "$final_records"; jq -c '.[1]' "$final_records"; } >"$final_amend_anchor"
+assert_false 'a final finding with an anchor off the changed lines is left to the final anchor repair' \
+    build_ndjson_amendment_request final '' "$final_amend_anchor" "$test_root/final-amend-records.ndjson" \
+        "$test_root/final-amend-request.json" "$final_expected_refs"
+
+# A record the model broke across physical lines is joined back before anything
+# reads the stream (pi on Tools 29077).
+split_stream="$test_root/split-record.ndjson"
+{
+    sed -n '1p' "$amend_valid"
+    split_line=$(sed -n '2p' "$amend_valid")
+    printf '%s,\n%s\n' "${split_line%%,\"failure_scenario\"*}" "\"failure_scenario\"${split_line#*,\"failure_scenario\"}"
+    sed -n '3p' "$amend_valid"
+} >"$split_stream"
+assert_eq 4 "$(grep -c '' "$split_stream")" 'the fixture breaks the second record in two'
+normalize_primary_ndjson_stream "$split_stream" "$test_root/split-normalized.ndjson"
+assert_eq '1|3' "${NDJSON_JOINED_RECORDS}|$(grep -c '' "$test_root/split-normalized.ndjson")" \
+    'the broken record is joined into one line'
+assert_eq "$(sed -n '2p' "$amend_valid" | jq -c .)" "$(sed -n '2p' "$test_root/split-normalized.ndjson" | jq -c .)" \
+    'and reads exactly as the record the model meant'
+printf '%s\n' '{"record":"finding","claim":"half a sen' '{"record":"complete"}' >"$test_root/split-refused.ndjson"
+normalize_primary_ndjson_stream "$test_root/split-refused.ndjson" "$test_root/split-refused-normalized.ndjson"
+assert_eq 0 "$NDJSON_JOINED_RECORDS" 'a torn line is never joined with the record that follows it'
+
+# The other way to split one (codex on Tools 29118): the object is closed early,
+# so the first line parses as a record short of fields, and the rest follows on a
+# line that begins with a comma.
+closed_stream="$test_root/split-closed.ndjson"
+{
+    sed -n '1p' "$amend_valid"
+    printf '%s}\n%s\n' "${split_line%%,\"failure_scenario\"*}" ",\"failure_scenario\"${split_line#*,\"failure_scenario\"}"
+    sed -n '3p' "$amend_valid"
+} >"$closed_stream"
+assert_true 'the fixture closes the second record early, so its first half parses' \
+    jq -e '.record == "finding"' <<<"$(sed -n '2p' "$closed_stream")"
+normalize_primary_ndjson_stream "$closed_stream" "$test_root/split-closed-normalized.ndjson"
+assert_eq '1|3' "${NDJSON_JOINED_RECORDS}|$(grep -c '' "$test_root/split-closed-normalized.ndjson")" \
+    'a record closed early and continued on a comma-led line is joined into one'
+assert_eq "$(sed -n '2p' "$amend_valid" | jq -c .)" "$(sed -n '2p' "$test_root/split-closed-normalized.ndjson" | jq -c .)" \
+    'and reads exactly as the record the model meant'
+printf '%s\n%s\n' "$(sed -n '1p' "$amend_valid")" ',"failure_scenario":"half a sen' >"$test_root/split-closed-torn.ndjson"
+normalize_primary_ndjson_stream "$test_root/split-closed-torn.ndjson" "$test_root/split-closed-torn-normalized.ndjson"
+assert_eq 0 "$NDJSON_JOINED_RECORDS" 'a comma-led line that does not complete the record is left as it is'
+assert_eq "$(sed -n '1p' "$amend_valid" | jq -c .)" "$(sed -n '1p' "$test_root/split-closed-torn-normalized.ndjson" | jq -c .)" \
+    'and the record before it keeps its closing brace'
 
 # The baseline names every line it left out, and the repair has to put each one
 # back. The prompt used to say "add nothing", so a model that obeyed dropped the

@@ -410,16 +410,24 @@ keys remain language-independent.
   still matches them. The note about an undefined `existing_feedback` is written once, even for a
   finding that already carries it in either language. A character the model escaped twice, the six
   characters `\u2192` where it meant the arrow, is decoded in a title, claim, failure scenario,
-  recommendation or summary; evidence keeps it as written, since a quote of code may hold a real
-  escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
-  names instead. Any other missing
+  recommendation or summary; evidence, and a `code span` anywhere, keep it as written, since a quote
+  of code may hold a real escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
+  names instead. A `changed-line` anchor whose file is not in the changed-line map moves to the
+  one changed file of the same name whose changed lines hold the anchor, and the log names both
+  paths; with no such file, or two, or when the written path is a real file in the checkout that
+  the pull request did not change, it is left as written and fails as before. Any other missing
   key still fails its record, because it would have to be made up. A record whose brackets alone
   are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
   the end, an array opened without its bracket -- is mended without a model when exactly one
   reading of it parses as one object: brackets outside strings are counted, one too many is tried
-  away closer by closer and one or two too few are tried on the end, and the reading that keeps the
+  away closer by closer and one or two too few closing braces are tried on the end, and the reading that keeps the
   most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
-  otherwise, is not mended. A JSON-looking record the model finished writing but mis-punctuated in
+  otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
+  A record broken across physical lines is joined first: a line that opens a record but does not
+  parse takes the next lines, up to three and none of them opening a record, and the join stands
+  only when it parses as one object. A record closed early and continued on a line that begins
+  with a comma and a key is joined the same way, with the closing brace of the first line taken
+  off. A JSON-looking record the model finished writing but mis-punctuated in
   a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
   back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
@@ -430,16 +438,19 @@ keys remain language-independent.
   line as lost. A `complete` record restored this way keeps the summary the draft wrote. A record
   torn off mid-token, unknown record types, duplicate completion records, and other missing
   substantive finding fields remain ineligible because recovery would require guessing what was cut.
-- A primary finding written whole but for a field its author can still supply -- a missing or empty
+- A finding written whole but for a field its author can still supply -- a missing or empty
   `recommendation` or `failure_scenario`, or an anchor on lines the pull request did not change --
-  is amended before any repair, because a repair may not write content. The gate is the validation
+  is amended before any repair, because a repair may not write content. This holds for primary
+  findings, cross-review verdicts and final findings alike, except that a final finding is never
+  asked for an anchor: the final anchor repair owns that. The gate is the validation
   diagnostic: every problem it names must be such a field of a finding, and a finding may miss no
   other key. The agent gets one pass with the repository open and a prompt that lists each finding
   with the fields to write (and the changed-line map when an anchor is asked for); it answers one
   `{"record":"amendment","source_id":...}` line per finding. The orchestrator sets only the fields
   asked for, and only in the shape the contract expects, so every other field stays as the draft
   wrote it, then validates the merged stream as an ordinary primary review. When an amendment was
-  tried the schema repair is skipped, and a failed amendment goes on to salvage.
+  tried the schema repair is skipped, and a failed amendment goes on to salvage with whatever it did
+  set, so only a finding that is still incomplete is dropped.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,

@@ -27,9 +27,15 @@ assert_eq 'auto' "$(jq -r '.["$defs"].piThinking.enum | map(select(. == "auto"))
 
 assert_eq ',auto,high,low,max,medium,xhigh' "$(schema_efforts claudeEffort)" \
     'the Claude vocabulary is exactly what the orchestrator accepts'
-assert_eq ',auto,high,low,max,medium,none,xhigh' "$(schema_efforts codexEffort)" \
+assert_eq ',auto,high,low,max,medium,none,ultra,xhigh' "$(schema_efforts codexEffort)" \
     'the Codex vocabulary is exactly what the orchestrator accepts'
 assert_eq ',auto,high,low,max,medium,minimal,off,xhigh' "$(schema_efforts piThinking)" \
     'the Pi vocabulary is exactly what the orchestrator accepts'
+
+# The orchestrator refuses a quota.codex without its threshold, so the schema
+# must not show `"quota": {"codex": {}}` as valid (self-review of 2e3acc4).
+assert_eq 'minimum_remaining_percent' \
+    "$(jq -r '.properties.quota.properties.codex.required // [] | join(",")' "$schema")" \
+    'the schema requires the threshold the orchestrator requires under quota.codex'
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
