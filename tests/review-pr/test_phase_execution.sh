@@ -129,6 +129,24 @@ assert_file_exists "${FINAL_OUTPUTS[beta]}" 'retried agent eventually commits it
 assert_file_exists "$CASE_DIR/beta-error-attempt-1-usage.json" \
     'failed retry usage is preserved for diagnosis'
 
+# A failed attempt is retried as soon as a slot is free, not once every peer has
+# finished (Tools 29054: codex stood idle for fifteen minutes while pi ran on).
+prepare_phase_case retry-early alpha beta
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=2
+run_review_phase 'primary review' alpha beta
+assert_eq 'yes' "$(awk -F '\t' '
+    $1 == "start" && $2 == "beta" { starts++; if (starts == 2) retried = NR }
+    $1 == "end" && $2 == "alpha" { ended = NR }
+    END { print (retried && ended && retried < ended) ? "yes" : "no" }' "$EVENT_LOG")" \
+    'the failed agent starts its retry while a slower peer is still running'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'and the retry commits its report'
+assert_file_exists "${FINAL_OUTPUTS[alpha]}" 'while the slower peer commits its own'
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+
 prepare_phase_case truncated alpha
 printf 'truncated\n' >"$SCENARIO_DIR/alpha-primary-review"
 MAX_CONCURRENCY=1

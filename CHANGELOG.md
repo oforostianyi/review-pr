@@ -52,6 +52,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Changed
 
+- A failed primary or cross-review attempt is retried as soon as a slot is free, instead of once
+  every peer in the phase has finished. On Tools 29054 codex failed seven minutes into its primary
+  review and stood idle for fifteen more while pi finished; `retry.delay_seconds` still sets the
+  pause before the retry starts.
+
 - The model reference in `README.md` is a 2026-09-23 snapshot and gained the models both vendors
   released this week, `claude-opus-5-5` and `gpt-6-sol`. It also gained a Pi row, which the table
   could not describe before: `pi --list-models` reports the provider, context window, maximum output

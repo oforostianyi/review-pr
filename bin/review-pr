@@ -9448,7 +9448,7 @@ run_review_phase() {
     local -a exhausted_failures=()
     local -a attempt_failures=()
     local -a round_agents=("${agents[@]}")
-    local -a retry_agents=()
+    local retry_now=false
     local -a active_agents=()
     local -a active_pids=()
     local agent
@@ -9487,229 +9487,223 @@ run_review_phase() {
         concurrency=${#agents[@]}
     fi
 
-    while (( ${#round_agents[@]} > 0 )); do
-        next_index=0
-        retry_agents=()
-        active_agents=()
-        phase_pids=()
-        phase_started_at=()
-        heartbeat_pids=()
-        pid_agents=()
+    # A failed attempt goes back on the queue and starts as soon as a slot is
+    # free. It used to wait for the whole round: on Tools 29054 codex failed
+    # seven minutes in and stood idle for fifteen more while pi finished.
+    next_index=0
 
-        while (( next_index < ${#round_agents[@]} || ${#active_agents[@]} > 0 )); do
-            while (( next_index < ${#round_agents[@]} && ${#active_agents[@]} < concurrency )); do
-                agent=${round_agents[$next_index]}
-                next_index=$((next_index + 1))
-                attempt=$((${attempts[$agent]:-0} + 1))
-                attempts[$agent]=$attempt
-                start_agent \
+    while (( next_index < ${#round_agents[@]} || ${#active_agents[@]} > 0 )); do
+        while (( next_index < ${#round_agents[@]} && ${#active_agents[@]} < concurrency )); do
+            agent=${round_agents[$next_index]}
+            next_index=$((next_index + 1))
+            attempt=$((${attempts[$agent]:-0} + 1))
+            attempts[$agent]=$attempt
+            start_agent \
+                "$agent" \
+                "$phase" \
+                "${PROMPT_FILES[$agent]}" \
+                "${TEMP_OUTPUTS[$agent]}" \
+                "${TEMP_LOGS[$agent]}" \
+                "${TEMP_USAGE_FILES[$agent]}" \
+                "${TEMP_USAGE_JSON_FILES[$agent]}" \
+                "$attempt"
+            phase_pids[$agent]=$STARTED_PID
+            pid_agents[$STARTED_PID]=$agent
+            phase_started_at[$agent]=$(date +%s)
+            set_dashboard_status \
+                "$dashboard_section" \
+                "$agent" \
+                "$(dashboard_attempt_status "$attempt")" \
+                "$STARTED_PID" \
+                "${phase_started_at[$agent]}" \
+                0
+            heartbeat_agent "$phase" "$agent" "$STARTED_PID" "${phase_started_at[$agent]}" &
+            heartbeat_pids[$agent]=$!
+            active_agents+=("$agent")
+            activity_log "Started ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} (PID ${STARTED_PID})"
+        done
+
+        active_pids=()
+        for agent in "${active_agents[@]}"; do
+            active_pids+=("${phase_pids[$agent]}")
+        done
+        refresh_running_pids "${active_agents[@]}"
+
+        if wait -n -p completed_pid "${active_pids[@]}"; then
+            exit_status=0
+        else
+            exit_status=$?
+        fi
+        agent=${pid_agents[$completed_pid]:-}
+        [[ -n "$agent" ]] || die "Could not identify completed ${phase} process ${completed_pid}"
+        attempt=${attempts[$agent]}
+
+        kill "${heartbeat_pids[$agent]}" 2>/dev/null || true
+        wait "${heartbeat_pids[$agent]}" 2>/dev/null || true
+
+        failure_reason=""
+        if (( exit_status == 124 )); then
+            failure_reason="timeout after $(format_duration "${AGENT_TIMEOUT_SECONDS[$agent]:-0}")"
+        elif (( exit_status != 0 )); then
+            failure_reason="exit ${exit_status}"
+        elif [[ ! -s "${TEMP_OUTPUTS[$agent]}" ]]; then
+            failure_reason="empty output"
+        fi
+
+        now=$(date +%s)
+        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+        token_display=$TOKEN_USAGE_DISPLAY
+        stop_reason=$(jq -r '.stop_reason // ""' "${TEMP_USAGE_JSON_FILES[$agent]}" 2>/dev/null || true)
+        if [[ "$stop_reason" == length ]]; then
+            output_tokens=$(jq -r '.output_tokens // "unknown"' "${TEMP_USAGE_JSON_FILES[$agent]}" 2>/dev/null || printf unknown)
+            failure_reason="output token limit reached (${output_tokens} output tokens)"
+        fi
+        if [[ -z "$failure_reason" && "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+            if ! process_primary_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
+                printf 'ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                # A finding that lacks only a field its author can still write is
+                # amended first: the schema repair may not write content, so for
+                # such a stream it could only fail, and it is skipped once an
+                # amendment was tried.
+                if attempt_ndjson_amendment primary \
                     "$agent" \
-                    "$phase" \
-                    "${PROMPT_FILES[$agent]}" \
+                    "$attempt" \
                     "${TEMP_OUTPUTS[$agent]}" \
                     "${TEMP_LOGS[$agent]}" \
                     "${TEMP_USAGE_FILES[$agent]}" \
                     "${TEMP_USAGE_JSON_FILES[$agent]}" \
-                    "$attempt"
-                phase_pids[$agent]=$STARTED_PID
-                pid_agents[$STARTED_PID]=$agent
-                phase_started_at[$agent]=$(date +%s)
-                set_dashboard_status \
-                    "$dashboard_section" \
+                    "${phase_started_at[$agent]}"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] && attempt_primary_ndjson_repair \
                     "$agent" \
-                    "$(dashboard_attempt_status "$attempt")" \
-                    "$STARTED_PID" \
-                    "${phase_started_at[$agent]}" \
-                    0
-                heartbeat_agent "$phase" "$agent" "$STARTED_PID" "${phase_started_at[$agent]}" &
-                heartbeat_pids[$agent]=$!
-                active_agents+=("$agent")
-                activity_log "Started ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} (PID ${STARTED_PID})"
-            done
-
-            active_pids=()
-            for agent in "${active_agents[@]}"; do
-                active_pids+=("${phase_pids[$agent]}")
-            done
-            refresh_running_pids "${active_agents[@]}"
-
-            if wait -n -p completed_pid "${active_pids[@]}"; then
-                exit_status=0
-            else
-                exit_status=$?
-            fi
-            agent=${pid_agents[$completed_pid]:-}
-            [[ -n "$agent" ]] || die "Could not identify completed ${phase} process ${completed_pid}"
-            attempt=${attempts[$agent]}
-
-            kill "${heartbeat_pids[$agent]}" 2>/dev/null || true
-            wait "${heartbeat_pids[$agent]}" 2>/dev/null || true
-
-            failure_reason=""
-            if (( exit_status == 124 )); then
-                failure_reason="timeout after $(format_duration "${AGENT_TIMEOUT_SECONDS[$agent]:-0}")"
-            elif (( exit_status != 0 )); then
-                failure_reason="exit ${exit_status}"
-            elif [[ ! -s "${TEMP_OUTPUTS[$agent]}" ]]; then
-                failure_reason="empty output"
-            fi
-
-            now=$(date +%s)
-            read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-            token_display=$TOKEN_USAGE_DISPLAY
-            stop_reason=$(jq -r '.stop_reason // ""' "${TEMP_USAGE_JSON_FILES[$agent]}" 2>/dev/null || true)
-            if [[ "$stop_reason" == length ]]; then
-                output_tokens=$(jq -r '.output_tokens // "unknown"' "${TEMP_USAGE_JSON_FILES[$agent]}" 2>/dev/null || printf unknown)
-                failure_reason="output token limit reached (${output_tokens} output tokens)"
-            fi
-            if [[ -z "$failure_reason" && "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
-                if ! process_primary_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
-                    printf 'ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
-                    # A finding that lacks only a field its author can still write is
-                    # amended first: the schema repair may not write content, so for
-                    # such a stream it could only fail, and it is skipped once an
-                    # amendment was tried.
-                    if attempt_ndjson_amendment primary \
-                        "$agent" \
-                        "$attempt" \
-                        "${TEMP_OUTPUTS[$agent]}" \
-                        "${TEMP_LOGS[$agent]}" \
-                        "${TEMP_USAGE_FILES[$agent]}" \
-                        "${TEMP_USAGE_JSON_FILES[$agent]}" \
-                        "${phase_started_at[$agent]}"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                    elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] && attempt_primary_ndjson_repair \
-                        "$agent" \
-                        "$attempt" \
-                        "${TEMP_OUTPUTS[$agent]}" \
-                        "${TEMP_LOGS[$agent]}" \
-                        "${TEMP_USAGE_FILES[$agent]}" \
-                        "${TEMP_USAGE_JSON_FILES[$agent]}" \
-                        "${phase_started_at[$agent]}"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                    elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage primary "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                        printf 'ndjson-v1 schema repair failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
-                    else
-                        failure_reason="invalid ndjson-v1 output (${recovery_reason})"
-                        printf 'ndjson-v1 schema repair failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
-                    fi
-                fi
-            fi
-            if [[ -z "$failure_reason" && "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
-                if ! process_cross_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
-                    printf 'cross-review ndjson-v1 validation failed before recovery: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
-                    # A stream that stopped short of the required source refs is
-                    # continued; every other failure gets the bounded no-tools
-                    # schema repair. The two are mutually exclusive by construction.
-                    cross_recovery=attempt_cross_ndjson_repair
-                    if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
-                        cross_recovery=attempt_cross_ndjson_continuation
-                    fi
-                    if attempt_ndjson_amendment cross "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
-                        "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
-                        "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                    elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] && "$cross_recovery" "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
-                        "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
-                        "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                    elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage cross "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
-                        read_token_usage "${TEMP_USAGE_FILES[$agent]}"
-                        token_display=$TOKEN_USAGE_DISPLAY
-                        printf 'cross-review ndjson-v1 recovery failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
-                    else
-                        failure_reason="invalid cross-review ndjson-v1 output (${recovery_reason})"
-                        printf 'cross-review ndjson-v1 recovery failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
-                    fi
-                fi
-            fi
-            if [[ -z "$failure_reason" ]]; then
-                prepend_agent_report_header \
+                    "$attempt" \
                     "${TEMP_OUTPUTS[$agent]}" \
-                    "$agent" \
-                    "$phase" \
-                    "${TEMP_USAGE_JSON_FILES[$agent]}"
-                assert_new_target "${FINAL_OUTPUTS[$agent]}"
-                mv -- "${TEMP_OUTPUTS[$agent]}" "${FINAL_OUTPUTS[$agent]}"
-                persist_usage_summary "${TEMP_USAGE_JSON_FILES[$agent]}" "${USAGE_OUTPUTS[$agent]}"
-                PHASE_AGENT_STATUSES[$agent]=complete
+                    "${TEMP_LOGS[$agent]}" \
+                    "${TEMP_USAGE_FILES[$agent]}" \
+                    "${TEMP_USAGE_JSON_FILES[$agent]}" \
+                    "${phase_started_at[$agent]}"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage primary "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                    printf 'ndjson-v1 schema repair failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
+                else
+                    failure_reason="invalid ndjson-v1 output (${recovery_reason})"
+                    printf 'ndjson-v1 schema repair failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
+                fi
+            fi
+        fi
+        if [[ -z "$failure_reason" && "$phase" == "cross-review" && "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
+            if ! process_cross_ndjson_output "${TEMP_OUTPUTS[$agent]}" "$agent"; then
+                printf 'cross-review ndjson-v1 validation failed before recovery: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"${TEMP_LOGS[$agent]}"
+                # A stream that stopped short of the required source refs is
+                # continued; every other failure gets the bounded no-tools
+                # schema repair. The two are mutually exclusive by construction.
+                cross_recovery=attempt_cross_ndjson_repair
+                if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
+                    cross_recovery=attempt_cross_ndjson_continuation
+                fi
+                if attempt_ndjson_amendment cross "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
+                    "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
+                    "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] && "$cross_recovery" "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
+                    "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
+                    "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                elif recovery_reason=$FINDING_CONTRACT_FAILURE_REASON; run_ndjson_salvage cross "$agent" "${TEMP_OUTPUTS[$agent]}" "$recovery_reason"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                    printf 'cross-review ndjson-v1 recovery failed and the stream was salvaged: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
+                else
+                    failure_reason="invalid cross-review ndjson-v1 output (${recovery_reason})"
+                    printf 'cross-review ndjson-v1 recovery failed: %s\n' "$recovery_reason" >>"${TEMP_LOGS[$agent]}"
+                fi
+            fi
+        fi
+        if [[ -z "$failure_reason" ]]; then
+            prepend_agent_report_header \
+                "${TEMP_OUTPUTS[$agent]}" \
+                "$agent" \
+                "$phase" \
+                "${TEMP_USAGE_JSON_FILES[$agent]}"
+            assert_new_target "${FINAL_OUTPUTS[$agent]}"
+            mv -- "${TEMP_OUTPUTS[$agent]}" "${FINAL_OUTPUTS[$agent]}"
+            persist_usage_summary "${TEMP_USAGE_JSON_FILES[$agent]}" "${USAGE_OUTPUTS[$agent]}"
+            PHASE_AGENT_STATUSES[$agent]=complete
+            set_dashboard_status \
+                "$dashboard_section" \
+                "$agent" \
+                COMPLETE \
+                "${phase_pids[$agent]}" \
+                "${phase_started_at[$agent]}" \
+                "$now" \
+                "$token_display"
+            activity_log "Completed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))") [tokens: ${token_display}]: ${FINAL_OUTPUTS[$agent]}"
+        else
+            attempt_failures+=("${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} (${failure_reason})")
+            if (( RETRY_MAX_ATTEMPTS > 1 )); then
+                attempt_error_log="${ERROR_LOGS[$agent]%.log}-attempt-${attempt}.log"
+            else
+                attempt_error_log=${ERROR_LOGS[$agent]}
+            fi
+            preserve_error_log "${TEMP_LOGS[$agent]}" "$attempt_error_log"
+            preserve_agent_failure_artifacts \
+                "$agent" \
+                "${TEMP_OUTPUTS[$agent]}" \
+                "${TEMP_USAGE_FILES[$agent]}" \
+                "${TEMP_USAGE_JSON_FILES[$agent]}" \
+                "$attempt_error_log" \
+                "$phase"
+
+            if (( attempt < RETRY_MAX_ATTEMPTS )); then
+                round_agents+=("$agent")
+                retry_now=true
                 set_dashboard_status \
                     "$dashboard_section" \
                     "$agent" \
-                    COMPLETE \
+                    "$(dashboard_attempt_status "$((attempt + 1))")" \
+                    "" \
+                    0 \
+                    0 \
+                    "$token_display"
+                activity_log "Failed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))"): ${failure_reason}; queued for retry"
+            else
+                exhausted_failures+=("${agent} (${failure_reason}; ${attempt} attempts)")
+                PHASE_AGENT_STATUSES[$agent]=failed
+                set_dashboard_status \
+                    "$dashboard_section" \
+                    "$agent" \
+                    FAILED \
                     "${phase_pids[$agent]}" \
                     "${phase_started_at[$agent]}" \
                     "$now" \
                     "$token_display"
-                activity_log "Completed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))") [tokens: ${token_display}]: ${FINAL_OUTPUTS[$agent]}"
-            else
-                attempt_failures+=("${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} (${failure_reason})")
-                if (( RETRY_MAX_ATTEMPTS > 1 )); then
-                    attempt_error_log="${ERROR_LOGS[$agent]%.log}-attempt-${attempt}.log"
-                else
-                    attempt_error_log=${ERROR_LOGS[$agent]}
-                fi
-                preserve_error_log "${TEMP_LOGS[$agent]}" "$attempt_error_log"
-                preserve_agent_failure_artifacts \
-                    "$agent" \
-                    "${TEMP_OUTPUTS[$agent]}" \
-                    "${TEMP_USAGE_FILES[$agent]}" \
-                    "${TEMP_USAGE_JSON_FILES[$agent]}" \
-                    "$attempt_error_log" \
-                    "$phase"
-
-                if (( attempt < RETRY_MAX_ATTEMPTS )); then
-                    retry_agents+=("$agent")
-                    set_dashboard_status \
-                        "$dashboard_section" \
-                        "$agent" \
-                        "$(dashboard_attempt_status "$((attempt + 1))")" \
-                        "" \
-                        0 \
-                        0 \
-                        "$token_display"
-                    activity_log "Failed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))"): ${failure_reason}; queued for retry"
-                else
-                    exhausted_failures+=("${agent} (${failure_reason}; ${attempt} attempts)")
-                    PHASE_AGENT_STATUSES[$agent]=failed
-                    set_dashboard_status \
-                        "$dashboard_section" \
-                        "$agent" \
-                        FAILED \
-                        "${phase_pids[$agent]}" \
-                        "${phase_started_at[$agent]}" \
-                        "$now" \
-                        "$token_display"
-                    activity_log "Failed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))"): ${failure_reason}; attempts exhausted"
-                fi
-            fi
-
-            new_active_agents=()
-            for active_agent in "${active_agents[@]}"; do
-                if [[ "$active_agent" != "$agent" ]]; then
-                    new_active_agents+=("$active_agent")
-                fi
-            done
-            active_agents=("${new_active_agents[@]}")
-            unset 'phase_pids[$agent]' 'phase_started_at[$agent]' 'heartbeat_pids[$agent]' 'pid_agents[$completed_pid]'
-        done
-
-        RUNNING_PIDS=()
-        if (( ${#retry_agents[@]} > 0 )); then
-            if (( RETRY_DELAY_SECONDS > 0 )); then
-                activity_log "Retrying ${phase} for: ${retry_agents[*]} after ${RETRY_DELAY_SECONDS}s"
-                sleep "$RETRY_DELAY_SECONDS"
-            else
-                activity_log "Retrying ${phase} for: ${retry_agents[*]}"
+                activity_log "Failed ${phase} ${agent} attempt ${attempt}/${RETRY_MAX_ATTEMPTS} after $(format_duration "$((now - phase_started_at[$agent]))"): ${failure_reason}; attempts exhausted"
             fi
         fi
-        round_agents=("${retry_agents[@]}")
+
+        new_active_agents=()
+        for active_agent in "${active_agents[@]}"; do
+            if [[ "$active_agent" != "$agent" ]]; then
+                new_active_agents+=("$active_agent")
+            fi
+        done
+        active_agents=("${new_active_agents[@]}")
+        unset 'phase_pids[$agent]' 'phase_started_at[$agent]' 'heartbeat_pids[$agent]' 'pid_agents[$completed_pid]'
+        if [[ "$retry_now" == true ]]; then
+            retry_now=false
+            if (( RETRY_DELAY_SECONDS > 0 )); then
+                activity_log "Retrying ${phase} for: ${agent} after ${RETRY_DELAY_SECONDS}s"
+                sleep "$RETRY_DELAY_SECONDS"
+            else
+                activity_log "Retrying ${phase} for: ${agent}"
+            fi
+        fi
     done
 
     RUNNING_PIDS=()
