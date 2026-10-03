@@ -909,6 +909,16 @@ run_ndjson_cross_case() {
         'only confirmed findings are published by default'
     assert_eq "${stem}-fix-list.json" "$(jq -r '.artifacts.final_findings_export' "$manifest")" \
         'the manifest records the findings export'
+    assert_eq "$(jq -r '"\(.head_sha)|\(.base_sha)|\(.methodology.hash)"' "$manifest")" \
+        "$(jq -r '.review | "\(.head_sha)|\(.base_sha)|\(.methodology_hash)"' "$findings_export")" \
+        'the export names the head, base and methodology the manifest records'
+    assert_true 'whose methodology hash is a sha256' \
+        grep -Eq '^[0-9a-f]{64}$' <<<"$(jq -r '.methodology.hash' "$manifest")"
+    assert_eq 'number|number|number|full' \
+        "$(jq -r '.review | "\(.phase_seconds.primary | type)|\(.phase_seconds.cross | type)|\(.phase_seconds.final | type)|\(.run_type)"' "$findings_export")" \
+        'and the seconds each phase took so far'
+    assert_eq 'number' "$(jq -r '.phase_seconds.primary | type' "$manifest")" \
+        'the completed manifest keeps the phase durations too'
     assert_eq final-synthesis "$(jq -r '.phase' "$final_findings")" \
         'final sidecar records its phase'
     assert_eq 'alpha:r01,beta:r02' "$(jq -r '[.findings[0].primary_refs[] | .agent + ":" + .source_id] | join(",")' "$final_findings")" \

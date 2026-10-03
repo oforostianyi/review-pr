@@ -212,6 +212,12 @@ SHOW_VERSION=false
 RERUN_FINAL=false
 RESUME_RUN=false
 FORCE_RERUN=false
+SAME_HEAD_ALLOWED=false
+# One hash of everything that decides how a review is done, and when each phase
+# of this process started and how long it ran (see compute_review_methodology).
+REVIEW_METHODOLOGY_HASH=""
+declare -A PHASE_STARTED=()
+declare -A PHASE_SECONDS=()
 CONTRACT_TEST_MODE=false
 CONTRACT_TEST_PHASE=all
 CONTRACT_TEST_OUTPUT=""
@@ -531,6 +537,7 @@ check_codex_quota_before_run() {
 usage() {
     cat >&2 <<EOF
 Usage: ${0##*/} [--config <file>] <pull-request-number>
+       ${0##*/} [--config <file>] [--same-head] <pull-request-number>
        ${0##*/} [--config <file>] --run <timestamp> <pull-request-number>
        ${0##*/} [--config <file>] --rerun-final [--force] [--run <timestamp>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
@@ -541,15 +548,154 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
 EOF
 }
 
+portable_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d ' ' -f 1
+    else
+        openssl dgst -sha256 -r | cut -d ' ' -f 1
+    fi
+}
+
+# Everything that decides how a review is done, as one hash: the review-pr
+# version, the configured prompts, and for each agent the skill and checklists
+# that are embedded in its prompt. Two runs on the same head and base with the
+# same hash are the same review asked twice; a changed checklist (adr.md on
+# 2026-10-03) makes a rerun worth its cost. Files are taken in name order, so
+# the hash does not depend on the order find lists them.
+compute_review_methodology() {
+    local agent name checklist
+    local -a agents=("${REVIEW_AGENTS[@]}" "$FINAL_SYNTHESIZER")
+
+    [[ -z "${FALLBACK_SYNTHESIZER:-}" ]] || agents+=("$FALLBACK_SYNTHESIZER")
+    REVIEW_METHODOLOGY_HASH=$(
+        {
+            printf 'review-pr\t%s\n' "$REVIEW_PR_VERSION"
+            printf 'prompts\t%s\n' "$(jq -cS '.prompts // {}' "$CONFIG_FILE" 2>/dev/null | portable_sha256)"
+            while IFS= read -r agent; do
+                [[ -n "$agent" ]] || continue
+                agent_skill_instruction "$agent"
+                if [[ -z "$AGENT_SKILL_FILE" ]]; then
+                    printf 'skill\t%s\t-\n' "$agent"
+                    continue
+                fi
+                printf 'skill\t%s\t%s\n' "$agent" "$(portable_sha256 <"$AGENT_SKILL_FILE")"
+                while IFS= read -r checklist; do
+                    [[ -f "$checklist" && ! -L "$checklist" && -r "$checklist" ]] || continue
+                    name=${checklist##*/}
+                    printf 'checklist\t%s\t%s\t%s\n' "$agent" "$name" "$(portable_sha256 <"$checklist")"
+                done < <(find -P "${AGENT_SKILL_FILE%/*}/checklists" -maxdepth 1 -type f -name '*.md' 2>/dev/null | LC_ALL=C sort)
+            done < <(printf '%s\n' "${agents[@]}" | LC_ALL=C sort -u)
+        } | portable_sha256
+    )
+}
+
+# Runs one phase and records when it started and how long it took, whatever it
+# returns. The fix-list and the manifest report the durations.
+timed_phase() {
+    local key=$1 status=0
+    shift
+    PHASE_STARTED[$key]=$(date +%s)
+    "$@" || status=$?
+    PHASE_SECONDS[$key]=$(( $(date +%s) - PHASE_STARTED[$key] ))
+    return "$status"
+}
+
+# Seconds per phase run by this process: finished ones as measured, a running
+# one up to now, and null for a phase another process ran (a resumed run).
+phase_seconds_json() {
+    local key value now json='{}'
+
+    now=$(date +%s)
+    for key in primary cross final comparison; do
+        if [[ -n "${PHASE_SECONDS[$key]:-}" ]]; then
+            value=${PHASE_SECONDS[$key]}
+        elif [[ -n "${PHASE_STARTED[$key]:-}" ]]; then
+            value=$(( now - PHASE_STARTED[$key] ))
+        else
+            value=null
+        fi
+        json=$(jq -c --arg key "$key" --argjson value "$value" '. + {($key): $value}' <<<"$json")
+    done
+    printf '%s' "$json"
+}
+
+# What the fix-list says about the review that produced it, so a later reader can
+# tell which head and base it saw and by which methodology without other files.
+current_review_json() {
+    local run_type=full
+
+    [[ "$RERUN_FINAL" != true ]] || run_type='final-rerun'
+    jq -nc \
+        --arg head_sha "$HEAD_SHA" --arg base_sha "$BASE_SHA" \
+        --arg head_ref "${HEAD_REF:-}" --arg base_ref "${BASE_REF:-}" \
+        --arg version "$REVIEW_PR_VERSION" --arg methodology "$REVIEW_METHODOLOGY_HASH" \
+        --arg run_type "$run_type" --argjson phase_seconds "$(phase_seconds_json)" '
+        def nullable: if . == "" then null else . end;
+        {head_sha: ($head_sha | nullable), base_sha: ($base_sha | nullable),
+         head_ref: ($head_ref | nullable), base_ref: ($base_ref | nullable),
+         review_pr_version: $version, methodology_hash: ($methodology | nullable),
+         run_type: $run_type, phase_seconds: $phase_seconds}'
+}
+
+# The same, read back from a run's manifest, for `review-pr findings`. A run
+# made before these fields were recorded leaves them null.
+manifest_review_json() {
+    local manifest=$1
+
+    jq -c '{head_sha: (.head_sha // null), base_sha: (.base_sha // null),
+            head_ref: (.head_ref // null), base_ref: (.base_ref // null),
+            review_pr_version: (.review_pr_version // null),
+            methodology_hash: (.methodology.hash // null),
+            run_type: (if .run_type == "full" then "full" elif .run_type then .run_type else "final-rerun" end),
+            phase_seconds: (.phase_seconds // null)}' "$manifest" 2>/dev/null || printf 'null'
+}
+
+# Refuses a new full run on the head, base and methodology the last complete full
+# run of this PR already reviewed: the reviewers would see exactly what they saw
+# then, and nine of thirty rounds in late September were such repeats. A changed
+# head, base or methodology, or a run with no methodology record, goes ahead and
+# says why. --same-head asks for the repeat on purpose.
+refuse_same_head_review() {
+    local manifest latest='' latest_epoch=-1 epoch recorded run
+
+    [[ -d "$REPORT_DIR/work" ]] || return 0
+    while IFS= read -r -d '' manifest; do
+        jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --argjson pr "$PR_NUMBER" \
+            '.run_type == "full" and .pr_number == $pr and .head_sha == $head and .base_sha == $base
+             and .status.pipeline == "complete"' "$manifest" >/dev/null 2>&1 || continue
+        epoch=$(timestamp_to_epoch "$(jq -r '.created_at // ""' "$manifest")") || epoch=0
+        (( epoch > latest_epoch )) || continue
+        latest=$manifest latest_epoch=$epoch
+    done < <(find -P "$REPORT_DIR/work" -maxdepth 2 -type f -name '*-manifest.json' -print0 2>/dev/null)
+    [[ -n "$latest" ]] || return 0
+    run=$(jq -r '.timestamp // "?"' "$latest")
+    recorded=$(jq -r '.methodology.hash // ""' "$latest")
+    if [[ -z "$recorded" ]]; then
+        log "Run ${run} already reviewed head ${HEAD_SHA:0:12} on base ${BASE_SHA:0:12}, but recorded no methodology; reviewing again"
+        return 0
+    fi
+    if [[ "$recorded" != "$REVIEW_METHODOLOGY_HASH" ]]; then
+        log "Run ${run} already reviewed head ${HEAD_SHA:0:12} on base ${BASE_SHA:0:12}; the review methodology has changed since, so reviewing again"
+        return 0
+    fi
+    if [[ "$SAME_HEAD_ALLOWED" == true ]]; then
+        log "Run ${run} already reviewed head ${HEAD_SHA:0:12} on base ${BASE_SHA:0:12} with the same methodology; reviewing again as --same-head asks"
+        return 0
+    fi
+    die "PR #${PR_NUMBER} was already reviewed on head ${HEAD_SHA:0:12} and base ${BASE_SHA:0:12} with the same methodology (run ${run}). Push a change, or pass --same-head to review it again"
+}
+
 # Renders the actionable part of one canonical final synthesis as JSON, for an
 # agent that will do the fixing. Confirmed findings come first; a finding with no
 # changed-line anchor keeps an empty anchor and is listed last, because a missing
 # test or migration has no address and dropping it would be worse.
 render_findings_export() {
-    local canonical_file=$1 run=$2 scope=$3
+    local canonical_file=$1 run=$2 scope=$3 review_json=${4:-null}
 
     # jq 1.6 parses "include" as the module keyword, so the scope travels as $scope.
-    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg scope "$scope" '
+    jq --arg run "$run" --argjson pr_number "$PR_NUMBER" --arg scope "$scope" --argjson review "$review_json" '
         def placement: if .anchor.kind == "pr-level" then 1 else 0 end;
         (if $scope == "confirmed" then ["CONFIRMED"]
          elif $scope == "uncertain" then ["CONFIRMED", "UNCERTAIN"]
@@ -559,6 +705,7 @@ render_findings_export() {
             pr_number: $pr_number,
             run: $run,
             "include": $scope,
+            review: $review,
             findings: ([.findings[]
                 | select(.classification as $classification | $wanted | index($classification))
                 | {
@@ -692,7 +839,7 @@ publish_findings_export() {
     local export_temp run
     run=$(grep -oE "$RUN_TIMESTAMP_PATTERN" <<<"${FINAL_FINDINGS_EXPORT_OUTPUT##*/}" | tail -n 1)
     new_temp_file 'findings-export'; export_temp=$NEW_TEMP_FILE
-    render_findings_export "$FINAL_FINDINGS_OUTPUT" "$run" "$FINDINGS_EXPORT_SCOPE" >"$export_temp" \
+    render_findings_export "$FINAL_FINDINGS_OUTPUT" "$run" "$FINDINGS_EXPORT_SCOPE" "$(current_review_json)" >"$export_temp" \
         || die "Could not render the findings export from ${FINAL_FINDINGS_OUTPUT}"
     assert_new_target "$FINAL_FINDINGS_EXPORT_OUTPUT"
     mv -- "$export_temp" "$FINAL_FINDINGS_EXPORT_OUTPUT"
@@ -756,7 +903,7 @@ select_final_findings_artifact() {
 
 export_review_findings() {
     local scope=$1
-    local slug search_root candidate selected='' run
+    local slug search_root candidate selected='' run review_manifest review_json
 
     slug=${GITHUB_REPOSITORY//\//-}
     slug=${slug,,}
@@ -776,7 +923,10 @@ export_review_findings() {
         || die "Final findings artifact is unreadable: ${selected}"
 
     run=$(grep -oE "$RUN_TIMESTAMP_PATTERN" <<<"${selected##*/}" | tail -n 1)
-    render_findings_export "$selected" "$run" "$scope"
+    review_manifest=$(find -P "${selected%/*}" -maxdepth 3 -type f -name "*${run}*-manifest.json" 2>/dev/null | LC_ALL=C sort | tail -n 1)
+    review_json=null
+    [[ -z "$review_manifest" ]] || review_json=$(manifest_review_json "$review_manifest")
+    render_findings_export "$selected" "$run" "$scope" "$review_json"
 }
 
 show_version() {
@@ -10274,22 +10424,28 @@ update_full_manifest_phase() {
 
 complete_full_manifest() {
     atomic_manifest_update \
-        '.status.final = "complete" |
+        '.methodology = {hash: (if $methodology == "" then null else $methodology end)} |
+         .phase_seconds = $phase_seconds |
+         .status.final = "complete" |
          if .status.comparison == "pending" then
              .status.pipeline = "in_progress"
          else
              .status.pipeline = "complete" |
              .completed_at = $completed_at
          end' \
-        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')"
+        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --arg methodology "$REVIEW_METHODOLOGY_HASH" \
+        --argjson phase_seconds "$(phase_seconds_json)"
 }
 
 complete_full_manifest_comparison() {
     atomic_manifest_update \
         '.status.comparison = "complete" |
          .status.pipeline = "complete" |
+         .phase_seconds = $phase_seconds |
          .completed_at = $completed_at' \
-        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')"
+        --arg completed_at "$(review_pr_date '+%Y-%m-%dT%H:%M:%S%z')" \
+        --argjson phase_seconds "$(phase_seconds_json)"
 }
 
 fail_full_manifest_comparison() {
@@ -10735,6 +10891,7 @@ run_artifact_only_final_rerun() {
     local comparison_error_log
 
     load_artifact_source_run
+    compute_review_methodology
     TIMESTAMP=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
     rerun_stem="${REVIEW_ID}-${SOURCE_TIMESTAMP}-final-rerun-${TIMESTAMP}"
     REPORT_STEM=$rerun_stem
@@ -10777,13 +10934,13 @@ run_artifact_only_final_rerun() {
     log "Original recorded diff ${BASE_SHA}...${HEAD_SHA} (${BASE_REF} <- ${HEAD_REF})"
     initialize_dashboard rerun
     start_dashboard
-    if ! run_final_synthesis "$final_error_log"; then
+    if ! timed_phase final run_final_synthesis "$final_error_log"; then
         skip_dashboard_sections comparison
         stop_dashboard
         fail_rerun_manifest "$FINAL_FAILURE_REASON"
         die "Final re-synthesis failed (${FINAL_FAILURE_REASON}); all source reports were preserved"
     fi
-    if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! run_comparison_synthesis "$comparison_error_log"; then
+    if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! timed_phase comparison run_comparison_synthesis "$comparison_error_log"; then
         stop_dashboard
         fail_rerun_manifest "$COMPARISON_FAILURE_REASON" comparison
         die "Final core synthesis completed, but standalone comparison failed (${COMPARISON_FAILURE_REASON}); the final report and all source reports were preserved"
@@ -11288,8 +11445,12 @@ complete_rerun_manifest() {
         '.final_status = "complete" |
          .comparison.status = (if .comparison.mode == "standalone" then "complete" else "skipped" end) |
          .status = "complete" |
+         .methodology = {hash: (if $methodology == "" then null else $methodology end)} |
+         .phase_seconds = $phase_seconds |
          .completed_at = $completed_at' \
-        --arg completed_at "$completed_at"
+        --arg completed_at "$completed_at" \
+        --arg methodology "$REVIEW_METHODOLOGY_HASH" \
+        --argjson phase_seconds "$(phase_seconds_json)"
     record_final_rerun_on_source_manifest "$completed_at"
 }
 
@@ -12780,6 +12941,10 @@ while (( $# > 0 )); do
             FORCE_RERUN=true
             shift
             ;;
+        --same-head)
+            SAME_HEAD_ALLOWED=true
+            shift
+            ;;
         --run)
             (( $# >= 2 )) || die "--run requires a run timestamp"
             RUN_SELECTOR=$2
@@ -12879,6 +13044,9 @@ if [[ -n "$RUN_SELECTOR" && "$RERUN_FINAL" == false ]]; then
 fi
 if [[ "$FORCE_RERUN" == true && "$RERUN_FINAL" == false ]]; then
     die "--force is only valid together with --rerun-final"
+fi
+if [[ "$SAME_HEAD_ALLOWED" == true && ( "$RERUN_FINAL" == true || -n "$RUN_SELECTOR" ) ]]; then
+    die "--same-head applies to a new full run, not to --rerun-final or --run"
 fi
 if [[ "$FORCE_RERUN" == true && -z "$RUN_SELECTOR" ]]; then
     die "--force requires an exact source run via --run <timestamp>"
@@ -13046,9 +13214,11 @@ if [[ "$USING_LEGACY_REPORTS" == true ]]; then
     log "Using legacy artifacts for ${REVIEW_ID}; the final rerun will remain alongside that historical run"
 fi
 [[ ! -L "$REPORT_DIR" ]] || die "Refusing to use a symlink as the report directory: ${REPORT_DIR}"
+compute_review_methodology
 if [[ "$RERUN_FINAL" == true || "$RESUME_RUN" == true ]]; then
     [[ -d "$REPORT_DIR" ]] || die "No review artifacts exist for ${REVIEW_ID}"
 else
+    refuse_same_head_review
     mkdir -p -- "$REPORT_DIR"
 fi
 resolved_report_dir=$(canonical_existing_path "$REPORT_DIR")
@@ -13130,7 +13300,7 @@ if [[ "$RESUME_RUN" == true ]]; then
             write_primary_prompt "$agent" "${PROMPT_FILES[$agent]}"
         done
         activity_log "Resuming primary review for failed/missing agents: ${missing_primary[*]}"
-        if ! run_review_phase "primary review" "${missing_primary[@]}" && ! phase_may_continue_without_failures primary; then
+        if ! timed_phase primary run_review_phase "primary review" "${missing_primary[@]}" && ! phase_may_continue_without_failures primary; then
             stop_dashboard; update_full_manifest_phase primary failed
             log "Cross-review and synthesis remain paused; successful artifacts were preserved."
             exit 1
@@ -13165,7 +13335,7 @@ if [[ "$RESUME_RUN" == true ]]; then
             write_cross_prompt "$agent" "${PROMPT_FILES[$agent]}" "${cross_prompt_arguments[@]}"
         done
         activity_log "Resuming cross-review for failed/missing agents: ${missing_cross[*]}"
-        if ! run_review_phase "cross-review" "${missing_cross[@]}" && ! phase_may_continue_without_failures cross; then
+        if ! timed_phase cross run_review_phase "cross-review" "${missing_cross[@]}" && ! phase_may_continue_without_failures cross; then
             skip_dashboard_sections final comparison; stop_dashboard; update_full_manifest_phase cross_review failed
             log "Final synthesis remains paused; successful artifacts were preserved."
             exit 1
@@ -13176,7 +13346,7 @@ if [[ "$RESUME_RUN" == true ]]; then
     refresh_phase_survivors
 
     if [[ ! -e "$FINAL_REPORT" ]]; then
-        if ! run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-resume-${TIMESTAMP}-error.log"; then
+        if ! timed_phase final run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-resume-${TIMESTAMP}-error.log"; then
             skip_dashboard_sections comparison; stop_dashboard; fail_full_manifest_final "$FINAL_FAILURE_REASON"
             die "Final synthesis failed (${FINAL_FAILURE_REASON}); all completed input reports were preserved"
         fi
@@ -13192,7 +13362,7 @@ if [[ "$RESUME_RUN" == true ]]; then
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
         assert_new_target "$COMPARISON_REPORT"
         assert_new_target "$COMPARISON_USAGE_OUTPUT"
-        if ! run_comparison_synthesis "${WORK_DIR}/${REPORT_STEM}-comparison-resume-${TIMESTAMP}-error.log"; then
+        if ! timed_phase comparison run_comparison_synthesis "${WORK_DIR}/${REPORT_STEM}-comparison-resume-${TIMESTAMP}-error.log"; then
             stop_dashboard; fail_full_manifest_comparison "$COMPARISON_FAILURE_REASON"
             die "Final core synthesis completed, but standalone comparison failed (${COMPARISON_FAILURE_REASON}); the final report and all completed input reports were preserved"
         fi
@@ -13254,13 +13424,13 @@ if [[ "$RERUN_FINAL" == true ]]; then
     log "Using original diff ${BASE_SHA}...${HEAD_SHA} (${BASE_REF} <- ${HEAD_REF})"
     initialize_dashboard rerun
     start_dashboard
-    if ! run_final_synthesis "$final_error_log"; then
+    if ! timed_phase final run_final_synthesis "$final_error_log"; then
         skip_dashboard_sections comparison
         stop_dashboard
         fail_rerun_manifest "$FINAL_FAILURE_REASON"
         die "Final re-synthesis failed (${FINAL_FAILURE_REASON}); all source reports were preserved"
     fi
-    if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! run_comparison_synthesis "$comparison_error_log"; then
+    if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! timed_phase comparison run_comparison_synthesis "$comparison_error_log"; then
         stop_dashboard
         fail_rerun_manifest "$COMPARISON_FAILURE_REASON" comparison
         die "Final core synthesis completed, but standalone comparison failed (${COMPARISON_FAILURE_REASON}); the final report and all source reports were preserved"
@@ -13358,7 +13528,7 @@ if (( MAX_CONCURRENCY == 0 )); then
 else
     activity_log "Starting ${#REVIEW_AGENTS[@]} independent reviews with max concurrency ${MAX_CONCURRENCY}: ${REVIEW_AGENTS[*]}"
 fi
-if ! run_review_phase "primary review" "${REVIEW_AGENTS[@]}" && ! phase_may_continue_without_failures primary; then
+if ! timed_phase primary run_review_phase "primary review" "${REVIEW_AGENTS[@]}" && ! phase_may_continue_without_failures primary; then
     skip_dashboard_sections cross final comparison
     stop_dashboard
     update_full_manifest_phase primary failed
@@ -13416,7 +13586,7 @@ if (( MAX_CONCURRENCY == 0 )); then
 else
     activity_log "Starting ${#PRIMARY_AGENTS[@]} cross-reviews with max concurrency ${MAX_CONCURRENCY}"
 fi
-if ! run_review_phase "cross-review" "${PRIMARY_AGENTS[@]}" && ! phase_may_continue_without_failures cross; then
+if ! timed_phase cross run_review_phase "cross-review" "${PRIMARY_AGENTS[@]}" && ! phase_may_continue_without_failures cross; then
     skip_dashboard_sections final comparison
     stop_dashboard
     update_full_manifest_phase cross_review failed
@@ -13426,14 +13596,14 @@ fi
 update_full_manifest_phase cross_review complete
 refresh_phase_survivors
 
-if ! run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-error.log"; then
+if ! timed_phase final run_final_synthesis "${WORK_DIR}/${REPORT_STEM}-final-error.log"; then
     skip_dashboard_sections comparison
     stop_dashboard
     fail_full_manifest_final "$FINAL_FAILURE_REASON"
     die "Final synthesis failed (${FINAL_FAILURE_REASON}); all completed input reports were preserved"
 fi
 complete_full_manifest
-if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! run_comparison_synthesis "${WORK_DIR}/${REPORT_STEM}-comparison-error.log"; then
+if [[ "$FINAL_COMPARISON_MODE" == standalone ]] && ! timed_phase comparison run_comparison_synthesis "${WORK_DIR}/${REPORT_STEM}-comparison-error.log"; then
     stop_dashboard
     fail_full_manifest_comparison "$COMPARISON_FAILURE_REASON"
     die "Final core synthesis completed, but standalone comparison failed (${COMPARISON_FAILURE_REASON}); the final report and all completed input reports were preserved"

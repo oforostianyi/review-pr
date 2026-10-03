@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- A new full run is refused when the last complete full run of the pull request already reviewed
+  the same head and base with the same methodology; `--same-head` asks for the repeat on purpose,
+  and `--rerun-final` and `--run` are not affected. The methodology hash covers the review-pr
+  version, the configured prompts, and every skill and checklist embedded in an agent's prompt, so
+  a changed checklist lets the review run again and says why. Nine of thirty review rounds of late
+  September were repeats on an unchanged head.
+- The fix-list and the run manifest record what produced them: head and base SHA and refs, the
+  review-pr version, the methodology hash, the kind of run, and the seconds each phase took.
+  `review-pr findings` reads the same fields back from the run's manifest. Until now the fix-list
+  carried none of it, and a round could not be measured or matched to the head it reviewed.
+
 ## [1.22.0] - 2026-10-02
 
 ### Added
