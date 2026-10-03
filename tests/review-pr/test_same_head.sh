@@ -49,10 +49,10 @@ assert_false 'and so does a changed configured prompt' test "$changed" = "$REVIE
 current=$REVIEW_METHODOLOGY_HASH
 
 # The guard on a new full run.
-PR_NUMBER=29160
-HEAD_SHA=5daccb3de6654e81192996f7aa7d1dcd1d94482a
-BASE_SHA=e2bf91ba98b1f05a402c0e0623c36ec926ba7229
-REPORT_DIR="$suite_root/reports/29160-fix"
+PR_NUMBER=123
+HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+REPORT_DIR="$suite_root/reports/123-fix"
 write_run() {
     local timestamp=$1 head=$2 base=$3 pipeline=$4 methodology=$5
     mkdir -p -- "$REPORT_DIR/work/$timestamp"
@@ -61,7 +61,7 @@ write_run() {
         '{run_type: "full", pr_number: $pr, timestamp: $timestamp, created_at: ($timestamp[0:4] + "-10-02T22:39:00+0200"),
           head_sha: $head, base_sha: $base, status: {pipeline: $pipeline}}
          + (if $methodology == "" then {} else {methodology: {hash: $methodology}} end)' \
-        >"$REPORT_DIR/work/$timestamp/29160-fix-$timestamp-manifest.json"
+        >"$REPORT_DIR/work/$timestamp/123-fix-$timestamp-manifest.json"
 }
 guard() { ( refuse_same_head_review ) 2>&1; }
 
@@ -78,10 +78,10 @@ assert_true '--same-head reviews it again on purpose' refuse_same_head_review
 SAME_HEAD_ALLOWED=false
 HEAD_SHA=1111111111111111111111111111111111111111
 assert_true 'a new head goes ahead' refuse_same_head_review
-HEAD_SHA=5daccb3de6654e81192996f7aa7d1dcd1d94482a
+HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 BASE_SHA=2222222222222222222222222222222222222222
 assert_true 'and so does a new base' refuse_same_head_review
-BASE_SHA=e2bf91ba98b1f05a402c0e0623c36ec926ba7229
+BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 REVIEW_METHODOLOGY_HASH=$first
 assert_true 'and a changed methodology, which says why' \
     grep -q 'methodology has changed since' <<<"$(guard)"
@@ -95,7 +95,7 @@ write_run 20261002-223856-CEST "$HEAD_SHA" "$BASE_SHA" failed "$current"
 assert_true 'nor does a run that did not complete' refuse_same_head_review
 
 # What the fix-list now carries about the review behind it.
-HEAD_REF=fix/LM-4491
+HEAD_REF=fix/FIX-123
 BASE_REF=master
 RERUN_FINAL=false
 timed_phase primary true
