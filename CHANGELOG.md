@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-10-05
+
 ### Added
 
 - A new full run is refused when the last complete full run of the pull request already reviewed
