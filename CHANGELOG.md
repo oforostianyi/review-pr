@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-10-05
+
 ### Changed
 
 - Ukrainian is configured as `UK`, its ISO 639-1 language code, in `language`, `languages.*` and
