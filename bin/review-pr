@@ -213,6 +213,7 @@ RERUN_FINAL=false
 RESUME_RUN=false
 FORCE_RERUN=false
 SAME_HEAD_ALLOWED=false
+REVIEWERS_OVERRIDE=""
 # One hash of everything that decides how a review is done, and when each phase
 # of this process started and how long it ran (see compute_review_methodology).
 REVIEW_METHODOLOGY_HASH=""
@@ -286,6 +287,8 @@ FINAL_HEADER_FILES=""
 FINAL_HEADER_AUTHOR=""
 COMPARISON_REPORT=""
 COMPARISON_USAGE_OUTPUT=""
+COMPARISON_VALIDATION_ERROR=""
+declare -a COMPARISON_SECTION_HEADINGS=()
 COMPARISON_FAILURE_REASON=""
 COMPARISON_FIRST_HEADING='## Conclusion'
 DASHBOARD_ENABLED=false
@@ -537,7 +540,7 @@ check_codex_quota_before_run() {
 usage() {
     cat >&2 <<EOF
 Usage: ${0##*/} [--config <file>] <pull-request-number>
-       ${0##*/} [--config <file>] [--same-head] <pull-request-number>
+       ${0##*/} [--config <file>] [--same-head] [--reviewers <agent>,<agent>...] <pull-request-number>
        ${0##*/} [--config <file>] --run <timestamp> <pull-request-number>
        ${0##*/} [--config <file>] --rerun-final [--force] [--run <timestamp>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
@@ -589,6 +592,23 @@ compute_review_methodology() {
             done < <(printf '%s\n' "${agents[@]}" | LC_ALL=C sort -u)
         } | portable_sha256
     )
+    report_skill_copies "${agents[@]}"
+}
+
+# Says, once per review, which agents run without the bundled copy of the skill
+# their configuration names, and which take it from the default configuration
+# directory because the config file in use lives somewhere else.
+report_skill_copies() {
+    local agent
+    for agent in $(printf '%s\n' "$@" | LC_ALL=C sort -u); do
+        [[ -n "${AGENT_SKILLS[$agent]:-}" ]] || continue
+        agent_skill_instruction "$agent"
+        if [[ -z "$AGENT_SKILL_FILE" ]]; then
+            log "WARNING: no bundled copy of skill ${AGENT_SKILLS[$agent]} for ${agent} under ${CONFIG_DIRECTORY}/skills or ${DEFAULT_CONFIG_FILE%/*}/skills; the agent gets the skill name only"
+        elif [[ "$AGENT_SKILL_FILE" != "$CONFIG_DIRECTORY"/* ]]; then
+            log "Skill ${AGENT_SKILLS[$agent]} for ${agent}: using ${AGENT_SKILL_FILE}, since ${CONFIG_DIRECTORY} has no copy"
+        fi
+    done
 }
 
 # Runs one phase and records when it started and how long it took, whatever it
@@ -1653,6 +1673,32 @@ die_with_configuration_problems() {
             REVIEW_AGENTS+=("$agent")
         fi
     done
+}
+
+# --reviewers picks the reviewers of one run from the agents the config file
+# defines, in place of its reviewers list and enabled flags: an agent that is
+# disabled for everyday runs (a local model) can join one review, or one can
+# sit a run out, without a second copy of the config. The synthesizers stay as
+# configured.
+apply_reviewer_selection() {
+    local selection=$1
+    local agent
+    local -a selected=()
+    local -A seen=()
+
+    [[ -n "$selection" ]] || return 0
+    IFS=',' read -r -a selected <<<"$selection"
+    (( ${#selected[@]} >= 2 )) || die "--reviewers names ${#selected[@]} agent(s); a cross-review needs at least two"
+    for agent in "${selected[@]}"; do
+        [[ "$agent" =~ ^[A-Za-z0-9._-]+$ ]] || die "--reviewers has an invalid agent key: ${agent:-(empty)}"
+        [[ -v "AGENT_TYPES[$agent]" ]] || die "--reviewers names ${agent}, which has no entry under agents in ${CONFIG_FILE}"
+        [[ -z "${seen[$agent]:-}" ]] || die "--reviewers names ${agent} twice"
+        seen[$agent]=1
+        AGENT_ENABLED[$agent]=true
+    done
+    CONFIGURED_REVIEWERS=("${selected[@]}")
+    REVIEW_AGENTS=("${selected[@]}")
+    log "Reviewers for this run (--reviewers): ${selected[*]}"
 }
 
 normalize_repository_reference() {
@@ -3469,6 +3515,9 @@ agent_skill_instruction() {
     local skill_name
     local candidate_skill_file
     local skill_owner
+    local skill_directory
+    local default_directory
+    local -a skill_directories=()
 
     AGENT_SKILL_FILE=""
 
@@ -3482,13 +3531,23 @@ agent_skill_instruction() {
                 # by key alone left an agent with a key of its own running without
                 # the skill its configuration names -- same name in the instruction,
                 # the whole text missing from the prompt.
-                for skill_owner in "$agent" "$(agent_type "$agent")"; do
-                    candidate_skill_file="${CONFIG_DIRECTORY}/skills/${skill_owner}/${skill_name}/SKILL.md"
-                    if [[ -f "$candidate_skill_file" && ! -L "$candidate_skill_file" && -r "$candidate_skill_file" ]]; then
-                        AGENT_SKILL_FILE=$candidate_skill_file
-                        AGENT_SKILL_INSTRUCTION+=" A portable copy bundled with this review-pr configuration is supplied below."
-                        break
-                    fi
+                #
+                # A config file kept elsewhere (an experiment beside the main one)
+                # has no skills directory of its own, so the installed copies in
+                # the default configuration directory are the fallback. Without it
+                # such a run went ahead with the name alone and said nothing.
+                skill_directories=("$CONFIG_DIRECTORY")
+                default_directory=${DEFAULT_CONFIG_FILE%/*}
+                [[ "$default_directory" == "$CONFIG_DIRECTORY" ]] || skill_directories+=("$default_directory")
+                for skill_directory in "${skill_directories[@]}"; do
+                    for skill_owner in "$agent" "$(agent_type "$agent")"; do
+                        candidate_skill_file="${skill_directory}/skills/${skill_owner}/${skill_name}/SKILL.md"
+                        if [[ -f "$candidate_skill_file" && ! -L "$candidate_skill_file" && -r "$candidate_skill_file" ]]; then
+                            AGENT_SKILL_FILE=$candidate_skill_file
+                            AGENT_SKILL_INSTRUCTION+=" A portable copy bundled with this review-pr configuration is supplied below."
+                            break 2
+                        fi
+                    done
                 done
             fi
         else
@@ -11948,27 +12007,41 @@ validate_comparison_markers() {
         "$COMPARISON_MARKER_ACTIONS"
     )
 
+    COMPARISON_VALIDATION_ERROR=""
     for marker in "${markers[@]}"; do
         marker_count=$(grep -Fxc "$marker" "$output_file" || true)
-        [[ "$marker_count" == 1 ]] || return 1
+        if [[ "$marker_count" != 1 ]]; then
+            COMPARISON_VALIDATION_ERROR="marker ${marker} appears ${marker_count} times on a line of its own, expected once"
+            return 1
+        fi
         marker_match=$(grep -Fn -m1 "$marker" "$output_file")
         marker_line=${marker_match%%:*}
-        [[ "$marker_line" =~ ^[0-9]+$ && marker_line -gt previous_line ]] || return 1
+        if ! [[ "$marker_line" =~ ^[0-9]+$ && marker_line -gt previous_line ]]; then
+            COMPARISON_VALIDATION_ERROR="marker ${marker} is out of order"
+            return 1
+        fi
         previous_line=$marker_line
     done
 
-    markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_SOURCES" 3 || return 1
-    markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_ATTRIBUTION" "$expected_matrix_columns" || return 1
-    markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_DEPTH" 3
+    if ! markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_SOURCES" 3; then
+        COMPARISON_VALIDATION_ERROR="the sources table does not have 3 columns"
+        return 1
+    fi
+    if ! markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_ATTRIBUTION" "$expected_matrix_columns"; then
+        COMPARISON_VALIDATION_ERROR="the reviewer matrix does not have ${expected_matrix_columns} columns"
+        return 1
+    fi
+    if ! markdown_table_has_columns_after_marker "$output_file" "$COMPARISON_MARKER_DEPTH" 3; then
+        COMPARISON_VALIDATION_ERROR="the review-depth table does not have 3 columns"
+        return 1
+    fi
 }
 
-validate_legacy_comparison_markdown() {
-    local output_file=$1
-    local heading
-    local -a required_headings=()
-
+# The visible heading of each comparison section, in marker order, in the
+# configured language.
+comparison_section_headings() {
     if [[ "$FINALIZATION_LANGUAGE" == UA ]]; then
-        required_headings=(
+        COMPARISON_SECTION_HEADINGS=(
             '## Висновок'
             '## Джерела'
             '## Хто що знайшов, прийняв або пропустив'
@@ -11979,7 +12052,7 @@ validate_legacy_comparison_markdown() {
             '## Узгоджені дії'
         )
     else
-        required_headings=(
+        COMPARISON_SECTION_HEADINGS=(
             '## Conclusion'
             '## Sources'
             '## Who found, accepted, or missed what'
@@ -11990,10 +12063,74 @@ validate_legacy_comparison_markdown() {
             '## Agreed actions'
         )
     fi
-    for heading in "${required_headings[@]}"; do
-        grep -Fxq "$heading" "$output_file" || return 1
+}
+
+# Puts back a section marker the synthesizer left out when the section's own
+# heading is there to show where it belongs: on a line of its own, exactly
+# once, and not already under a marker. Models drop one marker now and then
+# (the sources one, before its heading) while writing every section in full,
+# and a repair pass by the model for that costs a second synthesizer call.
+restore_missing_comparison_markers() {
+    local output_file=$1
+    local index
+    local marker
+    local heading
+    local heading_line
+    local restored_output
+    local restored_list
+    local -a markers=(
+        "$COMPARISON_MARKER_CONCLUSION"
+        "$COMPARISON_MARKER_SOURCES"
+        "$COMPARISON_MARKER_ATTRIBUTION"
+        "$COMPARISON_MARKER_REVIEW"
+        "$COMPARISON_MARKER_AGREEMENTS"
+        "$COMPARISON_MARKER_DISAGREEMENTS"
+        "$COMPARISON_MARKER_DEPTH"
+        "$COMPARISON_MARKER_ACTIONS"
+    )
+    local -a restored=()
+
+    grep -Fq '<!-- review-pr:comparison:' "$output_file" || return 0
+    comparison_section_headings
+    for index in "${!markers[@]}"; do
+        marker=${markers[$index]}
+        heading=${COMPARISON_SECTION_HEADINGS[$index]}
+        grep -Fxq "$marker" "$output_file" && continue
+        [[ "$(grep -Fxc "$heading" "$output_file" || true)" == 1 ]] || continue
+        heading_line=$(grep -Fxn -m1 "$heading" "$output_file")
+        heading_line=${heading_line%%:*}
+        restored_output="${output_file}.markers.$$"
+        TEMP_FILES+=("$restored_output")
+        awk -v line="$heading_line" -v marker="$marker" '
+            NR == line && previous ~ /^<!-- review-pr:comparison:/ { exit 1 }
+            NR == line { print marker }
+            { print; previous = $0 }
+        ' "$output_file" >"$restored_output" || continue
+        mv -- "$restored_output" "$output_file"
+        restored+=("${marker#<!-- review-pr:comparison:}")
     done
-    grep -Fxq "$REVIEW_MATRIX_TABLE_HEADER" "$output_file"
+    if (( ${#restored[@]} > 0 )); then
+        printf -v restored_list '%s, ' "${restored[@]% -->}"
+        activity_log "Restored missing standalone comparison markers before their headings: ${restored_list%, }"
+    fi
+}
+
+validate_legacy_comparison_markdown() {
+    local output_file=$1
+    local heading
+
+    comparison_section_headings
+    COMPARISON_VALIDATION_ERROR=""
+    for heading in "${COMPARISON_SECTION_HEADINGS[@]}"; do
+        if ! grep -Fxq "$heading" "$output_file"; then
+            COMPARISON_VALIDATION_ERROR="heading ${heading} is missing"
+            return 1
+        fi
+    done
+    if ! grep -Fxq "$REVIEW_MATRIX_TABLE_HEADER" "$output_file"; then
+        COMPARISON_VALIDATION_ERROR="the reviewer-matrix header is missing"
+        return 1
+    fi
 }
 
 validate_comparison_markdown() {
@@ -12018,7 +12155,10 @@ normalize_comparison_markdown() {
     if [[ -z "$heading_match" ]]; then
         heading_match=$(grep -n -m1 -Fx "$COMPARISON_FIRST_HEADING" "$output_file" || true)
     fi
-    [[ -n "$heading_match" ]] || return 1
+    if [[ -z "$heading_match" ]]; then
+        COMPARISON_VALIDATION_ERROR="neither the conclusion marker nor the first heading is on a line of its own"
+        return 1
+    fi
     heading_line=${heading_match%%:*}
     [[ "$heading_line" =~ ^[0-9]+$ ]] || return 1
 
@@ -12040,6 +12180,7 @@ normalize_comparison_markdown() {
     } >"$cleaned_output"
     mv -- "$cleaned_output" "$output_file"
     activity_log "Normalized standalone comparison report and generated canonical PR metadata header"
+    restore_missing_comparison_markers "$output_file"
 }
 
 run_comparison_synthesis() {
@@ -12071,6 +12212,7 @@ run_comparison_synthesis() {
     local repair_status
     local repair_stop_reason
     local repair_succeeded=false
+    local comparison_draft=""
     local -a comparison_prompt_arguments=()
 
     new_temp_file "comparison-prompt"; comparison_prompt=$NEW_TEMP_FILE
@@ -12150,7 +12292,11 @@ run_comparison_synthesis() {
                 "$repair_prompt" \
                 "$comparison_output" \
                 "${comparison_prompt_arguments[@]}"
-            activity_log "Standalone comparison content is usable but does not match the required schema; starting a compact format-repair pass"
+            if [[ -n "$COMPARISON_USAGE_OUTPUT" ]]; then
+                comparison_draft="${COMPARISON_USAGE_OUTPUT%-usage.json}-draft.md"
+                cp -- "$comparison_output" "$comparison_draft"
+            fi
+            activity_log "Standalone comparison content is usable but does not match the required schema (${COMPARISON_VALIDATION_ERROR:-reason not recorded}); starting a compact format-repair pass${comparison_draft:+. Draft kept at ${comparison_draft}}"
             start_agent "$FINAL_SYNTHESIZER" "comparison synthesis" "$repair_prompt" "$repair_output" "$repair_log" "$repair_usage" "$repair_usage_json"
             repair_pid=$STARTED_PID
             comparison_pid=$repair_pid
@@ -12945,6 +13091,11 @@ while (( $# > 0 )); do
             SAME_HEAD_ALLOWED=true
             shift
             ;;
+        --reviewers)
+            (( $# >= 2 )) || die "--reviewers requires a comma-separated list of agent keys"
+            REVIEWERS_OVERRIDE=$2
+            shift 2
+            ;;
         --run)
             (( $# >= 2 )) || die "--run requires a run timestamp"
             RUN_SELECTOR=$2
@@ -12991,6 +13142,11 @@ if [[ "$SHOW_VERSION" == true ]]; then
 fi
 
 load_config
+if [[ -n "$REVIEWERS_OVERRIDE" ]]; then
+    [[ "$RERUN_FINAL" == false && -z "$RUN_SELECTOR" && "$CONTRACT_TEST_MODE" == false && "$QUOTA_MODE" == false && "$FINDINGS_MODE" == false ]] \
+        || die '--reviewers applies to a new review or --show-config; a rerun or resume keeps the reviewers of the run it continues'
+    apply_reviewer_selection "$REVIEWERS_OVERRIDE"
+fi
 configure_finalization_language
 configure_review_languages
 if [[ "$CONTRACT_TEST_MODE" == true ]]; then

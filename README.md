@@ -547,8 +547,9 @@ Use `runner` only for protocols which cannot fit this contract, such as Antigrav
 The public package does not bundle repository-specific methodology. A profile may configure a skill
 name for each agent, but skills remain optional: the agent may resolve the name from its native skill
 installation, or the orchestrator may append a local copy from
-`${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/skills/<agent>/<skill>/SKILL.md`. A missing skill never
-prevents a review. Teams can distribute their own skills as a separate overlay without patching the
+`${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/skills/<agent>/<skill>/SKILL.md`. A `--config` file
+elsewhere looks for `skills/` beside itself first and then falls back to that directory. A missing skill never
+prevents a review, but the log warns about it. Teams can distribute their own skills as a separate overlay without patching the
 core executable or replacing the user's `config.json`.
 
 A team overlay is an ordinary directory tree that each member copies into place, for example:
@@ -631,6 +632,17 @@ review-pr --same-head 123
 ```
 
 `--rerun-final` and `--run` are never refused this way; each is a deliberate rerun of a run that exists.
+
+## Choosing the reviewers for one run
+
+`--reviewers` names the reviewers of one new run, in place of the configured list and the `enabled` flags, without touching the config file. A local model kept disabled for everyday runs can join one review, or a reviewer whose quota is low can sit one out:
+
+```bash
+review-pr --reviewers claude,codex,pi,pi-local 123
+review-pr --reviewers claude,pi 123
+```
+
+Each name must have an entry under `agents`, and at least two are needed. The synthesizer stays as configured.
 
 ## Hand a finished review to a fixing agent
 

@@ -77,6 +77,25 @@ assert_file_contains "$show_output" 'pi: label=Pi model=local-model effort='"'"'
 assert_file_contains "$show_output" 'alpha: label=Alpha model=mock-alpha effort='"'"''"'"' timeout=45m\ 00s max_tool_calls=unlimited' \
     'agents without a tool-call budget report it as unlimited'
 
+# --reviewers picks one run's reviewers from the defined agents, disabled ones
+# included, without a second copy of the config (a local model joining once).
+selected_output="$test_root/show-config-reviewers.txt"
+"$repo_root/bin/review-pr" --config "$config_file" --reviewers beta,paused --show-config >"$selected_output" 2>&1
+assert_file_contains "$selected_output" 'Active review agents: beta paused' '--reviewers replaces the configured reviewers for one run'
+assert_file_contains "$selected_output" 'Disabled review agents: (none)' 'and a disabled agent it names takes part'
+assert_eq "$before_checksum" "$(cksum "$config_file")" 'the config file itself is left as it was'
+for selection in alpha alpha,alpha alpha,missing 'alpha,'; do
+    if "$repo_root/bin/review-pr" --config "$config_file" --reviewers "$selection" --show-config >"$test_root/reviewers-bad.txt" 2>&1; then
+        fail "--reviewers $selection must be refused"
+    fi
+done
+pass '--reviewers refuses one agent, a repeated agent, an unknown one, and an empty entry'
+if "$repo_root/bin/review-pr" --config "$config_file" --reviewers alpha,beta --rerun-final 123 >"$test_root/reviewers-rerun.txt" 2>&1; then
+    fail '--reviewers with --rerun-final must be refused'
+fi
+assert_file_contains "$test_root/reviewers-rerun.txt" 'keeps the reviewers of the run it continues' \
+    'a rerun keeps the reviewers of the run it continues'
+
 pi_thinking_config="$test_root/pi-thinking.json"
 pi_thinking_output="$test_root/pi-thinking-show-config.txt"
 jq '.agents.pi.enabled = true | .agents.pi.effort = "high" | .synthesizer = "pi" | .finalization.effort = "xhigh"' "$config_file" >"$pi_thinking_config"

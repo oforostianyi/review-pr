@@ -630,6 +630,10 @@ case "$behavior" in
         printf 'This response does not follow the requested schema.\n'
         write_usage null 12
         ;;
+    comparison-dropped-marker)
+        emit_valid_output | grep -Fvx '<!-- review-pr:comparison:sources -->'
+        write_usage null 80
+        ;;
     malformed-comparison)
         cat <<'EOF'
 <!-- review-pr:comparison:conclusion -->

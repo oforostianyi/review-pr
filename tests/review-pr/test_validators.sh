@@ -44,6 +44,36 @@ assert_false 'malformed comparison fixture is rejected' \
     validate_comparison_markers "$malformed_comparison"
 assert_file_contains "$malformed_comparison" '## Material disagreements' \
     'malformed comparison preserves useful diagnostics'
+validate_comparison_markers "$malformed_comparison" || true
+assert_true 'a rejected comparison records why' test -n "$COMPARISON_VALIDATION_ERROR"
+
+# A synthesizer that writes every section but drops one marker (the sources
+# marker before its heading, seen on Tools runs in October 2026).
+dropped_marker="$test_root/comparison-dropped-marker.md"
+grep -Fvx "$COMPARISON_MARKER_SOURCES" "$test_dir/fixtures/comparison-valid-en.md" >"$dropped_marker"
+assert_false 'a comparison missing the sources marker does not validate as written' \
+    validate_comparison_markers "$dropped_marker"
+assert_eq "marker $COMPARISON_MARKER_SOURCES appears 0 times on a line of its own, expected once" \
+    "$COMPARISON_VALIDATION_ERROR" 'and the reason names the missing marker'
+normalize_comparison_markdown "$dropped_marker"
+assert_true 'normalization puts the marker back before its heading' \
+    validate_comparison_markdown "$dropped_marker"
+assert_eq '## Sources' "$(grep -Fx -A1 "$COMPARISON_MARKER_SOURCES" "$dropped_marker" | sed -n 2p)" \
+    'directly above the sources heading'
+
+ambiguous_marker="$test_root/comparison-ambiguous-heading.md"
+{ grep -Fvx "$COMPARISON_MARKER_SOURCES" "$test_dir/fixtures/comparison-valid-en.md"; printf '\n## Sources\n'; } >"$ambiguous_marker"
+normalize_comparison_markdown "$ambiguous_marker"
+assert_false 'a heading that appears twice does not say where the marker goes' \
+    grep -Fxq "$COMPARISON_MARKER_SOURCES" "$ambiguous_marker"
+
+wrong_matrix="$test_root/comparison-wrong-matrix.md"
+sed 's/^| Risk \/ candidate | Alpha | Beta | Summary |$/| Risk \/ candidate | Alpha | Summary |/' \
+    "$test_dir/fixtures/comparison-valid-en.md" >"$wrong_matrix"
+if ! cmp -s "$wrong_matrix" "$test_dir/fixtures/comparison-valid-en.md"; then
+    assert_false 'a reviewer matrix with a column missing is rejected' validate_comparison_markers "$wrong_matrix"
+    assert_eq 'the reviewer matrix does not have 4 columns' "$COMPARISON_VALIDATION_ERROR" 'and the reason says which table'
+fi
 
 final_output="$test_root/final.md"
 cp -- "$test_dir/fixtures/final-model-body.md" "$final_output"

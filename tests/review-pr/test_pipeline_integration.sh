@@ -419,10 +419,60 @@ run_comparison_failure_case() {
     invalid_comparison=$(find "$work_dir" -type f -name '*comparison-error-invalid.md' -print | sed -n '1p')
     [[ -n "$invalid_comparison" ]] || fail 'malformed repair output was not preserved'
     pass 'malformed repair output is preserved as a diagnostic artifact'
+    assert_file_exists "$work_dir/${stem}-comparison-draft.md" \
+        'the draft the repair pass was given is kept beside it'
+    assert_true 'and the log says why the draft was sent for repair' \
+        grep -Fq 'does not match the required schema (marker <!-- review-pr:comparison:sources --> appears 0 times' \
+        "$case_dir/output.txt" "$case_dir/stderr.log"
     assert_eq 'failed' "$(jq -r '.status.comparison' "$manifest")" \
         'manifest records comparison failure separately from final synthesis'
     assert_eq 'complete' "$(jq -r '.status.final' "$manifest")" \
         'manifest keeps final synthesis complete when comparison fails'
+}
+
+run_comparison_dropped_marker_case() {
+    local case_dir="$suite_root/comparison-dropped-marker"
+    local reviews="$case_dir/reviews"
+    local fake_bin="$case_dir/bin"
+    local scenarios="$case_dir/scenarios"
+    local events="$case_dir/events.tsv"
+    local checkout
+    local config="$case_dir/config.json"
+    local manifest
+    local work_dir
+    local report_dir
+    local stem
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA
+    REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA
+    REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main
+    export REVIEW_PR_FAKE_DEFAULT_BRANCH=main
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    export REVIEW_PR_FAKE_PR_BODY='No references.'
+    write_config "$config" "$checkout" "$reviews" 2
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'comparison-dropped-marker\n' >"$scenarios/alpha-comparison-synthesis"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_EVENT_LOG="$events" \
+        "$repo_root/bin/review-pr" --config "$config" 123 \
+        >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail 'a comparison missing only the sources marker must not fail the run'
+    pass 'a comparison missing only the sources marker completes'
+
+    manifest=$(latest_manifest "$reviews")
+    work_dir=${manifest%/*}
+    report_dir=$(report_root_of "$work_dir")
+    stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    assert_eq 'complete' "$(jq -r '.status.comparison' "$manifest")" 'the comparison is complete'
+    assert_true 'its sources marker is back in the report' \
+        grep -Fxq '<!-- review-pr:comparison:sources -->' "$report_dir/${stem}-comparison.md"
+    assert_eq 1 "$(awk -F '\t' '$1 == "start" && $3 == "comparison-synthesis"' "$events" | wc -l | tr -d ' ')" \
+        'without a second synthesizer call for a format repair'
+    assert_file_not_exists "$work_dir/${stem}-comparison-draft.md" 'so no repair draft is kept'
 }
 
 run_interrupt_case() {
@@ -2310,6 +2360,7 @@ run_diagnostics_case
 run_diagnostic_only_finding_case
 run_resume_case
 run_comparison_failure_case
+run_comparison_dropped_marker_case
 run_facts_collection_failure_case
 run_anchor_repair_case
 run_unsafe_anchor_repair_case

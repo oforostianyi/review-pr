@@ -16,6 +16,23 @@ All notable changes to `review-pr` are documented in this file. The project foll
   review-pr version, the methodology hash, the kind of run, and the seconds each phase took.
   `review-pr findings` reads the same fields back from the run's manifest. Until now the fix-list
   carried none of it, and a round could not be measured or matched to the head it reviewed.
+- `--reviewers <agent>,<agent>...` picks the reviewers of one new run from the agents the config
+  defines, disabled ones included, without a second copy of the config. Running a local model
+  alongside the cloud reviewers for one night took a copied `config-4reviewers.json`.
+
+### Fixed
+
+- A standalone comparison that leaves out one section marker while writing that section's heading
+  gets the marker put back above the heading, instead of a format-repair pass by the synthesizer.
+  Format repairs ran on six October runs, each a second synthesizer call; rerun with diagnostics,
+  Tools 29162 showed the cause: every section written, the sources marker missing. When a repair pass still runs,
+  the log names what failed validation and the draft is kept as `work/*-comparison-draft.md`;
+  before, the draft was overwritten and the cause could not be read back.
+- A `--config` file outside the default configuration directory now finds skill copies in the
+  default directory when it has none of its own, and the log says so. Such a run used to embed no
+  skill at all and say nothing: the October comparison of local models ran without the
+  `php-code-review` methodology the cloud reviewers had. An agent left with the skill name only is
+  now named in a warning.
 
 ## [1.22.0] - 2026-10-02
 
