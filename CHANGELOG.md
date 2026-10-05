@@ -4,6 +4,12 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- Ukrainian is configured as `UK`, its ISO 639-1 language code, in `language`, `languages.*` and
+  `finalization.language`. `UA` is the country code; a configuration that still says `UA` is read
+  as `UK`, and the log warns and names each field to change.
+
 ## [1.23.0] - 2026-10-05
 
 ### Added

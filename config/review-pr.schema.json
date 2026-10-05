@@ -102,6 +102,7 @@
           "type": "string",
           "enum": [
             "EN",
+            "UK",
             "UA"
           ],
           "deprecated": true,
@@ -626,15 +627,19 @@
       ]
     },
     "reviewLanguage": {
+      "description": "EN for English, UK for Ukrainian (ISO 639-1). UA, the country code, is still read as UK with a warning.",
       "enum": [
         "EN",
+        "UK",
         "UA"
       ]
     },
     "reviewLanguageOverride": {
+      "description": "Empty inherits the global language; otherwise EN or UK. UA is still read as UK with a warning.",
       "enum": [
         "",
         "EN",
+        "UK",
         "UA"
       ]
     },

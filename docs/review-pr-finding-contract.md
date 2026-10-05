@@ -332,7 +332,7 @@ are omitted. The standalone comparison does not repeat them. Historical Markdown
 
 1. Design (this section), the sidecar shape, and fixtures: unavailable file reported by two agents,
    denied tool, failed check, unavailable review threads, unverified production-data assumption,
-   one agent timed out while peers completed, duplicated positive evidence, EN and UA rendering,
+   one agent timed out while peers completed, duplicated positive evidence, EN and UK rendering,
    foreign-language model text not affecting markers.
 2. Orchestrator collector (typed records from the states above), reviewer aggregation, positive
    evidence aggregation, sidecar and manifest entry.
@@ -342,7 +342,7 @@ are omitted. The standalone comparison does not repeat them. Historical Markdown
 
 Status (2026-09-12): steps 2 to 4 are implemented and covered by unit and end-to-end tests
 (failed check, unavailable review threads, a retried agent attempt, one limitation shared by three
-primaries, shared positive evidence, EN and UA rendering, and the `diagnostic_only_finding`
+primaries, shared positive evidence, EN and UK rendering, and the `diagnostic_only_finding`
 rejection). The `diagnostic_only_finding` check is deliberately two-factor: an evidence item counts
 as diagnostic only when it names a check, pipeline, workflow, job, build, tool, or permission and a
 failed, pending, skipped, denied, or unavailable state, and no item names a path, line, or symbol;

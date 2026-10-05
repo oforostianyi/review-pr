@@ -1036,7 +1036,7 @@ assert_file_contains "$rendered_with_resolutions" '| `dispute:beta:beta:F-001` |
     'each resolution is one table row with kind, status, and method'
 assert_file_contains "$rendered_with_resolutions" '`grep -n changedBranch src/Changed.php`' \
     'a recorded argv command is shown joined by spaces inside code formatting'
-FINALIZATION_LANGUAGE=UA
+FINALIZATION_LANGUAGE=UK
 configure_finalization_language
 render_final_findings_markdown "$resolution_final_canonical_full" "$rendered_with_resolutions" "$resolutions_canonical_full"
 assert_file_contains "$rendered_with_resolutions" '## Вирішення суперечок' 'the Ukrainian final report localizes the heading'
@@ -1264,7 +1264,7 @@ assert_file_contains "$diag_rendered" '## Positive evidence' 'the positive-evide
 assert_file_contains "$diag_rendered" 'src/File.php:10 guards the null path (alpha)' 'positive evidence lists its agents'
 assert_true 'a final report with diagnostics sections passes the legacy structural validator' \
     validate_final_markdown "$diag_rendered"
-FINALIZATION_LANGUAGE=UA
+FINALIZATION_LANGUAGE=UK
 configure_finalization_language
 render_final_findings_markdown "$final_canonical" "$diag_rendered" '' "$diag_sidecar"
 assert_file_contains "$diag_rendered" '## Обмеження перевірки' 'the limitations heading is localized'
@@ -1280,7 +1280,7 @@ assert_false 'an empty diagnostics sidecar renders no positive-evidence section'
     grep -q 'review-pr:positive-evidence' "$diag_rendered"
 
 REPORT_STEM=fixture-ua
-PRIMARY_REVIEW_LANGUAGE=UA
+PRIMARY_REVIEW_LANGUAGE=UK
 ua_input="$test_root/primary-ua.ndjson"
 cp -- "$test_dir/fixtures/primary-findings-valid.ndjson" "$ua_input"
 PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-ua-codex-raw.ndjson"
@@ -1357,7 +1357,7 @@ replace_first_literal '"state":"new","thread_ids":[]' '"state":"existing-review-
 REPORT_STEM=fixture-own-feedback-state
 PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-raw.ndjson"
 PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-own-feedback-state-codex-findings.json"
-PRIMARY_REVIEW_LANGUAGE=UA
+PRIMARY_REVIEW_LANGUAGE=UK
 assert_true 'a feedback state of the model'"'"'s own is accepted the same way' \
     process_primary_ndjson_output "$own_state" codex
 assert_true 'with the note in the language of the report' \

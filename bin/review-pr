@@ -1192,8 +1192,8 @@ describe_configuration_problems() {
             (if (.timezone != null) and ((.timezone | type) != "string")
              then "timezone is \(.timezone | tojson); it must be a timezone name such as \"Europe/Warsaw\""
              else empty end),
-            enum_problem("language"; .language; ["EN", "UA"]),
-            enum_problem("finalization.language"; .finalization.language; ["EN", "UA"]),
+            enum_problem("language"; .language; ["EN", "UK", "UA"]),
+            enum_problem("finalization.language"; .finalization.language; ["EN", "UK", "UA"]),
             enum_problem("reporting.findings_export"; .reporting.findings_export; ["confirmed", "uncertain", "all", "off"]),
             enum_problem("reporting.finding_contract.primary"; .reporting.finding_contract.primary; ["markdown", "ndjson-v1"]),
             enum_problem("reporting.finding_contract.cross_review"; .reporting.finding_contract.cross_review; ["markdown", "ndjson-v1"]),
@@ -1313,7 +1313,7 @@ die_with_configuration_problems() {
             elif $type == "pi" then valid_pi_thinking
             else true end;
         def valid_language:
-            . == "EN" or . == "UA";
+            . == "EN" or . == "UK" or . == "UA";
         def valid_language_override:
             . == "" or valid_language;
         def valid_skill_map:
@@ -1578,6 +1578,7 @@ die_with_configuration_problems() {
     PRIMARY_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.primary // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
     CROSS_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.cross_review // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
     FINALIZATION_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.final // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
+    normalize_language_codes
     INCLUDE_COMPARISON_SECTIONS=$(jq -r '
         if (.reporting | type) == "object" and (.reporting | has("include_comparison_sections"))
         then .reporting.include_comparison_sections
@@ -1892,7 +1893,7 @@ Compare actual verification depth, evidence quality, and blind spots. Do not rew
 
 Give a prioritized numbered list derived only from confirmed findings. Keep uncertain or rejected proposals out of the action list.'
             ;;
-        UA)
+        UK)
             FINAL_LANGUAGE_NAME='Ukrainian'
             COMPARISON_FIRST_HEADING='## Висновок'
             FINAL_CLASSIFICATION_HEADING='## Таблиця класифікацій'
@@ -2000,10 +2001,30 @@ EOF
 )
 }
 
+# Ukrainian is UK, its ISO 639-1 code. UA is the ISO 3166 code of the country,
+# which configurations used to name the language; it is still read, as UK,
+# with a warning that names the fields to change.
+normalize_language_codes() {
+    local deprecated_fields
+
+    deprecated_fields=$(jq -r '[
+            (if .language == "UA" then "language" else empty end),
+            (if .finalization.language? == "UA" then "finalization.language" else empty end),
+            (.languages? // {} | to_entries[] | select(.value == "UA") | "languages.\(.key)")
+        ] | join(", ")' "$CONFIG_FILE")
+    [[ "$GLOBAL_REVIEW_LANGUAGE" != UA ]] || GLOBAL_REVIEW_LANGUAGE=UK
+    [[ "$PRIMARY_REVIEW_LANGUAGE" != UA ]] || PRIMARY_REVIEW_LANGUAGE=UK
+    [[ "$CROSS_REVIEW_LANGUAGE" != UA ]] || CROSS_REVIEW_LANGUAGE=UK
+    [[ "$FINALIZATION_LANGUAGE" != UA ]] || FINALIZATION_LANGUAGE=UK
+    if [[ -n "$deprecated_fields" ]]; then
+        log "WARNING: ${deprecated_fields} in ${CONFIG_FILE} says \"UA\", the country code; Ukrainian is \"UK\". Read as UK for now; change it to \"UK\""
+    fi
+}
+
 language_name() {
     case "$1" in
         EN) printf 'English' ;;
-        UA) printf 'Ukrainian' ;;
+        UK) printf 'Ukrainian' ;;
         *) die "Invalid review language: $1" ;;
     esac
 }
@@ -2305,7 +2326,7 @@ build_review_matrix_table_header() {
             first_column='Risk / candidate'
             last_column='Summary'
             ;;
-        UA)
+        UK)
             first_column='Ризик / кандидат'
             last_column='Підсумок'
             ;;
@@ -4129,19 +4150,19 @@ fill_presentation_defaults() {
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
     jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS"'
         def file_note($file):
-            if $language == "UA" then "Файл: `" + $file + "`." else "File: `" + $file + "`." end;
+            if $language == "UK" then "Файл: `" + $file + "`." else "File: `" + $file + "`." end;
         def decode_prose:
             reduce ("title", "claim", "failure_scenario", "recommendation", "summary") as $key (.;
                 if (.[$key] | type) == "string" then .[$key] |= decode_literal_unicode else . end);
         def undefined_note_in($lang; $value):
-            if $lang == "UA" then
+            if $lang == "UK" then
                 "Наявний відгук модель описала як " + ($value | tojson) + ", чого контракт не передбачає; записано як unknown."
             else
                 "Existing feedback was reported as " + ($value | tojson) + ", which the contract does not define; it is recorded as unknown."
             end;
         def undefined_note($value): undefined_note_in($language; $value);
         def notes_undefined($value):
-            any(.verification_limitations[]; . == undefined_note_in("EN"; $value) or . == undefined_note_in("UA"; $value));
+            any(.verification_limitations[]; . == undefined_note_in("EN"; $value) or . == undefined_note_in("UK"; $value));
         map(
         if .record == "finding" then
             (if has("existing_feedback") then . else . + {existing_feedback: {state: "unknown", thread_ids: []}} end)
@@ -4457,7 +4478,7 @@ render_primary_findings_markdown() {
     local positive_heading='## Positive evidence'
     local none='_None._'
 
-    if [[ "$language" == UA ]]; then
+    if [[ "$language" == UK ]]; then
         findings_heading='## Знахідки'
         no_findings='_Знахідок не повідомлено._'
         claim_label='Твердження'
@@ -4807,7 +4828,7 @@ render_cross_findings_markdown() {
     local positive_heading='## Positive evidence'
     local none='_None._'
 
-    if [[ "$language" == UA ]]; then
+    if [[ "$language" == UK ]]; then
         heading='## Класифікація знахідок'
         no_findings='_Вхідних знахідок немає._'
         source_label='Вхідні знахідки'
@@ -5529,7 +5550,7 @@ render_final_findings_markdown() {
     local no_rejected='_None._'
     local resolutions_table_header='| # | Dispute | Kind | Status | Method | Observed | Basis |'
     local measured_header=' Measured |' measured_separator='' with_measurements=false
-    if [[ "$FINALIZATION_LANGUAGE" == UA ]]; then
+    if [[ "$FINALIZATION_LANGUAGE" == UK ]]; then
         problem_label='Проблема'; failure_label='Сценарій збою'; evidence_label='Доказ'; recommendation_label='Рекомендація'; no_rejected='_Немає._'
         resolutions_table_header='| # | Суперечка | Тип | Статус | Метод | Спостережено | Підстава |'
         measured_header=' Виміряно |'
@@ -5600,7 +5621,7 @@ render_final_findings_markdown() {
                 jq -r --arg language "$FINALIZATION_LANGUAGE" '
                     def cell: tostring | gsub("[\\r\\n]+"; " ");
                     def type_label:
-                        (if $language == "UA" then
+                        (if $language == "UK" then
                             {github_review_threads_unavailable: "Гілки обговорення недоступні", github_review_threads_partial: "Гілки обговорення завантажені частково",
                              github_check_failed: "Перевірка CI не пройшла", github_check_cancelled: "Перевірку CI скасовано", github_check_pending: "Перевірка CI не завершена", github_check_skipped: "Перевірку CI пропущено",
                              changed_line_map_unavailable: "Карта змінених рядків недоступна", repository_facts_measurement_failed: "Факти репозиторію не виміряні",
@@ -12040,7 +12061,7 @@ validate_comparison_markers() {
 # The visible heading of each comparison section, in marker order, in the
 # configured language.
 comparison_section_headings() {
-    if [[ "$FINALIZATION_LANGUAGE" == UA ]]; then
+    if [[ "$FINALIZATION_LANGUAGE" == UK ]]; then
         COMPARISON_SECTION_HEADINGS=(
             '## Висновок'
             '## Джерела'

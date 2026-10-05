@@ -50,7 +50,7 @@ jq -n \
         },
         reviews_directory: $reviews,
         language: "EN",
-        languages: {primary: "", cross_review: "UA", final: "EN"},
+        languages: {primary: "", cross_review: "UK", final: "EN"},
         finalization: {model: "mock-small", effort: ""},
         reporting: {comparison_sections: {cross_review: "none", final: "standalone"}},
         status: {mode: "log", color: "never", refresh_interval_seconds: 1, log_interval_seconds: 30, show_pid: false},
@@ -66,7 +66,20 @@ assert_eq "$before_checksum" "$after_checksum" 'configuration validation does no
 assert_file_contains "$show_output" 'Active review agents: alpha beta' 'disabled agents are excluded without deleting their config'
 assert_file_contains "$show_output" 'Disabled review agents: paused' 'disabled agent remains visible in diagnostics'
 assert_file_contains "$show_output" 'Primary review language: EN (English)' 'global language is inherited by the primary phase'
-assert_file_contains "$show_output" 'Cross-review language: UA (Ukrainian)' 'phase language overrides the global language'
+assert_file_contains "$show_output" 'Cross-review language: UK (Ukrainian)' 'phase language overrides the global language'
+# UA is the country code; Ukrainian is UK. A config written before still works.
+ua_config="$test_root/ua-language.json"
+jq '.languages.cross_review = "UA"' "$config_file" >"$ua_config"
+"$repo_root/bin/review-pr" --config "$ua_config" --show-config 2>&1 >"$test_root/ua-language.txt" | grep -Fq 'WARNING: languages.cross_review in' \
+    && pass 'a config that says UA is read as UK with a warning naming the field' \
+    || fail 'a config that says UA must warn and name languages.cross_review'
+assert_file_contains "$test_root/ua-language.txt" 'Cross-review language: UK (Ukrainian)' 'and reviews in Ukrainian as before'
+uk_config="$test_root/uk-language.json"
+jq '.language = "UK" | .languages.cross_review = "UK"' "$config_file" >"$uk_config"
+uk_output="$test_root/uk-language.txt"
+"$repo_root/bin/review-pr" --config "$uk_config" --show-config >"$uk_output" 2>&1
+assert_file_contains "$uk_output" 'Primary review language: UK (Ukrainian)' 'UK is accepted as the global language'
+assert_false 'and draws no warning' grep -Fq 'WARNING: language' "$uk_output"
 assert_file_contains "$show_output" 'alpha: skill=' 'empty optional skill configuration is accepted'
 assert_file_contains "$show_output" 'Primary finding contract: markdown' 'Markdown remains the backward-compatible primary contract default'
 assert_file_contains "$show_output" 'Cross-review finding contract: markdown' 'Markdown remains the backward-compatible cross-review contract default'
