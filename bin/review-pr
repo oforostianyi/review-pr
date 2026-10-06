@@ -3637,6 +3637,7 @@ validate_configuration() {
     local command_template
     local command_name
     local pi_capability_checked=false
+    local pi_help
     declare -A seen_agents=()
 
     if [[ "$validation_scope" != contract-test ]]; then
@@ -3678,7 +3679,13 @@ validate_configuration() {
             pi)
                 require_command pi
                 if [[ "$pi_capability_checked" != true ]]; then
-                    pi --help 2>&1 | grep -Fq -- '--append-system-prompt' \
+                    # The help is read whole before it is searched. Piped into
+                    # grep -q, which stops at the first match, Pi could be
+                    # killed by SIGPIPE while still writing, and under pipefail
+                    # a Pi that has the flag was reported as lacking it (macOS
+                    # CI, 2026-10-06).
+                    pi_help=$(pi --help 2>&1) || true
+                    [[ "$pi_help" == *--append-system-prompt* ]] \
                         || die "Installed Pi CLI does not support --append-system-prompt, which is required for reliable large prompts"
                     pi_capability_checked=true
                 fi

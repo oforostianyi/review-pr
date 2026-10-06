@@ -334,6 +334,16 @@ assert_true 'two agents may share the pi adapter with different models' \
 assert_file_contains <("$repo_root/bin/review-pr" --config "$two_pi" --show-config) 'pi-local pi-cloud opus' \
     'every agent of a shared type is active'
 
+# A Pi whose help goes on long after the flag is named. Piped into grep -q, it
+# was killed by SIGPIPE mid-write, and under pipefail the check said the flag
+# was missing (macOS CI, 2026-10-06).
+mkdir -p -- "$test_root/long-help-bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "--append-system-prompt <text>" "--thinking <level>"\ni=0\nwhile [ $i -lt 20000 ]; do echo "  --option-$i  a long tail of help text"; i=$((i + 1)); done\n' \
+    >"$test_root/long-help-bin/pi"
+chmod 0755 "$test_root/long-help-bin/pi"
+assert_true 'a Pi with a long help text still passes the capability check' \
+    env PATH="$test_root/long-help-bin:$PATH" "$repo_root/bin/review-pr" --config "$two_pi" --show-config
+
 # The budget is a property of the Pi runner, not of the agent that happens to be
 # called "pi", so every agent of that type may set one.
 unknown_type="$test_root/unknown-type.json"

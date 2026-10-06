@@ -9,6 +9,9 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - A primary finding that leaves out `contributing_agents` gets `[<reviewer>]`, the only value the
   contract allows there, instead of failing the stream. On Tools 29183 Pi left it out of all four
   findings, and the retry spent another 21 minutes reviewing the same diff.
+- The check that Pi supports `--append-system-prompt` reads the whole help text before searching it.
+  Piped into `grep -q`, Pi could be killed by SIGPIPE while still writing, and with `pipefail` an
+  installed Pi that has the flag was reported as lacking it; macOS CI failed on it.
 
 ## [1.24.0] - 2026-10-05
 
