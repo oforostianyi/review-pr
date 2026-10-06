@@ -4118,9 +4118,14 @@ resolve_anchor_paths() {
 # keys out says the same thing; on 29044 a cross-reviewer left out
 # failure_scenario and its verdict was dropped. Such keys are filled with null.
 # A CONFIRMED finding owes both, and still fails without them.
+#
+# A primary finding has one possible contributing_agents value, the reviewer
+# that wrote it, so a record that leaves the key out gets it. On Tools 29183
+# (2026-10-06) Pi left it out of all four findings, the stream failed, and the
+# retry spent another 21 minutes reviewing the same diff.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 noun language
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 noun language
 
     resolve_anchor_paths "$phase" "$agent" "$records_file" "$quiet"
     case "$phase" in
@@ -4146,9 +4151,12 @@ fill_presentation_defaults() {
     pr_level_files=$(jq '[.[] | select(.record == "finding" and (.anchor | type) == "object"
         and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
         and .anchor.start == null and .anchor["end"] == null)] | length' "$records_file" 2>/dev/null) || return 0
-    (( feedback + undefined + flags + optional + escapes + pr_level_files > 0 )) || return 0
+    if [[ "$phase" == primary && -n "$agent" ]]; then
+        contributors=$(jq '[.[] | select(.record == "finding" and (has("contributing_agents") | not))] | length' "$records_file" 2>/dev/null) || return 0
+    fi
+    (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
-    jq --arg phase "$phase" --arg language "$language" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS"'
+    jq --arg phase "$phase" --arg language "$language" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS"'
         def file_note($file):
             if $language == "UK" then "Файл: `" + $file + "`." else "File: `" + $file + "`." end;
         def decode_prose:
@@ -4175,6 +4183,8 @@ fill_presentation_defaults() {
                end)
             | (if $phase == "final" and (has("include_in_rejected_summary") | not)
                then . + {include_in_rejected_summary: false} else . end)
+            | (if $phase == "primary" and $agent != "" and (has("contributing_agents") | not)
+               then . + {contributing_agents: [$agent]} else . end)
             | (if $phase != "primary" and (.classification | IN("REJECTED", "UNCERTAIN"))
                then (if has("failure_scenario") then . else . + {failure_scenario: null} end)
                     | (if has("recommendation") then . else . + {recommendation: null} end)
@@ -4198,6 +4208,10 @@ fill_presentation_defaults() {
     if (( undefined > 0 )); then
         noun=findings; (( undefined != 1 )) || noun=finding
         log "Recorded existing_feedback as unknown for ${undefined} ${phase} ${noun}${agent:+ from ${agent}} whose value the contract does not define"
+    fi
+    if (( contributors > 0 )); then
+        noun=findings; (( contributors != 1 )) || noun=finding
+        log "Set contributing_agents to [${agent}] for ${contributors} primary ${noun} from ${agent} that left it out"
     fi
     if (( flags > 0 )); then
         noun=findings; (( flags != 1 )) || noun=finding

@@ -4,6 +4,12 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A primary finding that leaves out `contributing_agents` gets `[<reviewer>]`, the only value the
+  contract allows there, instead of failing the stream. On Tools 29183 Pi left it out of all four
+  findings, and the retry spent another 21 minutes reviewing the same diff.
+
 ## [1.24.0] - 2026-10-05
 
 ### Changed

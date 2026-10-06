@@ -402,7 +402,9 @@ keys remain language-independent.
   `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
   A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
   `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
-  CONFIRMED finding owes both and still fails without them.
+  CONFIRMED finding owes both and still fails without them. A primary finding without
+  `contributing_agents` gets `[<reviewer>]`, the only value a primary finding can have; one that
+  names another agent still fails.
   All of these are filled in before validation, without a model, and the console says so; a key a
   `complete` record carries that the contract does not define is dropped the same way. A repair
   baseline and the findings a continuation keeps get the same values, and the same correction of a

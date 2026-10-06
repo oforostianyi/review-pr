@@ -93,6 +93,37 @@ assert_eq 'GuzzleHttp\Handler\MockHandler' \
     'the namespace reads as one literal backslash per separator, not two'
 PRIMARY_RAW_OUTPUTS[codex]=$saved_raw
 PRIMARY_FINDINGS_OUTPUTS[codex]=$saved_findings
+
+# A primary finding can only have been written by its own reviewer, so a record
+# that leaves contributing_agents out gets [reviewer] instead of failing the
+# whole stream (Pi on Tools 29183, 2026-10-06: a 21-minute retry).
+contributors_input="$test_root/missing-contributors.md"
+contributors_raw="$test_root/missing-contributors-raw.ndjson"
+contributors_findings="$test_root/missing-contributors-findings.json"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.contributing_agents)'
+    sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.contributing_agents)'
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$contributors_input"
+PRIMARY_RAW_OUTPUTS[codex]=$contributors_raw
+PRIMARY_FINDINGS_OUTPUTS[codex]=$contributors_findings
+contributors_log="$test_root/missing-contributors.log"
+contributors_status=0
+process_primary_ndjson_output "$contributors_input" codex 2>"$contributors_log" || contributors_status=$?
+assert_eq 0 "$contributors_status" 'a primary stream missing only contributing_agents is accepted'
+assert_eq '["codex"]|["codex"]' "$(jq -r '[.findings[].contributing_agents | tojson] | join("|")' "$contributors_findings")" \
+    'each finding names the reviewer that wrote it'
+assert_file_contains "$contributors_log" 'Set contributing_agents to [codex] for 2 primary findings from codex that left it out' \
+    'and the log says so'
+wrong_contributors="$test_root/wrong-contributors.md"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.contributing_agents = ["claude"]'
+    sed -n '2,3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$wrong_contributors"
+assert_false 'a contributing_agents that names another agent is still rejected' \
+    process_primary_ndjson_output "$wrong_contributors" codex
+PRIMARY_RAW_OUTPUTS[codex]=$saved_raw
+PRIMARY_FINDINGS_OUTPUTS[codex]=$saved_findings
 assert_eq '2' "$(jq -r '.finding_count' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
     'canonical finding count matches the completed stream'
 assert_file_contains "$input" '<!-- review-pr:anchor:changed-line -->' \
