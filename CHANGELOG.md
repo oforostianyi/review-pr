@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.24.1] - 2026-10-06
+
 ### Fixed
 
 - A primary finding that leaves out `contributing_agents` gets `[<reviewer>]`, the only value the
