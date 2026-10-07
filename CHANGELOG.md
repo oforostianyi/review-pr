@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A finding stream written as one JSON array -- a `[` line, a record per line closed by a comma, a
+  `]` line -- or as a single-line array is unwrapped before validation, in processing and in every
+  repair baseline. On Tools 29174 Pi wrote its primary review that way: only the last record, the
+  one without a comma, parsed, and five of six findings were dropped, among them one no other
+  reviewer raised.
+
 ## [1.24.1] - 2026-10-06
 
 ### Fixed

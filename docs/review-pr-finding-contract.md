@@ -390,6 +390,9 @@ keys remain language-independent.
   as agent messages of their own and are joined with the answer. The console counts the lines; the
   raw artifact keeps them. It is dropped only when a record follows, so a reply that is prose
   throughout still fails, and prose after the first record still fails the stream.
+- A stream written as one JSON array -- a `[` line, one record per line closed by a comma, a `]`
+  line -- or as a single-line array of records is unwrapped the same way: each record keeps its
+  text, only the separating comma goes, and the console counts the records taken out.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Trailing
   transport prose, fences, record/schema metadata, and a missing or malformed terminal completion

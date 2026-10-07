@@ -115,6 +115,31 @@ assert_eq '["codex"]|["codex"]' "$(jq -r '[.findings[].contributing_agents | toj
     'each finding names the reviewer that wrote it'
 assert_file_contains "$contributors_log" 'Set contributing_agents to [codex] for 2 primary findings from codex that left it out' \
     'and the log says so'
+# A stream written as one JSON array, a record per line closed by a comma
+# between "[" and "]" lines (Pi on Tools 29174, 2026-10-07: five of six findings
+# dropped), or as a single-line array, says the same records in another
+# envelope; the envelope is taken off without a model.
+array_fixture="$test_dir/fixtures/primary-findings-valid.ndjson"
+for shape in lines single-line; do
+    array_input="$test_root/array-$shape.md"
+    if [[ "$shape" == lines ]]; then
+        { printf '[\n'; sed '$!s/$/,/' "$array_fixture"; printf ']\n'; } >"$array_input"
+    else
+        jq -s -c '.' "$array_fixture" >"$array_input"
+    fi
+    PRIMARY_RAW_OUTPUTS[codex]="$test_root/array-$shape-raw.ndjson"
+    PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/array-$shape-findings.json"
+    array_status=0
+    process_primary_ndjson_output "$array_input" codex 2>"$test_root/array-$shape.log" || array_status=$?
+    assert_eq 0 "$array_status" "a primary stream written as a JSON array ($shape) is accepted"
+    assert_eq '2' "$(jq -r '.finding_count' "$test_root/array-$shape-findings.json")" \
+        "every record of the $shape array survives"
+    assert_file_contains "$test_root/array-$shape.log" 'Took 3 records out of the JSON array the primary stream from codex was written as' \
+        "and the $shape unwrap is announced"
+done
+assert_eq "$(sed -n '1p' "$array_fixture" | jq -c '.title')" \
+    "$(jq -c '.findings[0].title' "$test_root/array-lines-findings.json")" 'a record keeps its own text'
+
 wrong_contributors="$test_root/wrong-contributors.md"
 {
     sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.contributing_agents = ["claude"]'

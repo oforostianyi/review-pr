@@ -182,6 +182,7 @@ FINDING_CONTRACT_FAILURE_REASON=""
 NDJSON_BASELINE_DIRTY_RECORDS=0
 NDJSON_LEADING_PROSE_LINES=0
 NDJSON_JOINED_RECORDS=0
+NDJSON_UNWRAPPED_ARRAY_RECORDS=0
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 NDJSON_AMENDMENT_TRIED=false
@@ -4329,6 +4330,64 @@ join_split_json_lines() {
     NDJSON_JOINED_RECORDS=$count
 }
 
+# A model that writes its records as one JSON array -- a "[" line, a record per
+# line each closed by a comma, a "]" line -- or as a single-line array, said the
+# same records in a different envelope. Pi did this on Tools 29174 (2026-10-07):
+# only the last record, the one without a comma, parsed, and five of six
+# findings were dropped. The envelope is taken off here, without a model; a
+# record keeps its text exactly, only the comma that separated it goes.
+# NDJSON_UNWRAPPED_ARRAY_RECORDS counts the records that came out of an array.
+unwrap_json_array_stream() {
+    local file=$1 unwrapped_file rewritten_file first last line stripped records=0
+
+    NDJSON_UNWRAPPED_ARRAY_RECORDS=0
+    first=$(grep -m1 -v '^[[:space:]]*$' "$file" || true)
+    last=$(grep -v '^[[:space:]]*$' "$file" | tail -n 1 || true)
+    new_temp_file 'unwrapped-array'; unwrapped_file=$NEW_TEMP_FILE
+    if [[ "$first" =~ ^[[:space:]]*\[[[:space:]]*$ && "$last" =~ ^[[:space:]]*\][[:space:]]*$ ]]; then
+        awk '
+            /^[[:space:]]*$/ { next }
+            !opened && /^[[:space:]]*\[[[:space:]]*$/ { opened = 1; next }
+            { lines[++count] = $0 }
+            END {
+                for (i = 1; i < count; i++) print lines[i]
+            }
+        ' "$file" >"$unwrapped_file"
+        new_temp_file 'unwrapped-array-records'; rewritten_file=$NEW_TEMP_FILE
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            stripped=$line
+            if [[ "$line" =~ ^[[:space:]]*\{ && "$line" =~ ,[[:space:]]*$ ]]; then
+                stripped=${line%,*}
+                if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$stripped"; then
+                    records=$((records + 1))
+                else
+                    stripped=$line
+                fi
+            elif [[ "$line" =~ ^[[:space:]]*\{ ]] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line"; then
+                records=$((records + 1))
+            fi
+            printf '%s\n' "$stripped" >>"$rewritten_file"
+        done <"$unwrapped_file"
+        mv -- "$rewritten_file" "$file"
+        NDJSON_UNWRAPPED_ARRAY_RECORDS=$records
+        return 0
+    fi
+    if [[ "$first" == "$last" && "$first" =~ ^[[:space:]]*\[ ]] \
+        && jq -e 'type == "array" and length > 0 and all(.[]; type == "object")' >/dev/null 2>&1 <<<"$first"; then
+        jq -c '.[]' <<<"$first" >"$unwrapped_file" || return 0
+        NDJSON_UNWRAPPED_ARRAY_RECORDS=$(wc -l <"$unwrapped_file" | tr -d ' ')
+        mv -- "$unwrapped_file" "$file"
+    fi
+}
+
+log_unwrapped_array() {
+    local count=$1 phase=$2 agent=$3 noun=records
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=record
+    log "Took ${count} ${noun} out of the JSON array the ${phase} stream from ${agent} was written as"
+}
+
 log_joined_records() {
     local count=$1 phase=$2 agent=$3 noun=records
 
@@ -4386,6 +4445,7 @@ normalize_primary_ndjson_stream() {
             if (!started || invalid || (fenced && !closed)) exit 1
         }
     ' "$input_file" >"$output_file" || return 1
+    unwrap_json_array_stream "$output_file"
     join_split_json_lines "$output_file"
 }
 
@@ -4612,6 +4672,7 @@ process_primary_ndjson_output() {
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" primary "$agent"
+    log_unwrapped_array "$NDJSON_UNWRAPPED_ARRAY_RECORDS" primary "$agent"
     log_joined_records "$NDJSON_JOINED_RECORDS" primary "$agent"
     log_escape_repairs "$escape_repairs" primary "$agent"
     log_bracket_repairs "$bracket_repairs" primary "$agent"
@@ -4953,6 +5014,7 @@ process_cross_ndjson_output() {
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" cross-review "$agent"
+    log_unwrapped_array "$NDJSON_UNWRAPPED_ARRAY_RECORDS" cross-review "$agent"
     log_joined_records "$NDJSON_JOINED_RECORDS" cross-review "$agent"
     log_escape_repairs "$escape_repairs" cross-review "$agent"
     log_bracket_repairs "$bracket_repairs" cross-review "$agent"
@@ -6184,6 +6246,7 @@ process_final_ndjson_output() {
         fi
     done <"$normalized_file"
     log_leading_prose "$NDJSON_LEADING_PROSE_LINES" final "$FINAL_SYNTHESIZER"
+    log_unwrapped_array "$NDJSON_UNWRAPPED_ARRAY_RECORDS" final "$FINAL_SYNTHESIZER"
     log_joined_records "$NDJSON_JOINED_RECORDS" final "$FINAL_SYNTHESIZER"
     log_escape_repairs "$escape_repairs" final "$FINAL_SYNTHESIZER"
     log_bracket_repairs "$bracket_repairs" final "$FINAL_SYNTHESIZER"
@@ -6358,6 +6421,7 @@ build_final_repair_baseline() {
     local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file 'final-repair-joined'; cp -- "$input_file" "$NEW_TEMP_FILE"; input_file=$NEW_TEMP_FILE
+    unwrap_json_array_stream "$input_file"
     join_split_json_lines "$input_file"
     new_temp_file 'final-repair-parsed'; parsed_file=$NEW_TEMP_FILE
     new_temp_file 'final-repair-unparsed'; unparsed_file=$NEW_TEMP_FILE
@@ -6629,6 +6693,7 @@ build_cross_repair_baseline() {
     local object_count=0 saw_trailing_prose=false line_number=0
 
     new_temp_file "cross-repair-joined"; cp -- "$input_file" "$NEW_TEMP_FILE"; input_file=$NEW_TEMP_FILE
+    unwrap_json_array_stream "$input_file"
     join_split_json_lines "$input_file"
     new_temp_file "cross-repair-parsed"; parsed_file=$NEW_TEMP_FILE
     new_temp_file "cross-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
@@ -6902,6 +6967,7 @@ build_primary_repair_baseline() {
     local line_number=0
 
     new_temp_file "primary-repair-joined"; cp -- "$input_file" "$NEW_TEMP_FILE"; input_file=$NEW_TEMP_FILE
+    unwrap_json_array_stream "$input_file"
     join_split_json_lines "$input_file"
     new_temp_file "primary-repair-parsed"; parsed_file=$NEW_TEMP_FILE
     new_temp_file "primary-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
