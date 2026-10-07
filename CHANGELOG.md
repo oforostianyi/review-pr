@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-10-07
+
 ### Added
 
 - A new run is refused, before any reviewer starts, when the head adds nothing to its base. Tools
