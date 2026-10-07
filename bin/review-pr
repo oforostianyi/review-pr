@@ -673,6 +673,20 @@ manifest_review_json() {
             phase_seconds: (.phase_seconds // null)}' "$manifest" 2>/dev/null || printf 'null'
 }
 
+# Refuses a new full run when the head adds nothing to its base: the diff the
+# reviewers are told to review is empty, and they review whatever the PR
+# description points them at instead, with no changed line to anchor a finding
+# to. Tools 29204 (2026-10-07) was such a PR: stacked on a collective branch that
+# had already merged it through the next PR, and its 26-minute review anchored all
+# thirteen findings to the PR as a whole.
+refuse_empty_diff_review() {
+    git -C "$REVIEW_REPO" diff --quiet "${BASE_SHA}...${HEAD_SHA}" -- 2>/dev/null || return 0
+    if git -C "$REVIEW_REPO" merge-base --is-ancestor "$HEAD_SHA" "$BASE_SHA" 2>/dev/null; then
+        die "Nothing to review in PR #${PR_NUMBER}: its head ${HEAD_SHA:0:10} is already in ${BASE_REF} (${BASE_SHA:0:10}), so the diff is empty. It was probably merged there through another PR; no reviewer was started"
+    fi
+    die "Nothing to review in PR #${PR_NUMBER}: ${BASE_REF}...${HEAD_REF} (${BASE_SHA:0:10}...${HEAD_SHA:0:10}) has no changes; no reviewer was started"
+}
+
 # Refuses a new full run on the head, base and methodology the last complete full
 # run of this PR already reviewed: the reviewers would see exactly what they saw
 # then, and nine of thirty rounds in late September were such repeats. A changed
@@ -13482,6 +13496,7 @@ compute_review_methodology
 if [[ "$RERUN_FINAL" == true || "$RESUME_RUN" == true ]]; then
     [[ -d "$REPORT_DIR" ]] || die "No review artifacts exist for ${REVIEW_ID}"
 else
+    refuse_empty_diff_review
     refuse_same_head_review
     mkdir -p -- "$REPORT_DIR"
 fi

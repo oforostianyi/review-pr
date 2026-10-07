@@ -4,6 +4,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- A new run is refused, before any reviewer starts, when the head adds nothing to its base. Tools
+  29204 was stacked on a collective branch that had already merged it through the next PR; its
+  26-minute review had an empty changed-line map and anchored all thirteen findings to the PR as a
+  whole. The message says whether the head is already in the base or its commits cancel out.
+
 ### Fixed
 
 - A finding stream written as one JSON array -- a `[` line, a record per line closed by a comma, a

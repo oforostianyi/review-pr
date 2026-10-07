@@ -633,6 +633,8 @@ review-pr --same-head 123
 
 `--rerun-final` and `--run` are never refused this way; each is a deliberate rerun of a run that exists.
 
+A new run is also refused when the head adds nothing to its base -- typically a PR stacked on a branch that has already merged it through another PR. The diff would be empty, so no reviewer is started and the message says why.
+
 ## Choosing the reviewers for one run
 
 `--reviewers` names the reviewers of one new run, in place of the configured list and the `enabled` flags, without touching the config file. A local model kept disabled for everyday runs can join one review, or a reviewer whose quota is low can sit one out:

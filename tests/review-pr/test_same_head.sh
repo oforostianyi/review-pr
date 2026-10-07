@@ -119,4 +119,35 @@ manifest=$(find "$REPORT_DIR/work" -name '*-manifest.json' | head -n 1)
 assert_eq "$HEAD_SHA|$current" "$(manifest_review_json "$manifest" | jq -r '"\(.head_sha)|\(.methodology_hash)"')" \
     'review-pr findings reads the same fields back from the run manifest'
 
+# A head that adds nothing to its base: nothing to review, so no reviewer starts.
+# Tools 29204 was stacked on a collective branch that had already merged it.
+REVIEW_REPO="$suite_root/repository"
+git init -q "$REVIEW_REPO"
+git -C "$REVIEW_REPO" -c user.name=Test -c user.email=test@example.test commit -q --allow-empty -m base
+printf 'change\n' >"$REVIEW_REPO/file.txt"
+git -C "$REVIEW_REPO" add file.txt
+git -C "$REVIEW_REPO" -c user.name=Test -c user.email=test@example.test commit -q -m change
+feature_head=$(git -C "$REVIEW_REPO" rev-parse HEAD)
+git -C "$REVIEW_REPO" -c user.name=Test -c user.email=test@example.test commit -q --allow-empty -m 'collective merged it'
+collective=$(git -C "$REVIEW_REPO" rev-parse HEAD)
+base_before=$(git -C "$REVIEW_REPO" rev-parse HEAD~2)
+PR_NUMBER=123 BASE_REF=collective HEAD_REF=fix/FIX-123
+HEAD_SHA=$feature_head BASE_SHA=$base_before
+assert_true 'a head with changes against its base goes ahead' refuse_empty_diff_review
+BASE_SHA=$collective
+set +e
+empty=$( ( refuse_empty_diff_review ) 2>&1 ); empty_status=$?
+set -e
+assert_eq 1 "$empty_status" 'a head already merged into its base is refused'
+assert_true 'and the refusal says the head is already in the base branch' \
+    grep -q 'Nothing to review in PR #123: its head .* is already in collective' <<<"$empty"
+git -C "$REVIEW_REPO" checkout -q -b reverted "$feature_head"
+git -C "$REVIEW_REPO" -c user.name=Test -c user.email=test@example.test revert --no-edit HEAD >/dev/null
+HEAD_SHA=$(git -C "$REVIEW_REPO" rev-parse HEAD) BASE_SHA=$base_before
+set +e
+empty=$( ( refuse_empty_diff_review ) 2>&1 ); empty_status=$?
+set -e
+assert_eq 1 "$empty_status" 'a head whose commits cancel out is refused too'
+assert_true 'and the refusal says the range has no changes' grep -q 'has no changes' <<<"$empty"
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
