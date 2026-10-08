@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.25.2] - 2026-10-08
+
 ### Fixed
 
 - Double quotes a model left unescaped inside a string, or stray after a number, are mended
