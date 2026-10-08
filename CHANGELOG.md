@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.25.1] - 2026-10-08
+
 ### Fixed
 
 - A record whose string value the model split in two -- `"recommendation":"Do this.","+ and
