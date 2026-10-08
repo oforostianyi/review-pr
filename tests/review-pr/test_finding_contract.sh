@@ -167,6 +167,33 @@ assert_eq 1 "$orphan_after_number_status" 'a keyless string after a number is no
 assert_eq '{"a":{"c":"x y"},"b":"z"}' "$(repair_orphan_json_strings '{"a":{"c":"x","y"},"b":"z"}')" \
     'a nested object is repaired in its own scope'
 
+# Quotes a model left unescaped inside a string (Pi on Tools 29240: a quoted
+# phrase inside a sentence, the finding dropped) or stray after a number (Pi on
+# Tools 29245: "schema_version":1"," on four records) are mended without a model.
+quote_input="$test_root/stray-quotes.md"
+{
+    sed -n '1p' "$array_fixture" | jq -c '.claim = "It introduces QUOTEDthe one definitionQUOTED of the payload."' \
+        | sed 's/QUOTED/"/g'
+    sed -n '2p' "$array_fixture" | sed 's/"schema_version":1,/"schema_version":1",/'
+    sed -n '3p' "$array_fixture"
+} >"$quote_input"
+assert_false 'both broken lines really are invalid JSON' jq -e . "$quote_input"
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/stray-quotes-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/stray-quotes-findings.json"
+quote_status=0
+process_primary_ndjson_output "$quote_input" codex 2>"$test_root/stray-quotes.log" || quote_status=$?
+assert_eq 0 "$quote_status" 'records with unescaped or stray quotes are accepted'
+assert_eq 'It introduces "the one definition" of the payload.' \
+    "$(jq -r '.findings[0].claim' "$test_root/stray-quotes-findings.json")" \
+    'an unescaped quote inside a sentence is kept as text'
+assert_eq '2' "$(jq -r '.finding_count' "$test_root/stray-quotes-findings.json")" 'and the record with a stray quote survives'
+assert_file_contains "$test_root/stray-quotes.log" 'Mended unescaped or stray double quotes in 2 records of the primary stream from codex' \
+    'and the repair is announced'
+set +e
+repair_stray_json_quotes '{"a":"x","b":2}' >/dev/null; quote_valid_status=$?
+set -e
+assert_eq 1 "$quote_valid_status" 'a line with nothing to mend is left to the other repairs'
+
 wrong_contributors="$test_root/wrong-contributors.md"
 {
     sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.contributing_agents = ["claude"]'

@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- Double quotes a model left unescaped inside a string, or stray after a number, are mended
+  without a model. Inside a string a quote is closing only when a comma, a colon, a closing
+  bracket or the end of the line follows it; any other quote is escaped as text. A quote right
+  after a number or a literal and before a comma or a closing bracket is taken out. Pi quoted a
+  phrase inside a sentence on Tools 29240, and that finding was dropped; on Tools 29245 it wrote
+  `"schema_version":1","` on four records, which cost a repair pass.
+
 ## [1.25.1] - 2026-10-08
 
 ### Fixed
