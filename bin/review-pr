@@ -3977,9 +3977,95 @@ repair_json_brackets() {
     printf '%s' "$result"
 }
 
+# A string value a model split in two leaves the second half without a key:
+# "recommendation":"Do this.","+ and that.","classification":... -- Pi on Tools
+# 29218 (2026-10-07), whose finding was then dropped. The keyless string is put
+# back into the value before it, joined by a space, so every character the model
+# wrote is kept; it is done only where the value before it is a string of the
+# same object, and only when the result parses.
+repair_orphan_json_strings() {
+    local line=$1
+    local length=${#line} index character next start previous_end=-1
+    local in_string=false escaped=false
+    local -a stack=(root) states=(root) merges=()
+
+    for (( index = 0; index < length; index++ )); do
+        character=${line:index:1}
+        if [[ "$in_string" == true ]]; then
+            if [[ "$escaped" == true ]]; then
+                escaped=false
+            elif [[ "$character" == '\' ]]; then
+                escaped=true
+            elif [[ "$character" == '"' ]]; then
+                in_string=false
+                next=$((index + 1))
+                while (( next < length )) && [[ "${line:next:1}" == [[:space:]] ]]; do next=$((next + 1)); done
+                if [[ "${stack[-1]}" == object ]]; then
+                    case "${states[-1]}" in
+                        key)
+                            if [[ "${line:next:1}" == ':' ]]; then
+                                states[-1]='colon'
+                            elif (( previous_end >= 0 )) && [[ "${line:next:1}" == ',' || "${line:next:1}" == '}' ]]; then
+                                merges+=("${previous_end}:${start}")
+                                previous_end=$index
+                                states[-1]='comma'
+                            else
+                                return 1
+                            fi
+                            ;;
+                        value) previous_end=$index; states[-1]='comma' ;;
+                    esac
+                fi
+            fi
+            continue
+        fi
+        case "$character" in
+            '"')
+                in_string=true start=$index
+                ;;
+            '{')
+                [[ "${stack[-1]}" != object ]] || states[-1]='comma'
+                stack+=(object); states+=(key); previous_end=-1
+                ;;
+            '[')
+                [[ "${stack[-1]}" != object ]] || states[-1]='comma'
+                stack+=(array); states+=(array); previous_end=-1
+                ;;
+            '}' | ']')
+                (( ${#stack[@]} > 1 )) || return 1
+                unset 'stack[-1]' 'states[-1]'
+                previous_end=-1
+                ;;
+            ':')
+                [[ "${stack[-1]}" != object ]] || states[-1]='value'
+                ;;
+            ',')
+                if [[ "${stack[-1]}" == object ]]; then
+                    states[-1]='key'
+                fi
+                ;;
+            *)
+                if [[ "${stack[-1]}" == object && "${states[-1]}" == value && "$character" != [[:space:]] ]]; then
+                    previous_end=-1
+                    states[-1]='comma'
+                fi
+                ;;
+        esac
+    done
+    (( ${#merges[@]} > 0 )) || return 1
+    for (( index = ${#merges[@]} - 1; index >= 0; index-- )); do
+        previous_end=${merges[index]%%:*}
+        start=${merges[index]#*:}
+        line="${line:0:previous_end} ${line:start+1}"
+    done
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line" || return 1
+    printf '%s' "$line"
+}
+
 # Appends a line that did not parse as written once a repair that keeps its
 # content makes it parse: first a backslash JSON does not know is doubled, then
-# the brackets are counted. JSON_LINE_REPAIR names the repair that worked.
+# a keyless string is joined to the value it was split from, then the brackets
+# are counted. JSON_LINE_REPAIR names the repair that worked.
 append_repaired_json_line() {
     local line=$1 output_file=$2 escaped repaired
 
@@ -3989,9 +4075,22 @@ append_repaired_json_line() {
         JSON_LINE_REPAIR=escapes
         return 0
     fi
+    if repaired=$(repair_orphan_json_strings "$escaped") && append_json_line "$repaired" "$output_file"; then
+        JSON_LINE_REPAIR=orphan-strings
+        return 0
+    fi
     repaired=$(repair_json_brackets "$escaped") || return 1
     append_json_line "$repaired" "$output_file" || return 1
     JSON_LINE_REPAIR=brackets
+}
+
+log_orphan_string_repairs() {
+    local count=$1 phase=$2 agent=$3
+    local noun=records
+
+    (( count > 0 )) || return 0
+    (( count != 1 )) || noun=record
+    log "Joined a string value split in two in ${count} ${noun} of the ${phase} stream from ${agent}"
 }
 
 log_bracket_repairs() {
@@ -4649,7 +4748,7 @@ process_primary_ndjson_output() {
     local records_array_file
     local line
     local line_number=0
-    local escape_repairs=0 bracket_repairs=0
+    local escape_repairs=0 bracket_repairs=0 orphan_repairs=0
     local raw_target=${PRIMARY_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-raw.ndjson}
     local findings_target=${PRIMARY_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-${agent}-findings.json}
 
@@ -4680,6 +4779,8 @@ process_primary_ndjson_output() {
             fi
             if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
                 escape_repairs=$((escape_repairs + 1))
+            elif [[ "$JSON_LINE_REPAIR" == orphan-strings ]]; then
+                orphan_repairs=$((orphan_repairs + 1))
             else
                 bracket_repairs=$((bracket_repairs + 1))
             fi
@@ -4690,6 +4791,7 @@ process_primary_ndjson_output() {
     log_joined_records "$NDJSON_JOINED_RECORDS" primary "$agent"
     log_escape_repairs "$escape_repairs" primary "$agent"
     log_bracket_repairs "$bracket_repairs" primary "$agent"
+    log_orphan_string_repairs "$orphan_repairs" primary "$agent"
     if ! jq -s '.' "$records_file" >"$records_array_file"; then
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -4986,7 +5088,7 @@ process_cross_ndjson_output() {
     local agent=$2
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local line_number=0
-    local escape_repairs=0 bracket_repairs=0
+    local escape_repairs=0 bracket_repairs=0 orphan_repairs=0
     local raw_target=${CROSS_RAW_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-raw.ndjson}
     local findings_target=${CROSS_FINDINGS_OUTPUTS[$agent]:-${WORK_DIR}/${REPORT_STEM}-cross-${agent}-findings.json}
 
@@ -5022,6 +5124,8 @@ process_cross_ndjson_output() {
             fi
             if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
                 escape_repairs=$((escape_repairs + 1))
+            elif [[ "$JSON_LINE_REPAIR" == orphan-strings ]]; then
+                orphan_repairs=$((orphan_repairs + 1))
             else
                 bracket_repairs=$((bracket_repairs + 1))
             fi
@@ -5032,6 +5136,7 @@ process_cross_ndjson_output() {
     log_joined_records "$NDJSON_JOINED_RECORDS" cross-review "$agent"
     log_escape_repairs "$escape_repairs" cross-review "$agent"
     log_bracket_repairs "$bracket_repairs" cross-review "$agent"
+    log_orphan_string_repairs "$orphan_repairs" cross-review "$agent"
     jq -s '.' "$records_file" >"$records_array_file" || {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
@@ -6215,7 +6320,7 @@ process_final_ndjson_output() {
     local normalized_file records_file canonical_file rendered_file raw_file records_array_file expected_refs_file line detail
     local resolutions_file disputes_file resolutions_canonical_file diagnostics_file
     local line_number=0
-    local escape_repairs=0 bracket_repairs=0
+    local escape_repairs=0 bracket_repairs=0 orphan_repairs=0
 
     FINDING_CONTRACT_FAILURE_REASON=""
     FINAL_PROCESSED_RESOLUTIONS_FILE=""
@@ -6254,6 +6359,8 @@ process_final_ndjson_output() {
             fi
             if [[ "$JSON_LINE_REPAIR" == escapes ]]; then
                 escape_repairs=$((escape_repairs + 1))
+            elif [[ "$JSON_LINE_REPAIR" == orphan-strings ]]; then
+                orphan_repairs=$((orphan_repairs + 1))
             else
                 bracket_repairs=$((bracket_repairs + 1))
             fi
@@ -6264,6 +6371,7 @@ process_final_ndjson_output() {
     log_joined_records "$NDJSON_JOINED_RECORDS" final "$FINAL_SYNTHESIZER"
     log_escape_repairs "$escape_repairs" final "$FINAL_SYNTHESIZER"
     log_bracket_repairs "$bracket_repairs" final "$FINAL_SYNTHESIZER"
+    log_orphan_string_repairs "$orphan_repairs" final "$FINAL_SYNTHESIZER"
     jq -s '.' "$records_file" >"$records_array_file" || { FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream; return 1; }
     # Resolution records travel in the same stream but are validated against
     # the detected disputes, not as findings.

@@ -4,6 +4,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A record whose string value the model split in two -- `"recommendation":"Do this.","+ and
+  that.",` -- is mended without a model: the keyless half is joined to the value before it with a
+  space, and the log says so. On Tools 29218 Pi wrote one finding that way, the repair pass could
+  not fix it without changing its content, and the finding was dropped.
+
 ## [1.25.0] - 2026-10-07
 
 ### Added

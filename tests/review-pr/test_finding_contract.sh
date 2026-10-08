@@ -140,6 +140,33 @@ done
 assert_eq "$(sed -n '1p' "$array_fixture" | jq -c '.title')" \
     "$(jq -c '.findings[0].title' "$test_root/array-lines-findings.json")" 'a record keeps its own text'
 
+# A string value split in two leaves the second half without a key (Pi on Tools
+# 29218, 2026-10-07: "recommendation":"Do this.","+ and that.", -- the finding
+# was dropped). The keyless half is joined to the value before it.
+orphan_input="$test_root/orphan-string.md"
+{
+    sed -n '1p' "$array_fixture" | jq -c '.recommendation = "Restore the payload."' \
+        | sed 's/"recommendation":"Restore the payload\."/"recommendation":"Restore the payload.","+ and cover it with a test."/'
+    sed -n '2,3p' "$array_fixture"
+} >"$orphan_input"
+assert_false 'the split value really is invalid JSON' jq -e . "$orphan_input"
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/orphan-string-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/orphan-string-findings.json"
+orphan_status=0
+process_primary_ndjson_output "$orphan_input" codex 2>"$test_root/orphan-string.log" || orphan_status=$?
+assert_eq 0 "$orphan_status" 'a record with a value split in two is accepted'
+assert_eq 'Restore the payload. + and cover it with a test.' \
+    "$(jq -r '.findings[0].recommendation' "$test_root/orphan-string-findings.json")" \
+    'the keyless half is joined to the value it was split from, every character kept'
+assert_file_contains "$test_root/orphan-string.log" 'Joined a string value split in two in 1 record of the primary stream from codex' \
+    'and the repair is announced'
+set +e
+orphan_after_number=$(repair_orphan_json_strings '{"a":1,"y","b":2}'); orphan_after_number_status=$?
+set -e
+assert_eq 1 "$orphan_after_number_status" 'a keyless string after a number is not guessed at'
+assert_eq '{"a":{"c":"x y"},"b":"z"}' "$(repair_orphan_json_strings '{"a":{"c":"x","y"},"b":"z"}')" \
+    'a nested object is repaired in its own scope'
+
 wrong_contributors="$test_root/wrong-contributors.md"
 {
     sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.contributing_agents = ["claude"]'

@@ -428,6 +428,10 @@ keys remain language-independent.
   away closer by closer and one or two too few closing braces are tried on the end, and the reading that keeps the
   most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
   otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
+  A string value split in two -- `"recommendation":"Do this.","+ and that.",` -- leaves its second
+  half without a key; that half is joined to the string value before it in the same object with a
+  space, every character kept, and only when the line then parses. A keyless string after a number,
+  an array or an object is not guessed at.
   A record broken across physical lines is joined first: a line that opens a record but does not
   parse takes the next lines, up to three and none of them opening a record, and the join stands
   only when it parses as one object. A record closed early and continued on a line that begins
