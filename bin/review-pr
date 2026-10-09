@@ -183,6 +183,7 @@ NDJSON_BASELINE_DIRTY_RECORDS=0
 NDJSON_LEADING_PROSE_LINES=0
 NDJSON_JOINED_RECORDS=0
 NDJSON_UNWRAPPED_ARRAY_RECORDS=0
+CONTINUATION_DROP_IDS=""
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 NDJSON_AMENDMENT_TRIED=false
@@ -6161,6 +6162,45 @@ ndjson_failure_is_truncation() {
     return 0
 }
 
+# A stream that left source refs unanswered and also wrote some records that
+# break the contract cannot be mended by the schema repair, which runs without
+# tools and may not add a record; a continuation can, once the broken records go
+# back to the work that is left. On ListingSyncer 971 (2026-10-09) Pi left one
+# ref unanswered and wrote one finding with an empty changed-line anchor; the
+# repair failed and the salvage left two refs without its verdict. Prints the
+# source ids of the broken records when every problem is an unanswered ref, the
+# missing terminal record, or a field of one record.
+ndjson_failure_continuation_drops() {
+    local detail=$1
+    local remainder=$detail
+    local item missing=false
+    local -a drops=()
+
+    [[ "$detail" == *'source_refs.missing['* ]] || return 1
+    while [[ -n "$remainder" ]]; do
+        if [[ "$remainder" == *', '* ]]; then
+            item=${remainder%%, *}
+            remainder=${remainder#*, }
+        else
+            item=$remainder
+            remainder=''
+        fi
+        case "$item" in
+            stream.no_complete) ;;
+            'source_refs.missing['*']') missing=true ;;
+            'finding['*'].'*)
+                item=${item#finding[}
+                item=${item%%]*}
+                [[ "$item" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
+                [[ " ${drops[*]} " == *" ${item} "* ]] || drops+=("$item")
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    [[ "$missing" == true ]] || return 1
+    printf '%s' "${drops[*]}"
+}
+
 # Splits a truncated draft into the part that is kept and the work that is left.
 # The agent's own terminal record is dropped, because a continued stream ends
 # with a terminal record that counts the merged findings instead. A final draft
@@ -6176,7 +6216,11 @@ build_continuation_state() {
     if [[ "$phase" == final ]] && jq -e -s 'any(.[]; type == "object" and .record == "resolution")' "$normalized_file" >/dev/null 2>&1; then
         return 1
     fi
-    jq -c 'select(type == "object" and .record != "complete")' "$normalized_file" >"$kept_file" 2>/dev/null || return 1
+    jq -c --arg drops "$CONTINUATION_DROP_IDS" '
+        ($drops | split(" ") | map(select(length > 0))) as $dropped |
+        select(type == "object" and .record != "complete")
+        | select((.record == "finding" and ((.source_id // "") | IN($dropped[]))) | not)
+    ' "$normalized_file" >"$kept_file" 2>/dev/null || return 1
     [[ -s "$kept_file" ]] || return 1
     # The kept findings are compared with the processed merged stream, and a
     # source they answered under the wrong agent is answered all the same.
@@ -10208,8 +10252,14 @@ run_review_phase() {
                 # continued; every other failure gets the bounded no-tools
                 # schema repair. The two are mutually exclusive by construction.
                 cross_recovery=attempt_cross_ndjson_repair
+                CONTINUATION_DROP_IDS=""
                 if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
                     cross_recovery=attempt_cross_ndjson_continuation
+                elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }"); then
+                    cross_recovery=attempt_cross_ndjson_continuation
+                    activity_log "Cross-review from ${agent} left refs unanswered and broke records ${CONTINUATION_DROP_IDS}; asking it for those refs again in a continuation"
+                else
+                    CONTINUATION_DROP_IDS=""
                 fi
                 if attempt_ndjson_amendment cross "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
                     "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
@@ -12893,8 +12943,14 @@ run_final_synthesis_attempt() {
             # A stream that stopped short of the required cross-review refs is
             # continued; every other failure gets the bounded no-tools repair.
             final_recovery=attempt_final_ndjson_repair
+            CONTINUATION_DROP_IDS=""
             if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
                 final_recovery=attempt_final_ndjson_continuation
+            elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }"); then
+                final_recovery=attempt_final_ndjson_continuation
+                activity_log "Final synthesis left refs unanswered and broke records ${CONTINUATION_DROP_IDS}; asking for those refs again in a continuation"
+            else
+                CONTINUATION_DROP_IDS=""
             fi
             if attempt_ndjson_amendment final "$FINAL_SYNTHESIZER" 1 "$final_output" "$final_log" "$final_usage" \
                 "$final_usage_json" "$final_started_at" "$error_log"; then

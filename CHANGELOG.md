@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A cross-review or final stream that left source refs unanswered and also broke some records is
+  continued instead of going to the schema repair, which runs without tools and cannot add the
+  missing verdicts. The broken records are set aside and their refs asked again with the
+  unanswered ones; the log names them. On ListingSyncer 971 Pi left one ref unanswered and wrote
+  one finding with an empty changed-line anchor, the repair failed, and the salvage left two refs
+  without its verdict.
+
 ## [1.26.0] - 2026-10-09
 
 ### Changed

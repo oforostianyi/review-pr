@@ -404,6 +404,33 @@ assert_false 'a draft without a single finding cannot be continued' \
     build_continuation_state cross "$findingless_draft" "$continuation_expected_refs" \
         "$continuation_kept" "$continuation_pending"
 
+# A stream that left refs unanswered and also broke a record (Pi on ListingSyncer
+# 971: one ref unanswered, one finding with an empty changed-line anchor) goes to
+# a continuation too: the broken record is set aside and its refs asked again.
+assert_eq 'alpha:C-002' \
+    "$(ndjson_failure_continuation_drops 'finding[alpha:C-002].anchor, source_refs.missing[codex:codex:r09]')" \
+    'unanswered refs with one broken record name that record'
+assert_eq 'alpha:C-002 alpha:C-003' \
+    "$(ndjson_failure_continuation_drops 'stream.no_complete, finding[alpha:C-002].anchor, finding[alpha:C-002].claim, finding[alpha:C-003].severity, source_refs.missing[beta:beta:F-001]')" \
+    'each broken record is named once'
+assert_false 'broken records without an unanswered ref stay with the other repairs' \
+    ndjson_failure_continuation_drops 'finding[alpha:C-002].anchor'
+assert_false 'an unknown source ref still disqualifies continuation' \
+    ndjson_failure_continuation_drops 'source_refs.missing[beta:beta:F-001], source_refs.unknown[beta:beta:F-009]'
+broken_draft="$test_root/cross-broken-and-truncated.ndjson"
+jq -c '.[0], (.[0] | .source_id = "alpha:C-002" | .source_refs = [{agent: "gamma", source_id: "gamma:F-002"}]
+    | .anchor = {kind: "changed-line", file: null, start: null, end: null})' "$cross_records" >"$broken_draft"
+three_refs="$test_root/continuation-three-refs.json"
+printf '%s\n' '[{"agent":"beta","source_id":"beta:F-001"},{"agent":"gamma","source_id":"gamma:F-002"},{"agent":"gamma","source_id":"gamma:F-003"}]' >"$three_refs"
+CONTINUATION_DROP_IDS='alpha:C-002'
+assert_true 'a draft with a broken record yields a continuation state' \
+    build_continuation_state cross "$broken_draft" "$three_refs" "$continuation_kept" "$continuation_pending"
+CONTINUATION_DROP_IDS=''
+assert_eq '1' "$(grep -c '' "$continuation_kept")" 'the broken record is not kept'
+assert_eq 'gamma:gamma:F-002,gamma:gamma:F-003' \
+    "$(jq -r 'map(.agent + ":" + .source_id) | join(",")' "$continuation_pending")" \
+    'and its ref is asked again with the unanswered one'
+
 # A continuation may only append. The findings the draft already produced must
 # survive the merge unchanged, in their original order.
 merged_records="$test_root/cross-merged.json"
