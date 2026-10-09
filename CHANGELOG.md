@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-10-09
+
 ### Changed
 
 - The Codex quota is read again before every phase, not only when the run starts. A Codex
