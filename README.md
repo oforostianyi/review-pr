@@ -621,7 +621,7 @@ To refuse a run that would start a Codex agent below a threshold, set it in the 
 "quota": {"codex": {"minimum_remaining_percent": 15}}
 ```
 
-Every window counts: the run stops before it starts, naming the window and its reset time. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
+Every window counts: the run stops before it starts, naming the window and its reset time. The quota is read again before every phase, since one review spends a good share of the five-hour window: a Codex reviewer whose quota has run below the threshold is not started for that phase and counts as a reviewer the phase lost, so the quorum decides whether the run goes on without it; a Codex synthesizer short of quota fails the final or the comparison before it starts, with every input kept for `--run` to resume. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
 
 ## Reviewing the same head again
 

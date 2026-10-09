@@ -116,6 +116,32 @@ warning=$(check_codex_quota_before_run all 2>&1) && unknown_status=0 || unknown_
 assert_eq 0 "$unknown_status" 'an unreadable quota is not an exhausted one: the run goes on'
 assert_true 'and the log says the check could not be made' grep -q 'could not be read' <<<"$warning"
 
+# The quota is read again before every phase (Tools 29182: a run started with
+# 15% left and Codex ran out of credits in its cross-review). A Codex reviewer
+# short of quota is not started for the phase; others are untouched.
+QUOTA_CODEX_MINIMUM=15
+fixture '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":95,"windowDurationMins":300,"resetsAt":1790709167}}}}'
+skip_log=$(codex_agents_short_of_quota cross-review claude codex 2>&1)
+codex_agents_short_of_quota cross-review claude codex 2>/dev/null
+assert_eq 'codex' "${CODEX_QUOTA_SKIPPED_AGENTS[*]}" 'a Codex reviewer short of quota is set aside for the phase'
+assert_true 'and the log says which window and that it is not started' \
+    grep -q 'before the cross-review (5h has 5% left.*); not starting codex for it' <<<"$skip_log"
+codex_agents_short_of_quota cross-review claude 2>/dev/null
+assert_eq '' "${CODEX_QUOTA_SKIPPED_AGENTS[*]}" 'a phase without Codex does not read the quota'
+fixture '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":50,"windowDurationMins":300}}}}'
+codex_agents_short_of_quota cross-review claude codex 2>/dev/null
+assert_eq '' "${CODEX_QUOTA_SKIPPED_AGENTS[*]}" 'and one with enough left starts Codex'
+QUOTA_CODEX_MINIMUM=""
+codex_agents_short_of_quota cross-review claude codex 2>/dev/null
+assert_eq '' "${CODEX_QUOTA_SKIPPED_AGENTS[*]}" 'with no threshold configured nothing is set aside'
+QUOTA_CODEX_MINIMUM=15
+fixture '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":95,"windowDurationMins":300}}}}'
+FINAL_SYNTHESIZER=codex
+final_status=0; run_final_synthesis "$suite_root/final-error.log" 2>/dev/null || final_status=$?
+assert_eq 1 "$final_status" 'a Codex synthesizer short of quota does not start the final'
+assert_true 'and the failure reason names the quota' grep -q '^Codex quota below 15% before the final synthesis' <<<"$FINAL_FAILURE_REASON"
+FINAL_SYNTHESIZER=claude
+
 # The command itself: the table, --json, the exit codes and the arguments it
 # refuses. A window without usedPercent prints "?" and keeps its reset time; an
 # empty field once let the epoch slide into the percentage column.

@@ -189,6 +189,9 @@ NDJSON_AMENDMENT_TRIED=false
 QUOTA_MODE=false
 QUOTA_JSON=false
 QUOTA_CODEX_MINIMUM=""
+CODEX_QUOTA_SHORTFALL=""
+CODEX_QUOTA_SUMMARY=""
+declare -a CODEX_QUOTA_SKIPPED_AGENTS=()
 NDJSON_SALVAGE_DROPPED_IDS=()
 NDJSON_SALVAGE_UNREADABLE_IDS=()
 NDJSON_SALVAGE_UNPARSEABLE_LINES=0
@@ -519,23 +522,58 @@ run_uses_codex() {
 # it resets. An unreadable quota is not an exhausted one: the run goes on, and
 # the log says the check could not be made.
 check_codex_quota_before_run() {
-    local scope=$1 quota status=0 low summary
+    local scope=$1
 
     [[ -n "$QUOTA_CODEX_MINIMUM" ]] || return 0
     run_uses_codex "$scope" || return 0
+    if codex_quota_short; then
+        die "Codex quota is below quota.codex.minimum_remaining_percent (${QUOTA_CODEX_MINIMUM}%): ${CODEX_QUOTA_SHORTFALL}. Not starting a run that uses Codex"
+    fi
+    log "Codex quota: ${CODEX_QUOTA_SUMMARY:-no windows reported}"
+}
+
+# Reads the Codex quota and says whether a window is below
+# quota.codex.minimum_remaining_percent, naming it in CODEX_QUOTA_SHORTFALL.
+# An unreadable quota is not a short one: the caller goes on, and the log says
+# the check could not be made.
+codex_quota_short() {
+    local quota status=0
+
+    CODEX_QUOTA_SHORTFALL="" CODEX_QUOTA_SUMMARY=""
+    [[ -n "$QUOTA_CODEX_MINIMUM" ]] || return 1
     quota=$(read_codex_quota) || status=$?
     if (( status != 0 )); then
         log "WARNING: the Codex quota could not be read ($(jq -r '.error // "unknown error"' <<<"$quota")); going on without the check"
-        return 0
+        return 1
     fi
-    summary=$(jq -r '[.windows[] | select(.remaining_percent != null) | "\(.name) \(.remaining_percent)% left"] | join(", ")' <<<"$quota")
-    low=$(jq -r --argjson minimum "$QUOTA_CODEX_MINIMUM" '[.windows[]
+    CODEX_QUOTA_SUMMARY=$(jq -r '[.windows[] | select(.remaining_percent != null) | "\(.name) \(.remaining_percent)% left"] | join(", ")' <<<"$quota")
+    CODEX_QUOTA_SHORTFALL=$(jq -r --argjson minimum "$QUOTA_CODEX_MINIMUM" '[.windows[]
         | select(.remaining_percent != null and .remaining_percent < $minimum)
         | "\(.name) has \(.remaining_percent)% left" + (if .reset_at then " until \(.reset_at)" else "" end)] | join("; ")' <<<"$quota")
-    if [[ -n "$low" ]]; then
-        die "Codex quota is below quota.codex.minimum_remaining_percent (${QUOTA_CODEX_MINIMUM}%): ${low}. Not starting a run that uses Codex"
-    fi
-    log "Codex quota: ${summary:-no windows reported}"
+    [[ -n "$CODEX_QUOTA_SHORTFALL" ]]
+}
+
+# The quota is read again before every phase, not only when the run starts: one
+# review spends 20-35% of the five-hour window, and on Tools 29182 (2026-10-08) a
+# run that started with exactly 15% left had Codex fail its cross-review twice
+# with "workspace is out of credits". A Codex reviewer whose quota has run below
+# the minimum is not started for the phase; it counts as a reviewer the phase
+# lost, so the quorum decides whether the phase goes on without it.
+codex_agents_short_of_quota() {
+    local phase=$1
+    shift
+    local agent
+    local -a codex_agents=()
+
+    CODEX_QUOTA_SKIPPED_AGENTS=()
+    [[ -n "$QUOTA_CODEX_MINIMUM" ]] || return 0
+    for agent in "$@"; do
+        [[ "$(agent_type "$agent")" != codex ]] || codex_agents+=("$agent")
+    done
+    (( ${#codex_agents[@]} > 0 )) || return 0
+    codex_quota_short || return 0
+    CODEX_QUOTA_SKIPPED_AGENTS=("${codex_agents[@]}")
+    log "Codex quota is below ${QUOTA_CODEX_MINIMUM}% before the ${phase} (${CODEX_QUOTA_SHORTFALL}); not starting ${codex_agents[*]} for it"
 }
 
 usage() {
@@ -10031,6 +10069,20 @@ run_review_phase() {
     PHASE_AGENT_STATUSES=()
     PHASE_ATTEMPT_FAILURES=()
     prepare_dashboard_phase "$dashboard_section" "${agents[@]}"
+    codex_agents_short_of_quota "$phase" "${agents[@]}"
+    if (( ${#CODEX_QUOTA_SKIPPED_AGENTS[@]} > 0 )); then
+        round_agents=()
+        for agent in "${agents[@]}"; do
+            if [[ " ${CODEX_QUOTA_SKIPPED_AGENTS[*]} " == *" ${agent} "* ]]; then
+                now=$(date +%s)
+                exhausted_failures+=("${agent} (Codex quota below ${QUOTA_CODEX_MINIMUM}%: ${CODEX_QUOTA_SHORTFALL}; 0 attempts)")
+                PHASE_AGENT_STATUSES[$agent]=failed
+                set_dashboard_status "$dashboard_section" "$agent" FAILED "" "$now" "$now" ""
+            else
+                round_agents+=("$agent")
+            fi
+        done
+    fi
 
     if (( concurrency == 0 || concurrency > ${#agents[@]} )); then
         concurrency=${#agents[@]}
@@ -12525,6 +12577,10 @@ run_comparison_synthesis() {
     local comparison_draft=""
     local -a comparison_prompt_arguments=()
 
+    if [[ "$(agent_type "$FINAL_SYNTHESIZER")" == codex ]] && codex_quota_short; then
+        COMPARISON_FAILURE_REASON="Codex quota below ${QUOTA_CODEX_MINIMUM}% before the standalone comparison: ${CODEX_QUOTA_SHORTFALL}"
+        return 1
+    fi
     new_temp_file "comparison-prompt"; comparison_prompt=$NEW_TEMP_FILE
     new_temp_file "comparison-output"; comparison_output=$NEW_TEMP_FILE
     new_temp_file "comparison-log"; comparison_log=$NEW_TEMP_FILE
@@ -13061,6 +13117,10 @@ run_final_synthesis() {
     local agent
     local -a primary_sources=() cross_sources=()
 
+    if [[ "$(agent_type "$FINAL_SYNTHESIZER")" == codex ]] && codex_quota_short; then
+        FINAL_FAILURE_REASON="Codex quota below ${QUOTA_CODEX_MINIMUM}% before the final synthesis: ${CODEX_QUOTA_SHORTFALL}"
+        return 1
+    fi
     survivor_agents primary primary_sources
     survivor_agents cross cross_sources
     FINAL_PROMPT_ARGUMENTS=()

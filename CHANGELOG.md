@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Changed
+
+- The Codex quota is read again before every phase, not only when the run starts. A Codex
+  reviewer whose quota has run below `quota.codex.minimum_remaining_percent` is not started for
+  that phase and counts as a reviewer the phase lost, so the quorum decides whether the run goes
+  on without it; a Codex synthesizer short of quota fails the final or the comparison before it
+  starts. On Tools 29182 a run started with exactly 15% left of the five-hour window, and Codex
+  failed its cross-review twice with "workspace is out of credits".
+
 ## [1.25.2] - 2026-10-08
 
 ### Fixed
