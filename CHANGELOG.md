@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.26.1] - 2026-10-12
+
 ### Fixed
 
 - A finding still missing its failure scenario, recommendation or anchor after the field amendment
