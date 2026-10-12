@@ -6170,13 +6170,20 @@ ndjson_failure_is_truncation() {
 # repair failed and the salvage left two refs without its verdict. Prints the
 # source ids of the broken records when every problem is an unanswered ref, the
 # missing terminal record, or a field of one record.
+#
+# With "content" as the second argument no ref need be unanswered, but every
+# broken field must be content only the agent can write -- a failure scenario,
+# a recommendation or an anchor -- which the field amendment already asked for
+# and did not get. On ListingSyncer 973 (2026-10-12) Pi answered the amendment
+# for one of two findings and the other was dropped; the schema repair that came
+# next runs without tools and may not write content either.
 ndjson_failure_continuation_drops() {
-    local detail=$1
+    local detail=$1 mode=${2:-refs}
     local remainder=$detail
-    local item missing=false
+    local item field missing=false
     local -a drops=()
 
-    [[ "$detail" == *'source_refs.missing['* ]] || return 1
+    [[ "$mode" == content || "$detail" == *'source_refs.missing['* ]] || return 1
     while [[ -n "$remainder" ]]; do
         if [[ "$remainder" == *', '* ]]; then
             item=${remainder%%, *}
@@ -6189,6 +6196,13 @@ ndjson_failure_continuation_drops() {
             stream.no_complete) ;;
             'source_refs.missing['*']') missing=true ;;
             'finding['*'].'*)
+                field=${item##*].}
+                if [[ "$mode" == content ]]; then
+                    case "$field" in
+                        failure_scenario | recommendation | anchor) ;;
+                        *) return 1 ;;
+                    esac
+                fi
                 item=${item#finding[}
                 item=${item%%]*}
                 [[ "$item" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
@@ -6197,7 +6211,7 @@ ndjson_failure_continuation_drops() {
             *) return 1 ;;
         esac
     done
-    [[ "$missing" == true ]] || return 1
+    [[ "$missing" == true || ( "$mode" == content && ${#drops[@]} -gt 0 ) ]] || return 1
     printf '%s' "${drops[*]}"
 }
 
@@ -10258,6 +10272,8 @@ run_review_phase() {
                 elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }"); then
                     cross_recovery=attempt_cross_ndjson_continuation
                     activity_log "Cross-review from ${agent} left refs unanswered and broke records ${CONTINUATION_DROP_IDS}; asking it for those refs again in a continuation"
+                elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }" content); then
+                    cross_recovery=attempt_cross_ndjson_continuation
                 else
                     CONTINUATION_DROP_IDS=""
                 fi
@@ -12949,6 +12965,8 @@ run_final_synthesis_attempt() {
             elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }"); then
                 final_recovery=attempt_final_ndjson_continuation
                 activity_log "Final synthesis left refs unanswered and broke records ${CONTINUATION_DROP_IDS}; asking for those refs again in a continuation"
+            elif CONTINUATION_DROP_IDS=$(ndjson_failure_continuation_drops "${FINDING_CONTRACT_FAILURE_REASON#*: }" content); then
+                final_recovery=attempt_final_ndjson_continuation
             else
                 CONTINUATION_DROP_IDS=""
             fi

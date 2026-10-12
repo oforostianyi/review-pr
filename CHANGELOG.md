@@ -6,6 +6,11 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ### Fixed
 
+- A finding still missing its failure scenario, recommendation or anchor after the field amendment
+  is set aside and its ref asked again in a continuation, instead of going to the schema repair,
+  which may not write content. On ListingSyncer 973 Pi amended one of two findings, and the other
+  was dropped with its verdict.
+
 - A cross-review or final stream that left source refs unanswered and also broke some records is
   continued instead of going to the schema repair, which runs without tools and cannot add the
   missing verdicts. The broken records are set aside and their refs asked again with the

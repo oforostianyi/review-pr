@@ -417,6 +417,18 @@ assert_false 'broken records without an unanswered ref stay with the other repai
     ndjson_failure_continuation_drops 'finding[alpha:C-002].anchor'
 assert_false 'an unknown source ref still disqualifies continuation' \
     ndjson_failure_continuation_drops 'source_refs.missing[beta:beta:F-001], source_refs.unknown[beta:beta:F-009]'
+# A failure scenario the amendment did not get back (Pi on ListingSyncer 973) is
+# content only the agent can write: the record goes back to a continuation.
+assert_eq 'x14' "$(ndjson_failure_continuation_drops 'finding[x14].failure_scenario' content)" \
+    'a record still missing its failure scenario is asked for again'
+assert_eq 'x11 x14' "$(ndjson_failure_continuation_drops 'finding[x11].failure_scenario, finding[x14].recommendation' content)" \
+    'and so is every record missing content'
+assert_false 'without the content mode a stream with no unanswered ref stays with the repair' \
+    ndjson_failure_continuation_drops 'finding[x14].failure_scenario'
+assert_false 'a structural field is left to the schema repair' \
+    ndjson_failure_continuation_drops 'finding[x14].keys' content
+assert_false 'and so is a stream with nothing broken at record level' \
+    ndjson_failure_continuation_drops 'stream.no_complete' content
 broken_draft="$test_root/cross-broken-and-truncated.ndjson"
 jq -c '.[0], (.[0] | .source_id = "alpha:C-002" | .source_refs = [{agent: "gamma", source_id: "gamma:F-002"}]
     | .anchor = {kind: "changed-line", file: null, start: null, end: null})' "$cross_records" >"$broken_draft"
