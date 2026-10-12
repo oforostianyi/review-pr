@@ -4,6 +4,17 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A record that closed an array inside the closing quote of its last string
+  (`...)]","failure_scenario":`) is mended without a model by moving the bracket past the quote.
+  On Tools 29269 Pi wrote one, the schema repair could not write the record again, and Pi spent
+  another 20 minutes reviewing the same diff.
+
+- A cross-review or final finding whose `contributing_agents` names other agents than its
+  `source_refs` gets the agents of those refs before validation. On Tools 29269 the final synthesis
+  added codex to a finding whose refs named only claude and pi, and the synthesis was run again.
+
 ## [1.26.1] - 2026-10-12
 
 ### Fixed

@@ -3951,7 +3951,10 @@ append_json_line() {
 # 957). Brackets outside strings are counted; one closer too many and each
 # closing bracket is tried away in turn, and a bracket is tried after each key
 # whose value is always an array but starts as a string; one or two too few and
-# closing braces are tried on the end. A closing bracket is never added: a line
+# closing braces are tried on the end, and so is moving a bracket written just
+# inside the closing quote of an array's last string out past it
+# ('...)]","failure_scenario":', Pi on Tools 29269, whose finding was then
+# written again from scratch). A closing bracket is never added: a line
 # that ends inside an array is a record cut off, whose missing entries no bracket
 # brings back, and mending it published the cut record as whole. A bracket removed too early can also parse, by pulling the
 # keys that follow into the object it left open (the anchor swallowing the
@@ -3965,7 +3968,7 @@ repair_json_brackets() {
     local line=$1
     local length=${#line} index character candidate parsed keys key
     local in_string=false escaped=false openers=0 closers=0 result="" best_keys=-1 tied=false
-    local -a closer_positions=() candidates=()
+    local -a closer_positions=() candidates=() transposed_positions=()
 
     for (( index = 0; index < length; index++ )); do
         character=${line:index:1}
@@ -3976,6 +3979,7 @@ repair_json_brackets() {
                 escaped=true
             elif [[ "$character" == '"' ]]; then
                 in_string=false
+                [[ "${line:index-1:1}" != ']' ]] || transposed_positions+=("$((index - 1))")
             fi
             continue
         fi
@@ -3996,7 +4000,12 @@ repair_json_brackets() {
                 candidates+=("${line/\"${key}\":\"/\"${key}\":[\"}")
             done
             ;;
-        -1) candidates=("${line}}") ;;
+        -1)
+            candidates=("${line}}")
+            for index in "${transposed_positions[@]}"; do
+                candidates+=("${line:0:index}\"]${line:index+2}")
+            done
+            ;;
         -2) candidates=("${line}}}") ;;
         *) return 1 ;;
     esac
@@ -4354,9 +4363,21 @@ resolve_anchor_paths() {
 # that wrote it, so a record that leaves the key out gets it. On Tools 29183
 # (2026-10-06) Pi left it out of all four findings, the stream failed, and the
 # retry spent another 21 minutes reviewing the same diff.
+#
+# A cross-review or final finding owes exactly the agents its source_refs name,
+# so contributing_agents is set to them when it says anything else. On Tools
+# 29269 (2026-10-12) the final synthesis added codex to a finding whose refs
+# named only claude and pi, and the whole synthesis was run again.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 noun language
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 derived=0 noun language
+    local derived_defs='
+        def ref_agents: [.source_refs[].agent] | unique;
+        def derivable_contributors:
+            (.source_refs | type == "array" and length > 0
+                and all(.[]; type == "object" and (.agent | type == "string" and length > 0)))
+            and (ref_agents as $agents | (.contributing_agents | type == "array" and all(.[]; type == "string")
+                and (sort == $agents)) | not);'
 
     resolve_anchor_paths "$phase" "$agent" "$records_file" "$quiet"
     case "$phase" in
@@ -4384,10 +4405,12 @@ fill_presentation_defaults() {
         and .anchor.start == null and .anchor["end"] == null)] | length' "$records_file" 2>/dev/null) || return 0
     if [[ "$phase" == primary && -n "$agent" ]]; then
         contributors=$(jq '[.[] | select(.record == "finding" and (has("contributing_agents") | not))] | length' "$records_file" 2>/dev/null) || return 0
+    else
+        derived=$(jq "$derived_defs"'[.[] | select(.record == "finding" and derivable_contributors)] | length' "$records_file" 2>/dev/null) || return 0
     fi
-    (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors > 0 )) || return 0
+    (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors + derived > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
-    jq --arg phase "$phase" --arg language "$language" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS"'
+    jq --arg phase "$phase" --arg language "$language" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS$derived_defs"'
         def file_note($file):
             if $language == "UK" then "Файл: `" + $file + "`." else "File: `" + $file + "`." end;
         def decode_prose:
@@ -4416,6 +4439,8 @@ fill_presentation_defaults() {
                then . + {include_in_rejected_summary: false} else . end)
             | (if $phase == "primary" and $agent != "" and (has("contributing_agents") | not)
                then . + {contributing_agents: [$agent]} else . end)
+            | (if $phase != "primary" and derivable_contributors
+               then .contributing_agents = ref_agents else . end)
             | (if $phase != "primary" and (.classification | IN("REJECTED", "UNCERTAIN"))
                then (if has("failure_scenario") then . else . + {failure_scenario: null} end)
                     | (if has("recommendation") then . else . + {recommendation: null} end)
@@ -4443,6 +4468,10 @@ fill_presentation_defaults() {
     if (( contributors > 0 )); then
         noun=findings; (( contributors != 1 )) || noun=finding
         log "Set contributing_agents to [${agent}] for ${contributors} primary ${noun} from ${agent} that left it out"
+    fi
+    if (( derived > 0 )); then
+        noun=findings; (( derived != 1 )) || noun=finding
+        log "Set contributing_agents to the agents of its source_refs for ${derived} ${phase} ${noun}${agent:+ from ${agent}} that named others"
     fi
     if (( flags > 0 )); then
         noun=findings; (( flags != 1 )) || noun=finding

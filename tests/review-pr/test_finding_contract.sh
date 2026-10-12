@@ -115,6 +115,30 @@ assert_eq '["codex"]|["codex"]' "$(jq -r '[.findings[].contributing_agents | toj
     'each finding names the reviewer that wrote it'
 assert_file_contains "$contributors_log" 'Set contributing_agents to [codex] for 2 primary findings from codex that left it out' \
     'and the log says so'
+# A cross-review or final finding owes exactly the agents its source_refs name;
+# the final synthesis on Tools 29269 (2026-10-12) added one more and was run
+# again. Any other value is set to them, a value already right in another order
+# is kept as written, and a record without usable refs is left to validation.
+derived_records="$test_root/derived-contributors.json"
+jq -n '[
+    {record: "finding", source_id: "f05", classification: "CONFIRMED",
+        source_refs: [{agent: "claude", source_id: "x05"}, {agent: "pi", source_id: "x29"}],
+        contributing_agents: ["claude", "codex", "pi"], existing_feedback: {state: "new", thread_ids: []},
+        include_in_rejected_summary: false},
+    {record: "finding", source_id: "f06", classification: "CONFIRMED",
+        source_refs: [{agent: "pi", source_id: "x30"}, {agent: "claude", source_id: "x06"}],
+        contributing_agents: ["pi", "claude"], existing_feedback: {state: "new", thread_ids: []},
+        include_in_rejected_summary: false},
+    {record: "finding", source_id: "f07", classification: "CONFIRMED", source_refs: [],
+        contributing_agents: ["codex"], existing_feedback: {state: "new", thread_ids: []},
+        include_in_rejected_summary: false}
+]' >"$derived_records"
+derived_log=$(fill_presentation_defaults final claude "$derived_records" 2>&1)
+assert_eq '["claude","pi"]|["pi","claude"]|["codex"]' \
+    "$(jq -r 'map(.contributing_agents | tojson) | join("|")' "$derived_records")" \
+    'a final finding naming an agent its refs do not gets the agents of its refs'
+assert_true 'and the log says so' \
+    grep -q 'Set contributing_agents to the agents of its source_refs for 1 final finding from claude that named others' <<<"$derived_log"
 # A stream written as one JSON array, a record per line closed by a comma
 # between "[" and "]" lines (Pi on Tools 29174, 2026-10-07: five of six findings
 # dropped), or as a single-line array, says the same records in another
@@ -1788,6 +1812,12 @@ assert_eq "$bracket_expected" "$(repair_json_brackets "$(sed 's/\],"existing_fee
     'a record closed early is closed where it ends, not where the anchor ends'
 assert_eq "$bracket_expected" "$(repair_json_brackets "$(sed 's/"evidence":\["/"evidence":"/' <<<"$bracket_fixture")")" \
     'an array opened without its bracket gets it'
+# Pi on Tools 29269 closed the evidence array inside its last string.
+assert_eq "$bracket_expected" "$(repair_json_brackets "$(sed 's/path\."\],"failure_scenario"/path.]","failure_scenario"/' <<<"$bracket_fixture")")" \
+    'a bracket written inside the closing quote of an array is moved out past it'
+assert_eq "$(jq -c '.evidence = ["Read [the docs]"]' <<<"$bracket_fixture")" \
+    "$(repair_json_brackets "$(jq -c '.evidence = ["Read [the docs]"]' <<<"$bracket_fixture" | sed 's/}$//')")" \
+    'while a string that ends in its own bracket keeps it when the closing brace is left out'
 assert_false 'a line broken by a bare word is left for the repair pass' \
     repair_json_brackets "${bracket_fixture%\}},oops}"
 assert_false 'and so is one cut off inside a string' \

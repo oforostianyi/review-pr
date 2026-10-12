@@ -407,7 +407,9 @@ keys remain language-independent.
   `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
   CONFIRMED finding owes both and still fails without them. A primary finding without
   `contributing_agents` gets `[<reviewer>]`, the only value a primary finding can have; one that
-  names another agent still fails.
+  names another agent still fails. A cross-review or final finding whose `contributing_agents` is
+  missing or names other agents than its `source_refs` gets the agents of those refs, the only
+  value it can have; one whose refs are themselves unusable still fails.
   All of these are filled in before validation, without a model, and the console says so; a key a
   `complete` record carries that the contract does not define is dropped the same way. A repair
   baseline and the findings a continuation keeps get the same values, and the same correction of a
@@ -423,9 +425,11 @@ keys remain language-independent.
   the pull request did not change, it is left as written and fails as before. Any other missing
   key still fails its record, because it would have to be made up. A record whose brackets alone
   are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
-  the end, an array opened without its bracket -- is mended without a model when exactly one
+  the end, an array opened without its bracket, an array closed inside the closing quote of its
+  last string (`...)]","failure_scenario":`) -- is mended without a model when exactly one
   reading of it parses as one object: brackets outside strings are counted, one too many is tried
-  away closer by closer and one or two too few closing braces are tried on the end, and the reading that keeps the
+  away closer by closer and one or two too few closing braces are tried on the end; with one too
+  few, a bracket written just before a closing quote is also tried just after it, and the reading that keeps the
   most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
   otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
   A string value split in two -- `"recommendation":"Do this.","+ and that.",` -- leaves its second
