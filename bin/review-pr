@@ -22,6 +22,8 @@ USING_LEGACY_REPORTS=false
 WORK_DIR=""
 SCRATCH_DIR=""
 SCRATCH_DIR_OWNED=false
+SCRATCH_DIR_MOUNT=""
+declare -A DIRECTORY_MOUNTS=()
 LOCK_DIR=""
 LOCK_ACQUIRED=false
 
@@ -1142,7 +1144,12 @@ cleanup() {
     for temp_file in "${TEMP_FILES[@]}"; do
         [[ ! -e "$temp_file" ]] || leftover_temp_files+=("$temp_file")
     done
-    (( ${#leftover_temp_files[@]} == 0 )) || rm -f -- "${leftover_temp_files[@]}"
+    # In chunks, so a very long run cannot exceed the argument limit and leave
+    # every file behind.
+    local chunk_start
+    for (( chunk_start = 0; chunk_start < ${#leftover_temp_files[@]}; chunk_start += 500 )); do
+        rm -f -- "${leftover_temp_files[@]:chunk_start:500}"
+    done
     if [[ "$SCRATCH_DIR_OWNED" == true && -n "$SCRATCH_DIR" ]]; then
         rm -rf -- "$SCRATCH_DIR"
     fi
@@ -3979,6 +3986,58 @@ setup_scratch_dir() {
         return 0
     fi
     SCRATCH_DIR_OWNED=true
+    directory_mount SCRATCH_DIR_MOUNT "$SCRATCH_DIR"
+}
+
+# The mount point a directory lives on, remembered per directory: a run moves
+# files into only a handful of them.
+directory_mount() {
+    local target=$1 directory=$2 mount
+
+    if [[ -z "${DIRECTORY_MOUNTS[$directory]+set}" ]]; then
+        mount=$(df -P "$directory" 2>/dev/null | awk 'NR == 2 { print $NF }') || mount=""
+        DIRECTORY_MOUNTS[$directory]=$mount
+    fi
+    printf -v "$target" '%s' "${DIRECTORY_MOUNTS[$directory]}"
+}
+
+# mv, except for a file leaving the scratch directory for another file system.
+# mv copies such a file straight into its destination, so for the length of the
+# copy the artifact is a partial file, and a run killed then leaves one that a
+# resumed run accepts. It is copied next to the destination under a hidden name
+# instead and renamed into place, which is atomic, as every artifact was before
+# the scratch directory. Only the two-path forms are interpreted; anything else
+# goes to mv as written.
+mv() {
+    local source target target_mount staged
+
+    if [[ "${1:-}" == -- && $# -eq 3 ]]; then
+        source=$2 target=$3
+    elif [[ $# -eq 2 && "${1:-}" != -* ]]; then
+        source=$1 target=$2
+    else
+        command mv "$@"
+        return
+    fi
+    if [[ -z "$SCRATCH_DIR" || -z "$SCRATCH_DIR_MOUNT" || "$source" != "$SCRATCH_DIR"/* \
+        || "$target" == "$SCRATCH_DIR"/* ]]; then
+        command mv -- "$source" "$target"
+        return
+    fi
+    [[ ! -d "$target" ]] || target="${target%/}/${source##*/}"
+    [[ "$target" == */* ]] || target="./${target}"
+    directory_mount target_mount "${target%/*}"
+    if [[ -z "$target_mount" || "$target_mount" == "$SCRATCH_DIR_MOUNT" ]]; then
+        command mv -- "$source" "$target"
+        return
+    fi
+    make_temp_file staged "${target%/*}/.${target##*/}.publish." || return 1
+    if command cp -p -- "$source" "$staged" && command mv -f -- "$staged" "$target"; then
+        command rm -f -- "$source"
+        return 0
+    fi
+    command rm -f -- "$staged"
+    return 1
 }
 
 # Creates an empty file named by the prefix and six random characters, readable
@@ -3987,13 +4046,16 @@ setup_scratch_dir() {
 # that way. noclobber makes the creation exclusive, so an existing name is never
 # taken over; a directory that cannot take the file fails the call.
 make_temp_file() {
-    local target=$1 prefix=$2 candidate suffix index restore_noclobber=false
+    local target=$1 prefix=$2 candidate suffix index attempt restore_noclobber=false
     local alphabet=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 
     [[ -o noclobber ]] || restore_noclobber=true
     set -o noclobber
     umask 077
-    while true; do
+    # Bounded: a name already taken is a one-in-billions draw, so failing a
+    # hundred times in a row is a full disk, a quota or a read-only mount, and
+    # trying for ever would spin instead of failing the way mktemp did.
+    for (( attempt = 0; attempt < 100; attempt++ )); do
         suffix=""
         for index in 1 2 3 4 5 6; do
             suffix+=${alphabet:SRANDOM % 62:1}
@@ -4006,6 +4068,7 @@ make_temp_file() {
             candidate=""
             break
         fi
+        candidate=""
     done
     umask "$REVIEW_PR_UMASK"
     [[ "$restore_noclobber" != true ]] || set +o noclobber
@@ -10922,7 +10985,8 @@ create_full_manifest() {
         agent_rows+=("$agent" "$(agent_label "$agent")" "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
             "${PRIMARY_OUTPUTS[$agent]##*/}" "${CROSS_OUTPUTS[$agent]##*/}")
     done
-    eval "$(jq -nr --arg stem "$REPORT_STEM" '
+    local manifest_maps
+    manifest_maps=$(jq -nr --arg stem "$REPORT_STEM" '
         [$ARGS.positional | range(0; length; 5) as $i | .[$i:$i + 5]] as $rows
         | def map_of(value): reduce $rows[] as $row ({}; . + {($row[0]): ($row | value)});
         "labels_json=\(map_of(.[1]) | tojson | @sh)",
@@ -10935,7 +10999,8 @@ create_full_manifest() {
         "cross_raw_json=\(map_of("\($stem)-cross-\(.[0])-raw.ndjson") | tojson | @sh)",
         "cross_findings_json=\(map_of("\($stem)-cross-\(.[0])-findings.json") | tojson | @sh)",
         "cross_usage_json=\(map_of("\($stem)-cross-\(.[0])-usage.json") | tojson | @sh)"
-    ' --args "${agent_rows[@]}")"
+    ' --args "${agent_rows[@]}") || die "Could not build the per-agent maps of the run manifest"
+    eval "$manifest_maps"
 
     MANIFEST_FILE="${WORK_DIR}/${REPORT_STEM}-manifest.json"
     assert_new_target "$MANIFEST_FILE"
@@ -11159,11 +11224,13 @@ update_full_manifest_phase() {
         fi
     done
     if (( ${#status_rows[@]} > 0 )); then
-        eval "$(jq -nr '
+        local status_maps
+        status_maps=$(jq -nr '
             [$ARGS.positional | range(0; length; 3) as $i | .[$i:$i + 3]] as $rows
             | "attempts_json=\(reduce ($rows[] | select(.[0] == "attempts")) as $row ({}; . + {($row[1]): ($row[2] | fromjson)}) | tojson | @sh)",
               "agent_status_json=\(reduce ($rows[] | select(.[0] == "status")) as $row ({}; . + {($row[1]): $row[2]}) | tojson | @sh)"
-        ' --args "${status_rows[@]}")"
+        ' --args "${status_rows[@]}") || die "Could not build the attempt and status maps of the run manifest"
+        eval "$status_maps"
     fi
     atomic_manifest_update \
         '(.attempts[$phase] // {}) as $previous_attempts |

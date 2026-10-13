@@ -103,10 +103,8 @@ report_root_of() {
 # A final rerun is named by the second it starts in, so two reruns of the same
 # run within one second would share a name; on a fast machine they did.
 wait_for_next_second() {
-    local second=$EPOCHSECONDS
-    while (( EPOCHSECONDS == second )); do
-        sleep 0.05
-    done
+    local fraction=${EPOCHREALTIME#*.}
+    sleep "0.$(printf '%06d' $((1000000 - 10#$fraction)))"
 }
 
 run_full_success_case() {

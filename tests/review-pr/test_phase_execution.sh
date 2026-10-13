@@ -481,6 +481,17 @@ assert_eq 50 "$(find "$temp_dir" -name '.many.*' | wc -l | tr -d ' ')" 'fifty ca
 made_status=0
 (make_temp_file made_file "$suite_root/missing/.fixture.") 2>/dev/null || made_status=$?
 assert_eq 1 "$made_status" 'a directory that cannot take the file fails the call'
+# A failure that is not the directory's (here: no file descriptor left, as a
+# full disk or a quota would also do) ends the call instead of retrying for ever.
+made_status=0
+(
+    ulimit -n 32
+    for spare_fd in {3..31}; do
+        eval "exec ${spare_fd}</dev/null" 2>/dev/null || true
+    done
+    make_temp_file made_file "$temp_dir/.no-fd."
+) 2>/dev/null || made_status=$?
+assert_eq 1 "$made_status" 'a creation that keeps failing gives up rather than spinning'
 
 # A run keeps its intermediate files in a scratch directory of its own, removes
 # the ones left by runs that are gone, and stays in the work directory when told.
@@ -501,6 +512,37 @@ SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
 REVIEW_PR_SCRATCH_DIR="$suite_root/scratch-link" setup_scratch_dir
 assert_eq '' "$SCRATCH_DIR" 'a root that is a symbolic link is not used'
 SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+
+# A file leaving the scratch directory for another file system is copied next
+# to its destination and renamed into place, so the destination never holds a
+# partial file; within one file system it is an ordinary rename.
+publish_root=${TMPDIR:-/tmp}
+other_root=/tmp
+[[ "$(df -P "$publish_root" | awk 'NR == 2 { print $NF }')" != "$(df -P "$other_root" | awk 'NR == 2 { print $NF }')" ]] \
+    || other_root=""
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_MOUNT=""
+REVIEW_PR_SCRATCH_DIR="$suite_root/publish-scratch" setup_scratch_dir
+printf 'same file system\n' >"$SCRATCH_DIR/same.txt"
+mkdir -p "$suite_root/publish-target"
+mv -- "$SCRATCH_DIR/same.txt" "$suite_root/publish-target/same.txt"
+assert_eq 'same file system' "$(<"$suite_root/publish-target/same.txt")" 'a file moved within one file system arrives'
+assert_false 'and leaves the scratch directory' test -e "$SCRATCH_DIR/same.txt"
+if [[ -n "$other_root" ]]; then
+    publish_target=$(mktemp -d "$other_root/review-pr-publish.XXXXXX")
+    printf 'other file system\n' >"$SCRATCH_DIR/other.txt"
+    chmod 600 "$SCRATCH_DIR/other.txt"
+    mv -- "$SCRATCH_DIR/other.txt" "$publish_target/other.txt"
+    assert_eq 'other file system' "$(<"$publish_target/other.txt")" 'a file moved to another file system arrives whole'
+    assert_eq 600 "$(stat -c '%a' "$publish_target/other.txt" 2>/dev/null || stat -f '%Lp' "$publish_target/other.txt")" \
+        'with its mode'
+    assert_false 'and leaves the scratch directory' test -e "$SCRATCH_DIR/other.txt"
+    assert_eq '' "$(find "$publish_target" -name '.*.publish.*' -print)" 'with no staging file left behind'
+    rm -rf "$publish_target"
+else
+    pass 'no second file system to publish across here'
+fi
+rm -rf "$SCRATCH_DIR"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_MOUNT=""
 
 # Times are formatted by the shell instead of date, and must read the same as
 # date does, in the configured zone and in the machine's own.
