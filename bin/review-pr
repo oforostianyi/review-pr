@@ -2875,15 +2875,19 @@ append_resolved_pr_fact() {
     local ancestry_commit_source
     local url
 
-    state=$(jq -r '.state // "unknown"' <<<"$pull_json")
-    merged_json=$(jq -r 'if .merged == true or .merged_at != null then "true" else "false" end' <<<"$pull_json")
-    merged_at=$(jq -r '.merged_at // ""' <<<"$pull_json")
-    base_ref=$(jq -r '.base.ref // ""' <<<"$pull_json")
-    head_ref=$(jq -r '.head.ref // ""' <<<"$pull_json")
-    head_repository=$(jq -r '.head.repo.full_name // ""' <<<"$pull_json")
-    head_sha=$(jq -r '.head.sha // ""' <<<"$pull_json")
-    merge_commit_sha=$(jq -r '.merge_commit_sha // ""' <<<"$pull_json")
-    url=$(jq -r '.html_url // ""' <<<"$pull_json")
+    local pull_assignments
+    # One jq for the nine fields, each read as $(jq -r ...) read it.
+    pull_assignments=$(jq -r '
+        def text: if type == "string" then sub("\n+$"; "") else tojson end;
+        def assign($name; value): "\($name)=\(value | text | @sh)";
+        assign("state"; .state // "unknown"),
+        assign("merged_json"; if .merged == true or .merged_at != null then "true" else "false" end),
+        assign("merged_at"; .merged_at // ""), assign("base_ref"; .base.ref // ""),
+        assign("head_ref"; .head.ref // ""), assign("head_repository"; .head.repo.full_name // ""),
+        assign("head_sha"; .head.sha // ""), assign("merge_commit_sha"; .merge_commit_sha // ""),
+        assign("url"; .html_url // "")
+    ' <<<"$pull_json") || return 1
+    eval "$pull_assignments"
 
     ancestry_commit=$head_sha
     ancestry_commit_source=head_sha
@@ -14145,16 +14149,18 @@ if ! jq -e '
 ' <<<"$pr_metadata" >/dev/null; then
     die "GitHub CLI returned incomplete or invalid metadata for PR #${PR_NUMBER}"
 fi
-BASE_REF=$(jq -r '.baseRefName' <<<"$pr_metadata")
-HEAD_REF=$(jq -r '.headRefName' <<<"$pr_metadata")
-PR_TITLE=$(jq -r '.title' <<<"$pr_metadata")
-PR_URL=$(jq -r '.url' <<<"$pr_metadata")
-PR_BODY=$(jq -r '.body' <<<"$pr_metadata")
-PR_AUTHOR_LOGIN=$(jq -r '.author.login // ""' <<<"$pr_metadata")
-PR_AUTHOR_NAME=$(jq -r '.author.name // ""' <<<"$pr_metadata")
-PR_CHANGED_FILES=$(jq -r '.changedFiles' <<<"$pr_metadata")
-PR_ADDITIONS=$(jq -r '.additions' <<<"$pr_metadata")
-PR_DELETIONS=$(jq -r '.deletions' <<<"$pr_metadata")
+# One jq for every field, read the way $(jq -r ...) read each: a string without
+# its trailing newlines, anything else as JSON.
+pr_assignments=$(jq -r '
+    def text: if type == "string" then sub("\n+$"; "") else tojson end;
+    def assign($name; value): "\($name)=\(value | text | @sh)";
+    assign("BASE_REF"; .baseRefName), assign("HEAD_REF"; .headRefName),
+    assign("PR_TITLE"; .title), assign("PR_URL"; .url), assign("PR_BODY"; .body),
+    assign("PR_AUTHOR_LOGIN"; .author.login // ""), assign("PR_AUTHOR_NAME"; .author.name // ""),
+    assign("PR_CHANGED_FILES"; .changedFiles), assign("PR_ADDITIONS"; .additions),
+    assign("PR_DELETIONS"; .deletions)
+' <<<"$pr_metadata") || die "Could not read the metadata of PR #${PR_NUMBER}"
+eval "$pr_assignments"
 git check-ref-format --branch "$BASE_REF" >/dev/null 2>&1 || die "Invalid base branch returned by GitHub: ${BASE_REF}"
 git check-ref-format --branch "$HEAD_REF" >/dev/null 2>&1 || die "Invalid head branch returned by GitHub: ${HEAD_REF}"
 prepare_pr_display_metadata
