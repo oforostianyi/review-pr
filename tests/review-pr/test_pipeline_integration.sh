@@ -504,9 +504,11 @@ run_interrupt_case() {
     printf 'hang\n' >"$scenarios/beta-primary-review"
     : >"$events"
 
+    mkdir -p -- "$case_dir/scratch"
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
         REVIEW_PR_MOCK_EVENT_LOG="$events" \
+        REVIEW_PR_SCRATCH_DIR="$case_dir/scratch" \
         "$repo_root/bin/review-pr" --config "$config" 123 \
         >"$case_dir/output.txt" 2>"$case_dir/stderr.log" &
     pid=$!
@@ -523,6 +525,9 @@ run_interrupt_case() {
         fi
         sleep 0.05
     done
+    # Intermediate files are written in the scratch directory, not the work one.
+    assert_true 'a running review keeps its intermediate files in its scratch directory' \
+        test -n "$(find "$case_dir/scratch" -mindepth 2 -name '*.tmp.*' -print -quit)"
     kill -TERM "$pid"
     if wait "$pid"; then
         fail 'terminated pipeline unexpectedly exited successfully'
@@ -547,6 +552,8 @@ run_interrupt_case() {
     temp_artifact=$(find "$reviews" -type f -name '*.tmp.*' -print | sed -n '1p')
     [[ -z "$temp_artifact" ]] || fail "interrupted run left temporary artifact ${temp_artifact}"
     pass 'termination cleanup removes temporary artifacts'
+    assert_eq '' "$(find "$case_dir/scratch" -mindepth 1 -print | sed -n '1p')" \
+        'and the scratch directory of the run with everything in it'
 }
 
 run_facts_collection_failure_case() {

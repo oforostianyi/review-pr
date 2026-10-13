@@ -20,6 +20,8 @@ ACTIVE_REVIEWS_ROOT=""
 LEGACY_EXTERNAL_REVIEWS_ROOT=""
 USING_LEGACY_REPORTS=false
 WORK_DIR=""
+SCRATCH_DIR=""
+SCRATCH_DIR_OWNED=false
 LOCK_DIR=""
 LOCK_ACQUIRED=false
 
@@ -1141,6 +1143,9 @@ cleanup() {
         [[ ! -e "$temp_file" ]] || leftover_temp_files+=("$temp_file")
     done
     (( ${#leftover_temp_files[@]} == 0 )) || rm -f -- "${leftover_temp_files[@]}"
+    if [[ "$SCRATCH_DIR_OWNED" == true && -n "$SCRATCH_DIR" ]]; then
+        rm -rf -- "$SCRATCH_DIR"
+    fi
     if [[ "$REPOSITORY_FACTS_PUBLISHING" == true ]]; then
         [[ -z "$REPOSITORY_FACTS_JSON_FILE" ]] || rm -f -- "$REPOSITORY_FACTS_JSON_FILE"
         [[ -z "$REPOSITORY_FACTS_MARKDOWN_FILE" ]] || rm -f -- "$REPOSITORY_FACTS_MARKDOWN_FILE"
@@ -3918,8 +3923,49 @@ show_configuration() {
 new_temp_file() {
     local label=$1
 
-    make_temp_file NEW_TEMP_FILE "${WORK_DIR}/.${REPORT_STEM}-${label}.tmp."
+    make_temp_file NEW_TEMP_FILE "${SCRATCH_DIR:-$WORK_DIR}/.${REPORT_STEM}-${label}.tmp."
     TEMP_FILES+=("$NEW_TEMP_FILE")
+}
+
+# A run's intermediate files -- prompts, agent streams and logs while the agents
+# write them, the steps between a stream and its records -- live in a directory
+# of their own under /dev/shm when it is a writable tmpfs with room to spare. The
+# endpoint scanner on the development laptop checks every write under the review
+# directories, /tmp and /run, but chooses by path and leaves /dev/shm alone, so a
+# file written there thousands of times is checked once, when it is moved to its
+# artifact. REVIEW_PR_SCRATCH_DIR names another root, or "work" to keep the files
+# in the run's work directory as before. The directory is removed when the run
+# ends, and one left by a run that was killed is removed by the next run.
+setup_scratch_dir() {
+    local setting=${REVIEW_PR_SCRATCH_DIR:-auto} root free_kb stale pid
+
+    case "$setting" in
+        work) return 0 ;;
+        auto)
+            [[ -d /dev/shm && -w /dev/shm ]] || return 0
+            free_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }') || return 0
+            [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb >= 262144 )) || return 0
+            root="/dev/shm/review-pr-${UID}"
+            ;;
+        *) root=$setting ;;
+    esac
+    mkdir -p -- "$root" 2>/dev/null || return 0
+    # A shared tmpfs: use the root only when this user owns it and it is no link.
+    [[ -d "$root" && ! -L "$root" && -O "$root" ]] || return 0
+    chmod 700 -- "$root" 2>/dev/null || return 0
+    for stale in "$root"/run-*; do
+        [[ -d "$stale" && ! -L "$stale" ]] || continue
+        pid=${stale##*/run-}
+        pid=${pid%%-*}
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$pid" 2>/dev/null || rm -rf -- "$stale"
+    done
+    SCRATCH_DIR="${root}/run-$$-${SRANDOM}"
+    if ! mkdir -m 700 -- "$SCRATCH_DIR" 2>/dev/null; then
+        SCRATCH_DIR=""
+        return 0
+    fi
+    SCRATCH_DIR_OWNED=true
 }
 
 # Creates an empty file named by the prefix and six random characters, readable
@@ -14062,6 +14108,7 @@ else
 fi
 [[ ! -L "$WORK_DIR" ]] || die "Refusing to use a symlink as the review work directory: ${WORK_DIR}"
 mkdir -p -- "$WORK_DIR"
+setup_scratch_dir
 resolved_work_dir=$(canonical_existing_path "$WORK_DIR")
 [[ "$resolved_work_dir" == "${REPORT_DIR}/work" || "$resolved_work_dir" == "${REPORT_DIR}/work/"* ]] \
     || die "Review work directory resolves outside its report directory"

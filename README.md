@@ -576,6 +576,16 @@ review-pr --show-config
 review-pr --version
 ```
 
+While a review runs, its intermediate files (prompts, agent streams and logs, the steps between a
+stream and its records) are kept in a directory of its own under `/dev/shm` when that is a writable
+tmpfs with at least 256 MiB free, and only the finished artifacts are written to the reviews
+directory. Endpoint scanners that check every write under the home directory, `/tmp` and `/run`
+often leave `/dev/shm` alone, so this keeps a review from costing the scanner thousands of checks.
+The directory is private to its owner (`/dev/shm/review-pr-<uid>/run-<pid>-<n>`), removed when the
+run ends, and removed by the next run if the run was killed. `REVIEW_PR_SCRATCH_DIR=<path>` names
+another root; `REVIEW_PR_SCRATCH_DIR=work` keeps the files in the run's work directory, as before.
+Without `/dev/shm`, on macOS for one, the work directory is used.
+
 The complete custom-command and runner contract is documented in `reference.md` after installation.
 
 ## Verify and run

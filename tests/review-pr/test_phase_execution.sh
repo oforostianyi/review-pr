@@ -482,6 +482,26 @@ made_status=0
 (make_temp_file made_file "$suite_root/missing/.fixture.") 2>/dev/null || made_status=$?
 assert_eq 1 "$made_status" 'a directory that cannot take the file fails the call'
 
+# A run keeps its intermediate files in a scratch directory of its own, removes
+# the ones left by runs that are gone, and stays in the work directory when told.
+scratch_root="$suite_root/scratch-root"
+mkdir -p "$scratch_root/run-999999999-1" "$scratch_root/run-$$-2"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+REVIEW_PR_SCRATCH_DIR=work setup_scratch_dir
+assert_eq '' "$SCRATCH_DIR" '"work" keeps intermediate files in the work directory'
+REVIEW_PR_SCRATCH_DIR=$scratch_root setup_scratch_dir
+assert_true 'a configured root gets a directory for this run' test -d "$SCRATCH_DIR"
+assert_eq 700 "$(stat -c '%a' "$SCRATCH_DIR" 2>/dev/null || stat -f '%Lp' "$SCRATCH_DIR")" 'private to its owner'
+assert_false 'the directory of a run that is gone is removed' test -e "$scratch_root/run-999999999-1"
+assert_true 'the directory of a run still going is kept' test -d "$scratch_root/run-$$-2"
+new_temp_file scratch-fixture
+assert_eq "$SCRATCH_DIR" "${NEW_TEMP_FILE%/*}" 'temporary files are made there'
+ln -s "$scratch_root" "$suite_root/scratch-link"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+REVIEW_PR_SCRATCH_DIR="$suite_root/scratch-link" setup_scratch_dir
+assert_eq '' "$SCRATCH_DIR" 'a root that is a symbolic link is not used'
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+
 # Times are formatted by the shell instead of date, and must read the same as
 # date does, in the configured zone and in the machine's own.
 fixed_epoch=1760000000
