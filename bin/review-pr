@@ -9611,16 +9611,25 @@ activity_log() {
     fi
 }
 
+# Prints the elapsed time, or with a second argument stores it in that variable:
+# the dashboard redraws every second and formats one per row, and a $(...) for
+# each was a process each time.
 format_dashboard_elapsed() {
-    local total_seconds=$1
+    local total_seconds=$1 target=${2:-}
     local hours=$((total_seconds / 3600))
     local minutes=$(((total_seconds % 3600) / 60))
     local seconds=$((total_seconds % 60))
+    local formatted
 
     if (( hours > 0 )); then
-        printf '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
+        printf -v formatted '%02d:%02d:%02d' "$hours" "$minutes" "$seconds"
     else
-        printf '%02d:%02d' "$minutes" "$seconds"
+        printf -v formatted '%02d:%02d' "$minutes" "$seconds"
+    fi
+    if [[ -n "$target" ]]; then
+        printf -v "$target" '%s' "$formatted"
+    else
+        printf '%s' "$formatted"
     fi
 }
 
@@ -9782,15 +9791,19 @@ initialize_dashboard() {
     write_dashboard_state
 }
 
+# Stores a dashboard section's title in the named variable.
 dashboard_section_title() {
+    local title
+
     case "$1" in
-        primary) printf 'PRIMARY REVIEW' ;;
-        cross) printf 'CROSS-REVIEW' ;;
-        cross_inputs) printf 'CROSS-REVIEW INPUTS' ;;
-        final) printf 'FINAL SYNTHESIS' ;;
-        comparison) printf 'COMPARISON REPORT' ;;
-        *) printf '%s' "$1" ;;
+        primary) title='PRIMARY REVIEW' ;;
+        cross) title='CROSS-REVIEW' ;;
+        cross_inputs) title='CROSS-REVIEW INPUTS' ;;
+        final) title='FINAL SYNTHESIS' ;;
+        comparison) title='COMPARISON REPORT' ;;
+        *) title=$1 ;;
     esac
+    printf -v "$2" '%s' "$title"
 }
 
 write_dashboard_state() {
@@ -9951,7 +9964,7 @@ render_dashboard_snapshot() {
     local -a spinner_frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
     now=$EPOCHSECONDS
-    dashboard_elapsed=$(format_dashboard_elapsed "$((now - DASHBOARD_PIPELINE_STARTED_AT))")
+    format_dashboard_elapsed "$((now - DASHBOARD_PIPELINE_STARTED_AT))" dashboard_elapsed
     spinner=${spinner_frames[$((now % ${#spinner_frames[@]}))]}
     # Keep every decoration within the table width so it cannot wrap in a
     # narrow terminal. DASHBOARD_LINE_COUNT matches this fixed-height frame.
@@ -9960,7 +9973,7 @@ render_dashboard_snapshot() {
     else
         table_width=67
     fi
-    footer_separator=$(printf '%*s' "$table_width" '')
+    printf -v footer_separator '%*s' "$table_width" ''
     footer_separator=${footer_separator// /━}
     if [[ "$DASHBOARD_COLOR_ENABLED" == true ]]; then
         reset_color=$'\033[0m'
@@ -9992,10 +10005,10 @@ render_dashboard_snapshot() {
                 fi
                 printf '\033[2K\r\n' >&2
             fi
-            section_title=$(dashboard_section_title "$section")
+            dashboard_section_title "$section" section_title
             separator_length=$((table_width - 5 - ${#section_title}))
             (( separator_length >= 1 )) || separator_length=1
-            separator=$(printf '%*s' "$separator_length" '')
+            printf -v separator '%*s' "$separator_length" ''
             separator=${separator// /━}
             printf '\033[2K\r%s━━━ %s %s%s\n' \
                 "$title_color" \
@@ -10036,9 +10049,9 @@ render_dashboard_snapshot() {
         elapsed='-'
         if (( started_at > 0 )); then
             if (( finished_at > 0 )); then
-                elapsed=$(format_dashboard_elapsed "$((finished_at - started_at))")
+                format_dashboard_elapsed "$((finished_at - started_at))" elapsed
             else
-                elapsed=$(format_dashboard_elapsed "$((now - started_at))")
+                format_dashboard_elapsed "$((now - started_at))" elapsed
             fi
         fi
         dashboard_status_color "$status"
