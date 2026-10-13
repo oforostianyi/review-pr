@@ -4874,8 +4874,14 @@ unwrap_json_array_stream() {
     local file=$1 unwrapped_file rewritten_file first last line stripped records=0
 
     NDJSON_UNWRAPPED_ARRAY_RECORDS=0
-    first=$(grep -m1 -v '^[[:space:]]*$' "$file" || true)
-    last=$(grep -v '^[[:space:]]*$' "$file" | tail -n 1 || true)
+    # The first and last lines that are not blank, read in the shell rather than
+    # with grep, grep and tail on every stream.
+    first="" last=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ ! "$line" =~ ^[[:space:]]*$ ]] || continue
+        [[ -n "$first" ]] || first=$line
+        last=$line
+    done <"$file"
     new_temp_file 'unwrapped-array'; unwrapped_file=$NEW_TEMP_FILE
     if [[ "$first" =~ ^[[:space:]]*\[[[:space:]]*$ && "$last" =~ ^[[:space:]]*\][[:space:]]*$ ]]; then
         awk '
