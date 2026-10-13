@@ -22,8 +22,8 @@ USING_LEGACY_REPORTS=false
 WORK_DIR=""
 SCRATCH_DIR=""
 SCRATCH_DIR_OWNED=false
-SCRATCH_DIR_MOUNT=""
-declare -A DIRECTORY_MOUNTS=()
+SCRATCH_DIR_DEVICE=""
+declare -A DIRECTORY_DEVICES=()
 LOCK_DIR=""
 LOCK_ACQUIRED=false
 
@@ -3944,15 +3944,18 @@ new_temp_file() {
 # in the run's work directory as before. The directory is removed when the run
 # ends, and one left by a run that was killed is removed by the next run.
 setup_scratch_dir() {
-    local setting=${REVIEW_PR_SCRATCH_DIR:-auto} root free_kb stale pid explicit=false
+    local setting=${REVIEW_PR_SCRATCH_DIR:-auto} root free_kb explicit=false
 
     case "$setting" in
         work) return 0 ;;
         auto)
             [[ -d /dev/shm && -w /dev/shm ]] || return 0
+            root="/dev/shm/review-pr-${UID}"
+            # Runs that were killed are cleared before space is judged, or the
+            # space they hold would keep every later run off /dev/shm.
+            [[ ! -d "$root" || -L "$root" || ! -O "$root" ]] || sweep_stale_scratch_dirs "$root"
             free_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }') || return 0
             [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb >= 262144 )) || return 0
-            root="/dev/shm/review-pr-${UID}"
             ;;
         *) root=$setting explicit=true ;;
     esac
@@ -3972,13 +3975,7 @@ setup_scratch_dir() {
         [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} cannot be made private; keeping intermediate files in the work directory"
         return 0
     fi
-    for stale in "$root"/run-*; do
-        [[ -d "$stale" && ! -L "$stale" ]] || continue
-        pid=${stale##*/run-}
-        pid=${pid%%-*}
-        [[ "$pid" =~ ^[0-9]+$ ]] || continue
-        kill -0 "$pid" 2>/dev/null || rm -rf -- "$stale"
-    done
+    sweep_stale_scratch_dirs "$root"
     SCRATCH_DIR="${root}/run-$$-${SRANDOM}"
     if ! mkdir -m 700 "$SCRATCH_DIR" 2>/dev/null; then
         [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} does not take a directory for this run; keeping intermediate files in the work directory"
@@ -3986,30 +3983,46 @@ setup_scratch_dir() {
         return 0
     fi
     SCRATCH_DIR_OWNED=true
-    directory_mount SCRATCH_DIR_MOUNT "$SCRATCH_DIR"
+    directory_device SCRATCH_DIR_DEVICE "$SCRATCH_DIR"
 }
 
-# The mount point a directory lives on, remembered per directory: a run moves
-# files into only a handful of them.
-directory_mount() {
-    local target=$1 directory=$2 mount
+# Removes the run directories under a scratch root whose run is gone.
+sweep_stale_scratch_dirs() {
+    local root=$1 stale pid
 
-    if [[ -z "${DIRECTORY_MOUNTS[$directory]+set}" ]]; then
-        mount=$(df -P "$directory" 2>/dev/null | awk 'NR == 2 { print $NF }') || mount=""
-        DIRECTORY_MOUNTS[$directory]=$mount
+    for stale in "$root"/run-*; do
+        [[ -d "$stale" && ! -L "$stale" ]] || continue
+        pid=${stale##*/run-}
+        pid=${pid%%-*}
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$pid" 2>/dev/null || rm -rf -- "$stale"
+    done
+}
+
+# The device a directory lives on (GNU stat, then BSD stat), remembered per
+# directory: a run moves files into only a handful of them. Empty when neither
+# stat answers.
+directory_device() {
+    local target=$1 directory=$2 device
+
+    if [[ -z "${DIRECTORY_DEVICES[$directory]+set}" ]]; then
+        device=$(stat -c '%d' "$directory" 2>/dev/null || stat -f '%d' "$directory" 2>/dev/null) || device=""
+        [[ "$device" =~ ^[0-9]+$ ]] || device=""
+        DIRECTORY_DEVICES[$directory]=$device
     fi
-    printf -v "$target" '%s' "${DIRECTORY_MOUNTS[$directory]}"
+    printf -v "$target" '%s' "${DIRECTORY_DEVICES[$directory]}"
 }
 
-# mv, except for a file leaving the scratch directory for another file system.
-# mv copies such a file straight into its destination, so for the length of the
-# copy the artifact is a partial file, and a run killed then leaves one that a
-# resumed run accepts. It is copied next to the destination under a hidden name
-# instead and renamed into place, which is atomic, as every artifact was before
-# the scratch directory. Only the two-path forms are interpreted; anything else
-# goes to mv as written.
+# mv, except for a regular file leaving the scratch directory for another file
+# system. mv copies such a file straight into its destination, so for the length
+# of the copy the artifact is a partial file, and a run killed then leaves one
+# that a resumed run accepts. It is copied next to the destination under a hidden
+# name instead and renamed into place, which is atomic, as every artifact was
+# before the scratch directory; when the devices cannot be told apart it is
+# staged all the same. Only the two-path forms are interpreted, and links and
+# directories go to mv as written.
 mv() {
-    local source target target_mount staged
+    local source target target_device staged
 
     if [[ "${1:-}" == -- && $# -eq 3 ]]; then
         source=$2 target=$3
@@ -4019,19 +4032,20 @@ mv() {
         command mv "$@"
         return
     fi
-    if [[ -z "$SCRATCH_DIR" || -z "$SCRATCH_DIR_MOUNT" || "$source" != "$SCRATCH_DIR"/* \
-        || "$target" == "$SCRATCH_DIR"/* ]]; then
+    if [[ -z "$SCRATCH_DIR" || "$source" != "$SCRATCH_DIR"/* || "$target" == "$SCRATCH_DIR"/* \
+        || ! -f "$source" || -L "$source" ]]; then
         command mv -- "$source" "$target"
         return
     fi
     [[ ! -d "$target" ]] || target="${target%/}/${source##*/}"
     [[ "$target" == */* ]] || target="./${target}"
-    directory_mount target_mount "${target%/*}"
-    if [[ -z "$target_mount" || "$target_mount" == "$SCRATCH_DIR_MOUNT" ]]; then
+    directory_device target_device "${target%/*}"
+    if [[ -n "$target_device" && "$target_device" == "$SCRATCH_DIR_DEVICE" ]]; then
         command mv -- "$source" "$target"
         return
     fi
     make_temp_file staged "${target%/*}/.${target##*/}.publish." || return 1
+    TEMP_FILES+=("$staged")
     if command cp -p -- "$source" "$staged" && command mv -f -- "$staged" "$target"; then
         command rm -f -- "$source"
         return 0
@@ -4043,8 +4057,10 @@ mv() {
 # Creates an empty file named by the prefix and six random characters, readable
 # by its owner only, and stores its path in the named variable: what mktemp
 # does, without starting it, since a run made several thousand temporary files
-# that way. noclobber makes the creation exclusive, so an existing name is never
-# taken over; a directory that cannot take the file fails the call.
+# that way. noclobber refuses an existing regular file, so a drawn name already
+# in use is drawn again; unlike mktemp it would open a FIFO or device already
+# there under that name, which the private run and work directories never hold.
+# A directory that cannot take the file fails the call.
 make_temp_file() {
     local target=$1 prefix=$2 candidate suffix index attempt restore_noclobber=false
     local alphabet=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
@@ -11719,6 +11735,9 @@ run_artifact_only_final_rerun() {
     local comparison_error_log
 
     load_artifact_source_run
+    # An artifact-only rerun leaves before the main flow sets up the scratch
+    # directory, so it sets up its own once the source run's work directory is known.
+    setup_scratch_dir
     compute_review_methodology
     TIMESTAMP=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
     rerun_stem="${REVIEW_ID}-${SOURCE_TIMESTAMP}-final-rerun-${TIMESTAMP}"

@@ -520,7 +520,7 @@ publish_root=${TMPDIR:-/tmp}
 other_root=/tmp
 [[ "$(df -P "$publish_root" | awk 'NR == 2 { print $NF }')" != "$(df -P "$other_root" | awk 'NR == 2 { print $NF }')" ]] \
     || other_root=""
-SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_MOUNT=""
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_DEVICE=""
 REVIEW_PR_SCRATCH_DIR="$suite_root/publish-scratch" setup_scratch_dir
 printf 'same file system\n' >"$SCRATCH_DIR/same.txt"
 mkdir -p "$suite_root/publish-target"
@@ -542,7 +542,7 @@ else
     pass 'no second file system to publish across here'
 fi
 rm -rf "$SCRATCH_DIR"
-SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_MOUNT=""
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_DEVICE=""
 
 # Times are formatted by the shell instead of date, and must read the same as
 # date does, in the configured zone and in the machine's own.

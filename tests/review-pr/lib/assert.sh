@@ -12,8 +12,15 @@ TEST_ASSERTIONS=0
 if [[ -z "${TMPDIR:-}" && -d /dev/shm && -w /dev/shm ]]; then
     shm_free_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }') || shm_free_kb=0
     [[ "$shm_free_kb" =~ ^[0-9]+$ ]] || shm_free_kb=0
-    (( shm_free_kb < 1048576 )) || export TMPDIR=/dev/shm
-    unset shm_free_kb
+    # The suite runs scripts it writes there (fake CLIs, the installed launcher),
+    # so a noexec mount keeps the usual temporary directory too.
+    if (( shm_free_kb >= 1048576 )) && shm_probe=$(mktemp /dev/shm/review-pr-exec-probe.XXXXXX 2>/dev/null); then
+        printf '#!/bin/sh\nexit 0\n' >"$shm_probe"
+        chmod 700 "$shm_probe"
+        ! "$shm_probe" 2>/dev/null || export TMPDIR=/dev/shm
+        rm -f "$shm_probe"
+    fi
+    unset shm_free_kb shm_probe
 fi
 
 # Every fixture repository commits, pushes and fetches, and git follows each of
