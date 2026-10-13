@@ -6280,21 +6280,32 @@ ndjson_amended_continuation_drops() {
 # with a terminal record that counts the merged findings instead. A final draft
 # that already carries resolution records is refused: its resolutions were
 # decided against an incomplete finding set, so the ordinary retry is honest.
+#
+# Each line is read on its own and mended the way the phase mends its stream: on
+# ListingSyncer 974 (2026-10-13) Pi wrote Doctrine\DBAL with one backslash, the
+# phase repaired the escape, but this split read the draft whole, failed on that
+# line and refused the continuation, and the salvage left a ref unanswered. A
+# line no repair makes parse is left out, so its ref is asked for again.
 build_continuation_state() {
     local phase=$1 draft_file=$2 expected_refs_file=$3 kept_file=$4 pending_refs_file=$5
-    local normalized_file
+    local normalized_file parsed_file line
 
     new_temp_file "${phase}-continuation-normalized"; normalized_file=$NEW_TEMP_FILE
+    new_temp_file "${phase}-continuation-parsed"; parsed_file=$NEW_TEMP_FILE
     normalize_primary_ndjson_stream "$draft_file" "$normalized_file" || return 1
     [[ -s "$normalized_file" ]] || return 1
-    if [[ "$phase" == final ]] && jq -e -s 'any(.[]; type == "object" and .record == "resolution")' "$normalized_file" >/dev/null 2>&1; then
+    : >"$parsed_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        append_json_line "$line" "$parsed_file" || append_repaired_json_line "$line" "$parsed_file" || true
+    done <"$normalized_file"
+    if [[ "$phase" == final ]] && jq -e -s 'any(.[]; type == "object" and .record == "resolution")' "$parsed_file" >/dev/null 2>&1; then
         return 1
     fi
     jq -c --arg drops "$CONTINUATION_DROP_IDS" '
         ($drops | split(" ") | map(select(length > 0))) as $dropped |
         select(type == "object" and .record != "complete")
         | select((.record == "finding" and ((.source_id // "") | IN($dropped[]))) | not)
-    ' "$normalized_file" >"$kept_file" 2>/dev/null || return 1
+    ' "$parsed_file" >"$kept_file" 2>/dev/null || return 1
     [[ -s "$kept_file" ]] || return 1
     # The kept findings are compared with the processed merged stream, and a
     # source they answered under the wrong agent is answered all the same.

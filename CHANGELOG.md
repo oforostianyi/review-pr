@@ -4,6 +4,14 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A continuation is no longer refused because one line of the draft needs a JSON repair. The
+  draft was read whole to split it, so a line the phase itself had mended (a lone backslash, a
+  stray quote) failed the split and the stream went to salvage. Each line is now mended on its
+  own, and a line no repair makes parse is left out, its ref asked for again. On ListingSyncer
+  974 Pi wrote `Doctrine\DBAL` with one backslash and a ref was left without its verdict.
+
 ## [1.26.3] - 2026-10-13
 
 ### Fixed

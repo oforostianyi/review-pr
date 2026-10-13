@@ -500,7 +500,9 @@ keys remain language-independent.
   `PENDING SOURCE REFS` block that replaces `REQUIRED SOURCE REFS` for that pass. The produced
   records themselves are withheld, so the continuation has nothing to revise. Its terminal
   `complete` counts the kept and the new findings together and describes the whole review.
-- A continuation may only append. The orchestrator drops the interrupted pass's own `complete`
+- A continuation may only append. The orchestrator reads the interrupted pass line by line, mending
+  each line with the same JSON repairs the phase uses and leaving out a line none of them makes
+  parse, whose ref is then asked for again. It drops the interrupted pass's own `complete`
   record, concatenates the kept records with the continuation reply, and validates the merged
   stream as one ordinary cross-review. It then compares the leading findings against the kept
   records, which have had the same presentation defaults and agent-key correction as the merged

@@ -422,6 +422,26 @@ assert_true 'a draft that stopped after its own terminal record is still continu
         "$continuation_kept" "$continuation_pending"
 assert_eq '1' "$(grep -c '' "$continuation_kept")" \
     'the superseded terminal record is dropped from the kept findings'
+# A backslash JSON does not know (Pi on ListingSyncer 974: Doctrine\DBAL) is
+# mended as the phase mends it, not taken as an unusable draft.
+escape_draft="$test_root/cross-lone-escape.ndjson"
+jq -c '.[0] | .claim = "Injects the shared Doctrine_DBAL connection."' "$cross_records" \
+    | sed 's/Doctrine_DBAL/Doctrine\\DBAL/' >"$escape_draft"
+assert_false 'the fixture line does not parse as written' jq -e . "$escape_draft"
+assert_true 'a draft with a lone backslash in a finding is still continued' \
+    build_continuation_state cross "$escape_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+assert_eq 'Injects the shared Doctrine\DBAL connection.' "$(jq -r '.claim' "$continuation_kept")" \
+    'and the kept finding keeps the backslash it meant'
+assert_eq 'gamma:gamma:F-002' "$(jq -r '.[] | .agent + ":" + .source_id' "$continuation_pending")" \
+    'while only the unanswered ref is asked for'
+unparseable_draft="$test_root/cross-unparseable-line.ndjson"
+{ jq -c '.[0]' "$cross_records"; jq -c '.[0] | .source_id = "beta:C-009"' "$cross_records" | cut -c1-40; } >"$unparseable_draft"
+assert_true 'a line no repair can mend does not refuse the whole draft' \
+    build_continuation_state cross "$unparseable_draft" "$continuation_expected_refs" \
+        "$continuation_kept" "$continuation_pending"
+assert_eq '1' "$(grep -c '' "$continuation_kept")" \
+    'the line is left out and the findings that parse are kept'
 findingless_draft="$test_root/cross-findingless.ndjson"
 jq -c '.[1]' "$cross_records" >"$findingless_draft"
 assert_false 'a draft without a single finding cannot be continued' \
