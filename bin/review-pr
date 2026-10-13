@@ -24,6 +24,7 @@ LOCK_DIR=""
 LOCK_ACQUIRED=false
 
 declare -a TEMP_FILES=()
+declare -A JSON_LINE_CACHE=()
 # The umask the run started with, restored after each temporary file is made
 # private; read once, since reading it means a subshell.
 REVIEW_PR_UMASK=$(umask)
@@ -4018,9 +4019,43 @@ repair_lone_json_escapes() {
 # whole up to that brace before jq failed on the rest. The truncated record was
 # kept while the line was also counted as unreadable, and in a repair baseline
 # it stood as a finding with fields missing, which refused the repair outright.
+# Parses every line of a file in one jq and remembers, for each line, its compact
+# form when it is one JSON object and "!" otherwise. The stream checks below ask
+# this first instead of starting jq for every line -- the greater part of the
+# jq processes a run started. The cache is keyed by the text itself, so an entry
+# can never go stale; a line it does not hold, or holds as "!", still takes the
+# full check, so whatever that check accepts is accepted as before.
+prime_json_line_cache() {
+    local file=$1 line trimmed parsed results_fd
+
+    JSON_LINE_CACHE=()
+    [[ -s "$file" ]] || return 0
+    exec {results_fd}< <(jq -R -c 'try (fromjson | if type == "object" then . else "!" end) catch "!"' "$file" 2>/dev/null)
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        IFS= read -r parsed <&"$results_fd" || break
+        [[ "$parsed" != '"!"' ]] || continue
+        [[ -z "$line" ]] || JSON_LINE_CACHE["$line"]=$parsed
+        trimmed=${line%$'\r'}
+        trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
+        trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+        [[ -z "$trimmed" || "$trimmed" == "$line" ]] || JSON_LINE_CACHE["$trimmed"]=$parsed
+    done <"$file"
+    exec {results_fd}<&-
+}
+
+# Whether a text is a JSON object, as jq -e 'type == "object"' answers it.
+json_text_is_object() {
+    [[ -n "$1" && -n "${JSON_LINE_CACHE[$1]+set}" ]] && return 0
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$1"
+}
+
 append_json_line() {
     local line=$1 output_file=$2 parsed
 
+    if [[ -n "$line" && -n "${JSON_LINE_CACHE[$line]+set}" ]]; then
+        printf '%s\n' "${JSON_LINE_CACHE[$line]}" >>"$output_file"
+        return 0
+    fi
     parsed=$(jq -e -c 'select(type == "object")' <<<"$line" 2>/dev/null) || return 1
     printf '%s\n' "$parsed" >>"$output_file"
 }
@@ -4617,6 +4652,7 @@ join_split_json_lines() {
     local file=$1 joined_file index next count=0 line candidate spaced total parsed
     local -a lines=()
 
+    prime_json_line_cache "$file"
     mapfile -t lines <"$file"
     total=${#lines[@]}
     joined_file="${file}.joined.$$"
@@ -4624,7 +4660,7 @@ join_split_json_lines() {
     index=0
     while (( index < total )); do
         line=${lines[index]}
-        if [[ "$line" =~ ^[[:space:]]*\{ ]] && ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line"; then
+        if [[ "$line" =~ ^[[:space:]]*\{ ]] && ! json_text_is_object "$line"; then
             candidate=$line spaced=$line parsed=false
             for (( next = index + 1; next < total && next <= index + 3; next++ )); do
                 [[ ! "${lines[next]}" =~ ^[[:space:]]*\{ ]] || break
@@ -4643,7 +4679,7 @@ join_split_json_lines() {
                 fi
             done
         elif [[ "${lines[index + 1]:-}" =~ ^[[:space:]]*,[[:space:]]*\" && "$line" =~ \}[[:space:]]*$ ]] \
-            && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line"; then
+            && json_text_is_object "$line"; then
             candidate=${line%\}*}
             for (( next = index + 1; next < total && next <= index + 3; next++ )); do
                 [[ ! "${lines[next]}" =~ ^[[:space:]]*\{ ]] || break
@@ -6874,6 +6910,7 @@ build_final_repair_baseline() {
     new_temp_file 'final-repair-unparsed'; unparsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
+    prime_json_line_cache "$input_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         line=${line%$'\r'}
@@ -7146,6 +7183,7 @@ build_cross_repair_baseline() {
     new_temp_file "cross-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
+    prime_json_line_cache "$input_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         line=${line%$'\r'}
@@ -7420,6 +7458,7 @@ build_primary_repair_baseline() {
     new_temp_file "primary-repair-unparsed"; unparsed_file=$NEW_TEMP_FILE
     : >"$parsed_file"; : >"$unparsed_file"
     NDJSON_BASELINE_DIRTY_RECORDS=0
+    prime_json_line_cache "$input_file"
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_number=$((line_number + 1))
         line=${line%$'\r'}

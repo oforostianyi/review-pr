@@ -1845,6 +1845,29 @@ assert_eq 0 "$(jq '.unparsed | length' "$test_root/early-close-baseline.json")" 
 # Brackets the model got wrong are mended without a model when only one reading
 # of the line parses as a record: closed early (29049), a brace doubled (29050)
 # or left out (29074) at the end, an array opened without its bracket (957).
+# One jq parses a whole stream ahead of the per-line checks; whatever a line
+# parses to, it must reach the records exactly as the per-line jq wrote it, and a
+# line the cache cannot vouch for still gets the per-line check.
+cache_stream="$test_root/cache-stream.ndjson"
+{
+    sed -n '1,3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    printf '%s\n' '  {"spaced": [ 1 , 2 ], "number": 1.000}  ' '{} {}' '[1]' '{"bad":}'
+} >"$cache_stream"
+cache_uncached="$test_root/cache-uncached.ndjson"
+cache_cached="$test_root/cache-cached.ndjson"
+: >"$cache_uncached"; : >"$cache_cached"
+JSON_LINE_CACHE=()
+while IFS= read -r line; do append_json_line "$line" "$cache_uncached" || printf 'refused\n' >>"$cache_uncached"; done <"$cache_stream"
+prime_json_line_cache "$cache_stream"
+while IFS= read -r line; do append_json_line "$line" "$cache_cached" || printf 'refused\n' >>"$cache_cached"; done <"$cache_stream"
+assert_eq "$(cat "$cache_uncached")" "$(cat "$cache_cached")" \
+    'a stream parsed ahead in one jq gives the same records as one jq per line'
+assert_eq 2 "$(grep -c '^refused$' "$cache_cached")" 'and refuses the same lines'
+assert_eq 2 "$(grep -c '^{}$' "$cache_cached")" 'a line holding two objects still takes the per-line check'
+assert_true 'a primed object is an object' json_text_is_object "$(sed -n '1p' "$cache_stream")"
+assert_false 'a primed non-object is not' json_text_is_object '[1]'
+JSON_LINE_CACHE=()
+
 bracket_fixture=$(sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson")
 bracket_expected=$(jq -c . <<<"$bracket_fixture")
 assert_eq "$bracket_expected" "$(repair_json_brackets "${bracket_fixture}}")" \
