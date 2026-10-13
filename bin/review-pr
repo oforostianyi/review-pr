@@ -5230,7 +5230,9 @@ process_primary_ndjson_output() {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
     fi
-    mv -- "$records_array_file" "$records_file"
+    # The array is a private temporary like the stream it came from, so the
+    # name moves to it instead of the file (one mv less per stream).
+    records_file=$records_array_file
     fill_presentation_defaults primary "$agent" "$records_file"
     drop_unknown_complete_keys primary "$agent" "$records_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings primary "$records_file" "$agent"; then
@@ -5578,7 +5580,9 @@ process_cross_ndjson_output() {
         FINDING_CONTRACT_FAILURE_REASON=invalid_json_stream
         return 1
     }
-    mv -- "$records_array_file" "$records_file"
+    # The array is a private temporary like the stream it came from, so the
+    # name moves to it instead of the file (one mv less per stream).
+    records_file=$records_array_file
     fill_presentation_defaults cross "$agent" "$records_file"
     drop_unknown_complete_keys cross "$agent" "$records_file"
     repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
@@ -9964,7 +9968,7 @@ initialize_dashboard() {
     DASHBOARD_MESSAGE_FILE="${DASHBOARD_STATE_FILE}.messages"
     : >"$DASHBOARD_MESSAGE_FILE"
     TEMP_FILES+=("$DASHBOARD_STATE_FILE" "$DASHBOARD_STATE_TEMP_FILE" "$DASHBOARD_MESSAGE_FILE" "${DASHBOARD_MESSAGE_FILE}.offset")
-    write_dashboard_state
+    [[ "$DASHBOARD_ACTIVE" != true ]] || write_dashboard_state
 }
 
 # Stores a dashboard section's title in the named variable.
@@ -10023,7 +10027,9 @@ set_dashboard_status() {
     DASHBOARD_STARTED_AT[$key]=$started_at
     DASHBOARD_FINISHED_AT[$key]=$finished_at
     DASHBOARD_TOKENS[$key]=$tokens
-    write_dashboard_state
+    # Only the live table reads the state file, so without it the file is not
+    # rewritten for every status change; start_dashboard writes it in full.
+    [[ "$DASHBOARD_ACTIVE" != true ]] || write_dashboard_state
 }
 
 prepare_dashboard_phase() {
@@ -10037,7 +10043,7 @@ prepare_dashboard_phase() {
         [[ -v "DASHBOARD_STATUSES[$key]" ]] || continue
         DASHBOARD_STATUSES[$key]=QUEUED
     done
-    write_dashboard_state
+    [[ "$DASHBOARD_ACTIVE" != true ]] || write_dashboard_state
 }
 
 load_preserved_dashboard_statuses() {
@@ -10071,7 +10077,7 @@ skip_dashboard_sections() {
             fi
         done
     done
-    write_dashboard_state
+    [[ "$DASHBOARD_ACTIVE" != true ]] || write_dashboard_state
 }
 
 calculate_dashboard_line_count() {
@@ -10324,6 +10330,7 @@ start_dashboard() {
     fi
 
     printf '\n\033[?25l' >&2
+    write_dashboard_state
     render_dashboard_snapshot false
     DASHBOARD_ACTIVE=true
     dashboard_refresh_loop &
