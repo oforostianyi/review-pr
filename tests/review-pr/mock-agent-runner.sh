@@ -24,28 +24,31 @@ if [[ -n "${REVIEW_PR_MOCK_CAPTURE_DIR:-}" ]]; then
 fi
 
 # Prints the JSON lines of one "===== BEGIN <name> =====" ... "===== END <name> =====" prompt block.
+# The block is collected and written in one go, as awk wrote it: a reader such
+# as head that stops after the first line must not leave this writer to a
+# SIGPIPE, which under pipefail ended the mock.
 prompt_block_lines() {
-    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false
+    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false block=""
 
     while IFS= read -r line; do
         if [[ "$line" == "$begin" ]]; then inside=true; continue; fi
         [[ "$line" != "$end" ]] || inside=false
-        [[ "$inside" != true || "$line" != \{* ]] || printf '%s\n' "$line"
+        [[ "$inside" != true || "$line" != \{* ]] || block+="${line}"$'\n'
     done <<<"$prompt_text"
-    return 0
+    printf '%s' "$block"
 }
 
 # The whole of a block, for one that holds a single indented JSON document rather
 # than one record per line -- the preserved baseline a repair prompt carries.
 prompt_block_text() {
-    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false
+    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false block=""
 
     while IFS= read -r line; do
         if [[ "$line" == "$begin" ]]; then inside=true; continue; fi
         [[ "$line" != "$end" ]] || inside=false
-        [[ "$inside" != true ]] || printf '%s\n' "$line"
+        [[ "$inside" != true ]] || block+="${line}"$'\n'
     done <<<"$prompt_text"
-    return 0
+    printf '%s' "$block"
 }
 
 # Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
