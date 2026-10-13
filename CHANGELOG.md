@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.26.2] - 2026-10-13
+
 ### Fixed
 
 - A record that closed an array inside the closing quote of its last string
