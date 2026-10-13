@@ -1227,7 +1227,9 @@ acquire_repo_lock() {
 load_config() {
     local validation_filter
     local agent
-    local config_value
+    local config_assignments
+    local config_reviews_directory="" config_has_repositories=false config_review_repository=""
+    local config_cross_prompt="" config_final_prompt=""
 
     if [[ ! -e "$CONFIG_FILE" ]]; then
         if [[ "$CONFIG_EXPLICIT" == true ]]; then
@@ -1618,74 +1620,104 @@ die_with_configuration_problems() {
         die_with_configuration_problems
     fi
 
-    REVIEW_PR_TIMEZONE=$(jq -r '.timezone // ""' "$CONFIG_FILE")
-    QUOTA_CODEX_MINIMUM=$(jq -r '.quota.codex.minimum_remaining_percent // ""' "$CONFIG_FILE")
+    # Every setting is read in one jq pass that prints shell assignments, rather
+    # than one jq per setting: the agents alone took ten each, and an endpoint
+    # scanner inspects every process started. Values read the way `$(jq -r ...)`
+    # read them: a string without its trailing newlines, anything else as JSON.
+    config_assignments=$(jq -r '
+        def text: if type == "string" then sub("\n+$"; "") else tojson end;
+        def sh: text | @sh;
+        def assign($name; value): "\($name)=\(value | sh)";
+        def assign_at($name; $key; value): "\($name)[\($key | @sh)]=\(value | sh)";
+        def list($name; values): "\($name)=(\([values | sh] | join(" ")))";
+        def joined: if type == "array" then join("\n") else . end;
+        def legacy_sections:
+            if (.reporting | type) == "object" and (.reporting | has("include_comparison_sections"))
+            then .reporting.include_comparison_sections else true end;
+        (.language // .finalization.language // "EN") as $global_language
+        | (legacy_sections | tostring) as $legacy
+        | assign("REVIEW_PR_TIMEZONE"; .timezone // ""),
+          assign("QUOTA_CODEX_MINIMUM"; .quota.codex.minimum_remaining_percent // ""),
+          assign("config_reviews_directory"; .reviews_directory // ""),
+          assign("config_has_repositories"; has("repositories")),
+          (if has("repositories") then
+              list("REPOSITORY_ALIASES"; .repositories | keys[]),
+              assign("DEFAULT_REPOSITORY_ALIAS"; .default_repository),
+              (.repositories | keys[] as $alias
+                  | assign_at("REPOSITORY_GITHUB"; $alias; .[$alias].github),
+                    assign_at("REPOSITORY_CHECKOUTS"; $alias; .[$alias].checkout),
+                    assign_at("REPOSITORY_PROFILES"; $alias; .[$alias].profile // ""))
+           else assign("config_review_repository"; .review_repository // "") end),
+          list("CONFIGURED_REVIEWERS"; .reviewers[]),
+          assign("FINAL_SYNTHESIZER"; .synthesizer),
+          assign("FINALIZATION_MODEL"; .finalization.model // ""),
+          assign("FINALIZATION_EFFORT"; .finalization.effort // ""),
+          assign("FINALIZATION_EFFORT_CONFIGURED"; if (.finalization | type) == "object" then (.finalization | has("effort")) else false end),
+          assign("FALLBACK_SYNTHESIZER"; .finalization.fallback_synthesizer // ""),
+          assign("FALLBACK_MODEL"; .finalization.fallback_model // ""),
+          assign("FALLBACK_EFFORT"; .finalization.fallback_effort // ""),
+          assign("FALLBACK_EFFORT_CONFIGURED"; if (.finalization | type) == "object" then (.finalization | has("fallback_effort")) else false end),
+          assign("GLOBAL_REVIEW_LANGUAGE"; $global_language),
+          assign("PRIMARY_REVIEW_LANGUAGE"; .languages.primary // "" | if . == "" then $global_language else . end),
+          assign("CROSS_REVIEW_LANGUAGE"; .languages.cross_review // "" | if . == "" then $global_language else . end),
+          assign("FINALIZATION_LANGUAGE"; .languages.final // "" | if . == "" then $global_language else . end),
+          assign("INCLUDE_COMPARISON_SECTIONS"; legacy_sections),
+          assign("INCLUDE_COMPARISON_SECTIONS_CONFIGURED"; (.reporting | type) == "object" and (.reporting | has("include_comparison_sections"))),
+          assign("CROSS_COMPARISON_MODE";
+              if (.reporting.comparison_sections | type) == "object" then (.reporting.comparison_sections.cross_review // "none")
+              elif $legacy == "true" then "inline" else "none" end),
+          assign("FINAL_COMPARISON_MODE";
+              if (.reporting.comparison_sections | type) == "object" then (.reporting.comparison_sections.final // "standalone")
+              elif $legacy == "true" then "inline" else "none" end),
+          assign("PRIMARY_FINDING_CONTRACT_MODE"; .reporting.finding_contract.primary // "markdown"),
+          assign("CROSS_FINDING_CONTRACT_MODE"; .reporting.finding_contract.cross_review // "markdown"),
+          assign("FINAL_FINDING_CONTRACT_MODE"; .reporting.finding_contract.final // "markdown"),
+          assign("FINDINGS_EXPORT_SCOPE"; .reporting.findings_export // "confirmed"),
+          assign("DISPUTE_RESOLUTION_ENABLED"; .reporting.dispute_resolution // false),
+          assign("EXECUTE_MEASUREMENTS_ENABLED"; .reporting.execute_measurements // false),
+          assign("STATUS_INTERVAL_SECONDS"; .status.log_interval_seconds // .status_interval_seconds // 30),
+          assign("STATUS_MODE"; .status.mode // "auto"),
+          assign("STATUS_COLOR_MODE"; .status.color // "auto"),
+          assign("STATUS_REFRESH_INTERVAL_SECONDS"; .status.refresh_interval_seconds // 1),
+          assign("STATUS_SHOW_PID"; .status.show_pid // true),
+          assign("MAX_CONCURRENCY"; .execution.max_concurrency // 0),
+          assign("RETRY_MAX_ATTEMPTS"; .execution.retry.max_attempts // 1),
+          assign("RETRY_DELAY_SECONDS"; .execution.retry.delay_seconds // 0),
+          assign("AGENT_QUORUM"; .execution.quorum // 2),
+          assign("config_cross_prompt"; .prompts.cross_review // "" | joined),
+          assign("config_final_prompt"; .prompts.final // "" | joined),
+          (.agents | keys[] as $agent | .[$agent]
+              | (if (.label // "" | text) != "" then assign_at("AGENT_LABELS"; $agent; .label // "") else empty end),
+                assign_at("AGENT_MODELS"; $agent; .model // ""),
+                assign_at("AGENT_EFFORTS"; $agent; .effort // ""),
+                assign_at("AGENT_TIMEOUT_SECONDS"; $agent; .timeout_seconds // 0),
+                assign_at("AGENT_MAX_TOOL_CALLS"; $agent; .max_tool_calls // ""),
+                assign_at("AGENT_TYPES"; $agent; .type // $agent),
+                assign_at("AGENT_RUNNERS"; $agent; .runner // ""),
+                assign_at("AGENT_COMMANDS"; $agent; .command // [] | tojson),
+                assign_at("AGENT_ENABLED"; $agent; if has("enabled") then .enabled else true end),
+                (if (.instructions // "" | text) != "" then assign_at("AGENT_INSTRUCTIONS"; $agent; .instructions // "") else empty end))
+    ' "$CONFIG_FILE") || die "Could not read the configuration: ${CONFIG_FILE}"
+    eval "$config_assignments"
     if [[ -n "$REVIEW_PR_TIMEZONE" ]] && ! timezone_is_known "$REVIEW_PR_TIMEZONE"; then
         die_with_configuration_problems \
             "timezone is $(jq -n --arg zone "$REVIEW_PR_TIMEZONE" '$zone | tojson' -r); no zone of that name is installed"
     fi
 
     if [[ -z "$REVIEWS_ROOT" ]]; then
-        REVIEWS_ROOT=$(jq -r '.reviews_directory // ""' "$CONFIG_FILE")
+        REVIEWS_ROOT=$config_reviews_directory
     fi
 
-    if jq -e 'has("repositories")' "$CONFIG_FILE" >/dev/null; then
-        mapfile -t REPOSITORY_ALIASES < <(jq -r '.repositories | keys[]' "$CONFIG_FILE")
-        DEFAULT_REPOSITORY_ALIAS=$(jq -r '.default_repository' "$CONFIG_FILE")
-        while IFS= read -r agent; do
-            REPOSITORY_GITHUB[$agent]=$(jq -r --arg alias "$agent" '.repositories[$alias].github' "$CONFIG_FILE")
-            REPOSITORY_CHECKOUTS[$agent]=$(jq -r --arg alias "$agent" '.repositories[$alias].checkout' "$CONFIG_FILE")
-            REPOSITORY_PROFILES[$agent]=$(jq -r --arg alias "$agent" '.repositories[$alias].profile // ""' "$CONFIG_FILE")
-        done < <(printf '%s\n' "${REPOSITORY_ALIASES[@]}")
-    else
+    if [[ "$config_has_repositories" != true ]]; then
         REPOSITORY_ALIASES=(default)
         DEFAULT_REPOSITORY_ALIAS=default
         REPOSITORY_GITHUB[default]=''
-        REPOSITORY_CHECKOUTS[default]=$(jq -r '.review_repository // ""' "$CONFIG_FILE")
+        REPOSITORY_CHECKOUTS[default]=$config_review_repository
         REPOSITORY_PROFILES[default]=''
     fi
 
-    mapfile -t CONFIGURED_REVIEWERS < <(jq -r '.reviewers[]' "$CONFIG_FILE")
     REVIEW_AGENTS=("${CONFIGURED_REVIEWERS[@]}")
-    FINAL_SYNTHESIZER=$(jq -r '.synthesizer' "$CONFIG_FILE")
-    FINALIZATION_MODEL=$(jq -r '.finalization.model // ""' "$CONFIG_FILE")
-    FINALIZATION_EFFORT=$(jq -r '.finalization.effort // ""' "$CONFIG_FILE")
-    FINALIZATION_EFFORT_CONFIGURED=$(jq -r 'if (.finalization | type) == "object" then (.finalization | has("effort")) else false end' "$CONFIG_FILE")
-    FALLBACK_SYNTHESIZER=$(jq -r '.finalization.fallback_synthesizer // ""' "$CONFIG_FILE")
-    FALLBACK_MODEL=$(jq -r '.finalization.fallback_model // ""' "$CONFIG_FILE")
-    FALLBACK_EFFORT=$(jq -r '.finalization.fallback_effort // ""' "$CONFIG_FILE")
-    FALLBACK_EFFORT_CONFIGURED=$(jq -r 'if (.finalization | type) == "object" then (.finalization | has("fallback_effort")) else false end' "$CONFIG_FILE")
-    GLOBAL_REVIEW_LANGUAGE=$(jq -r '.language // .finalization.language // "EN"' "$CONFIG_FILE")
-    PRIMARY_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.primary // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
-    CROSS_REVIEW_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.cross_review // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
-    FINALIZATION_LANGUAGE=$(jq -r --arg global_language "$GLOBAL_REVIEW_LANGUAGE" '.languages.final // "" | if . == "" then $global_language else . end' "$CONFIG_FILE")
     normalize_language_codes
-    INCLUDE_COMPARISON_SECTIONS=$(jq -r '
-        if (.reporting | type) == "object" and (.reporting | has("include_comparison_sections"))
-        then .reporting.include_comparison_sections
-        else true
-        end
-    ' "$CONFIG_FILE")
-    INCLUDE_COMPARISON_SECTIONS_CONFIGURED=$(jq -r '
-        (.reporting | type) == "object" and (.reporting | has("include_comparison_sections"))
-    ' "$CONFIG_FILE")
-    CROSS_COMPARISON_MODE=$(jq -r --arg legacy "$INCLUDE_COMPARISON_SECTIONS" '
-        if (.reporting.comparison_sections | type) == "object"
-        then (.reporting.comparison_sections.cross_review // "none")
-        elif $legacy == "true" then "inline"
-        else "none"
-        end
-    ' "$CONFIG_FILE")
-    FINAL_COMPARISON_MODE=$(jq -r --arg legacy "$INCLUDE_COMPARISON_SECTIONS" '
-        if (.reporting.comparison_sections | type) == "object"
-        then (.reporting.comparison_sections.final // "standalone")
-        elif $legacy == "true" then "inline"
-        else "none"
-        end
-    ' "$CONFIG_FILE")
-    PRIMARY_FINDING_CONTRACT_MODE=$(jq -r '.reporting.finding_contract.primary // "markdown"' "$CONFIG_FILE")
-    CROSS_FINDING_CONTRACT_MODE=$(jq -r '.reporting.finding_contract.cross_review // "markdown"' "$CONFIG_FILE")
-    FINAL_FINDING_CONTRACT_MODE=$(jq -r '.reporting.finding_contract.final // "markdown"' "$CONFIG_FILE")
     if [[ "$CROSS_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
             || die 'reporting.finding_contract.cross_review=ndjson-v1 requires primary=ndjson-v1'
@@ -1698,56 +1730,23 @@ die_with_configuration_problems() {
         [[ "$FINAL_COMPARISON_MODE" != inline ]] \
             || die 'Structured final synthesis requires reporting.comparison_sections.final=none or standalone'
     fi
-    FINDINGS_EXPORT_SCOPE=$(jq -r '.reporting.findings_export // "confirmed"' "$CONFIG_FILE")
-    DISPUTE_RESOLUTION_ENABLED=$(jq -r '.reporting.dispute_resolution // false' "$CONFIG_FILE")
     if [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]]; then
         [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
             || die 'reporting.dispute_resolution=true requires reporting.finding_contract.final=ndjson-v1'
     fi
-    EXECUTE_MEASUREMENTS_ENABLED=$(jq -r '.reporting.execute_measurements // false' "$CONFIG_FILE")
     if [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]]; then
         [[ "$DISPUTE_RESOLUTION_ENABLED" == true ]] \
             || die 'reporting.execute_measurements=true requires reporting.dispute_resolution=true'
     fi
-    STATUS_INTERVAL_SECONDS=$(jq -r '.status.log_interval_seconds // .status_interval_seconds // 30' "$CONFIG_FILE")
-    STATUS_MODE=$(jq -r '.status.mode // "auto"' "$CONFIG_FILE")
-    STATUS_COLOR_MODE=$(jq -r '.status.color // "auto"' "$CONFIG_FILE")
-    STATUS_REFRESH_INTERVAL_SECONDS=$(jq -r '.status.refresh_interval_seconds // 1' "$CONFIG_FILE")
-    STATUS_SHOW_PID=$(jq -r '.status.show_pid // true' "$CONFIG_FILE")
-    MAX_CONCURRENCY=$(jq -r '.execution.max_concurrency // 0' "$CONFIG_FILE")
-    RETRY_MAX_ATTEMPTS=$(jq -r '.execution.retry.max_attempts // 1' "$CONFIG_FILE")
-    RETRY_DELAY_SECONDS=$(jq -r '.execution.retry.delay_seconds // 0' "$CONFIG_FILE")
-    AGENT_QUORUM=$(jq -r '.execution.quorum // 2' "$CONFIG_FILE")
 
-    config_value=$(jq -r '.prompts.cross_review // "" | if type == "array" then join("\n") else . end' "$CONFIG_FILE")
-    if [[ -n "$config_value" ]]; then
-        CROSS_REVIEW_INSTRUCTIONS=$config_value
+    if [[ -n "$config_cross_prompt" ]]; then
+        CROSS_REVIEW_INSTRUCTIONS=$config_cross_prompt
         CROSS_PROMPT_SOURCE=config
     fi
-    config_value=$(jq -r '.prompts.final // "" | if type == "array" then join("\n") else . end' "$CONFIG_FILE")
-    if [[ -n "$config_value" ]]; then
-        FINAL_REVIEW_INSTRUCTIONS=$config_value
+    if [[ -n "$config_final_prompt" ]]; then
+        FINAL_REVIEW_INSTRUCTIONS=$config_final_prompt
         FINAL_PROMPT_SOURCE=config
     fi
-
-    while IFS= read -r agent; do
-        config_value=$(jq -r --arg agent "$agent" '.agents[$agent]["label"] // ""' "$CONFIG_FILE")
-        if [[ -n "$config_value" ]]; then
-            AGENT_LABELS[$agent]=$config_value
-        fi
-        AGENT_MODELS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].model // ""' "$CONFIG_FILE")
-        AGENT_EFFORTS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].effort // ""' "$CONFIG_FILE")
-        AGENT_TIMEOUT_SECONDS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].timeout_seconds // 0' "$CONFIG_FILE")
-        AGENT_MAX_TOOL_CALLS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].max_tool_calls // ""' "$CONFIG_FILE")
-        AGENT_TYPES[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].type // $agent' "$CONFIG_FILE")
-        AGENT_RUNNERS[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent].runner // ""' "$CONFIG_FILE")
-        AGENT_COMMANDS[$agent]=$(jq -c --arg agent "$agent" '.agents[$agent].command // []' "$CONFIG_FILE")
-        AGENT_ENABLED[$agent]=$(jq -r --arg agent "$agent" '.agents[$agent] | if has("enabled") then .enabled else true end' "$CONFIG_FILE")
-        config_value=$(jq -r --arg agent "$agent" '.agents[$agent].instructions // ""' "$CONFIG_FILE")
-        if [[ -n "$config_value" ]]; then
-            AGENT_INSTRUCTIONS[$agent]=$config_value
-        fi
-    done < <(jq -r '.agents | keys[]' "$CONFIG_FILE")
 
     REVIEW_AGENTS=()
     for agent in "${CONFIGURED_REVIEWERS[@]}"; do
