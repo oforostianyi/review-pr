@@ -465,8 +465,16 @@ keys remain language-independent.
   `{"record":"amendment","source_id":...}` line per finding. The orchestrator sets only the fields
   asked for, and only in the shape the contract expects, so every other field stays as the draft
   wrote it, then validates the merged stream as an ordinary primary review. When an amendment was
-  tried the schema repair is skipped, and a failed amendment goes on to salvage with whatever it did
-  set, so only a finding that is still incomplete is dropped.
+  tried the schema repair is skipped. In a cross-review or final synthesis, a failed amendment is
+  followed by a continuation when what the stream still lacks qualifies for one -- refs left
+  unanswered, or findings still missing only such content (a key left out counts when the same
+  finding reports the field). It is judged on the stream with whatever the amendment did set, so
+  only the findings still incomplete are set aside and their refs asked for again with the
+  repository open; on Tools 29285 Pi cut its amendment off mid-string and the verdict was dropped.
+  A final draft that already holds resolution records is not continued, as with any final
+  continuation, and goes to the ordinary retry. Otherwise, and when the continuation fails, the
+  stream goes on to salvage with whatever the amendment did set, so only a finding that is still
+  incomplete is dropped.
 - Preserve both responses. The repaired report must pass the full schema, completeness, provenance,
   and RIGHT-side anchor validation. Compare the ordered findings by `source_id` using canonical JSON
   for `title`, `claim`, `anchor`, `evidence`, `failure_scenario`, `recommendation`, `classification`,

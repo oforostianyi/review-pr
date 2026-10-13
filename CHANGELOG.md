@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A cross-review or final finding left incomplete after a failed field amendment is asked for again
+  in a continuation, as 1.26.1 meant to do; until now a tried amendment skipped every other
+  recovery and went straight to salvage, so that continuation never ran. The continuation is judged
+  on the stream as the amendment left it, so a finding the amendment did complete is kept, and a
+  key left out counts as missing content when the same finding reports the field. On Tools 29285 Pi
+  cut its amendment off mid-string and its verdict was dropped.
+
 ## [1.26.2] - 2026-10-13
 
 ### Fixed

@@ -1228,6 +1228,113 @@ run_cross_continuation_salvage_case() {
         'and the published review carries the loss among its verification limits'
 }
 
+# A verdict without its failure scenario whose amendment came back cut off
+# (Tools 29285, 2026-10-13) went straight to salvage, which dropped it. The
+# continuation asks for that ref again with the agent's tools.
+run_cross_amendment_continuation_case() {
+    local case_dir="$suite_root/cross-amendment-continuation"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem gamma_findings
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture cut-off amendment.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-second-missing-failure-scenario\n' >"$scenarios/gamma-cross-review"
+    printf 'amendment-cut-off\n' >"$scenarios/gamma-cross-review-findings-amendment"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a cut-off amendment pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    gamma_findings="$work_dir/${stem}-cross-gamma-findings.json"
+
+    assert_file_exists "$capture/cross-review-findings-amendment-gamma-attempt-1.prompt" \
+        'the missing failure scenario is asked for first'
+    assert_file_exists "$capture/cross-review-findings-continuation-gamma-attempt-1.prompt" \
+        'and when the amendment brings nothing usable, the ref is asked for again in a continuation'
+    assert_false 'not in the schema repair, which may not write it' \
+        test -e "$capture/cross-review-findings-repair-gamma-attempt-1.prompt"
+    assert_eq '2' "$(jq '.findings | length' "$gamma_findings")" \
+        'the continued cross-review answers both refs'
+    assert_eq '0' "$(jq '(.salvage_losses // []) | length' "$manifest")" \
+        'and nothing was salvaged away'
+}
+
+# An amendment that completes one of two verdicts: the continuation asks only
+# for the one still broken, and the amended verdict is kept as amended.
+run_cross_partial_amendment_continuation_case() {
+    local case_dir="$suite_root/cross-partial-amendment-continuation"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem gamma_findings continuation_prompt
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture partial amendment.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'cross-ndjson-missing-failure-scenario\n' >"$scenarios/gamma-cross-review"
+    printf 'amendment-scenario-first-only\n' >"$scenarios/gamma-cross-review-findings-amendment"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a partial amendment pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    gamma_findings="$work_dir/${stem}-cross-gamma-findings.json"
+    continuation_prompt="$capture/cross-review-findings-continuation-gamma-attempt-1.prompt"
+
+    assert_file_exists "$continuation_prompt" 'the verdict the amendment left broken is asked for again'
+    assert_eq '1' "$(sed -n '/===== BEGIN PENDING SOURCE REFS =====/,/===== END PENDING SOURCE REFS =====/p' "$continuation_prompt" | grep -c '"source_id"')" \
+        'and only that one: the verdict the amendment completed is kept'
+    assert_eq 'Mock amendment: a request reaches the changed branch.' "$(jq -r '.findings[0].failure_scenario' "$gamma_findings")" \
+        'with the failure scenario the amendment wrote'
+    assert_eq '2' "$(jq '.findings | length' "$gamma_findings")" \
+        'and the continued cross-review answers both refs'
+}
+
+# The final synthesis takes the same path: a finding still without its
+# recommendation after the amendment is asked for again in a continuation.
+run_final_amendment_continuation_case() {
+    local case_dir="$suite_root/final-amendment-continuation"
+    local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
+    local checkout config="$case_dir/config.json" manifest work_dir stem final_findings
+
+    mkdir -p -- "$case_dir" "$reviews" "$fake_bin" "$scenarios" "$capture"
+    checkout=$(make_repository "$case_dir")
+    export REVIEW_PR_FAKE_REFERENCE_SHA; REVIEW_PR_FAKE_REFERENCE_SHA=$(git -C "$checkout" rev-parse main)
+    export REVIEW_PR_FAKE_PULL_HEAD_SHA; REVIEW_PR_FAKE_PULL_HEAD_SHA=$(git --git-dir="$case_dir/origin.git" rev-parse refs/pull/122/head)
+    export REVIEW_PR_FAKE_BASE_REF=main REVIEW_PR_FAKE_DEFAULT_BRANCH=main REVIEW_PR_FAKE_PR_BODY='Fixture final cut-off amendment.'
+    unset REVIEW_PR_FAKE_DEFAULT_BRANCH_FAILURE
+    write_three_agent_config "$config" "$checkout" "$reviews"
+    ln -s "$test_dir/fake-gh.sh" "$fake_bin/gh"
+    printf 'final-ndjson-second-missing-recommendation\n' >"$scenarios/alpha-final-synthesis"
+    printf 'amendment-cut-off\n' >"$scenarios/alpha-final-findings-amendment"
+
+    PATH="$fake_bin:$PATH" REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
+        "$repo_root/bin/review-pr" --config "$config" 123 >"$case_dir/output.txt" 2>"$case_dir/stderr.log" \
+        || fail "a final cut-off amendment pipeline failed: $(tail -3 "$case_dir/stderr.log")"
+    manifest=$(latest_manifest "$reviews"); work_dir=${manifest%/*}; stem=$(jq -r '.review_id + "-" + .timestamp' "$manifest")
+    final_findings="$work_dir/${stem}-final-findings.json"
+
+    assert_eq complete "$(jq -r '.status.pipeline' "$manifest")" \
+        'a final finding the amendment could not complete does not fail the run'
+    assert_file_exists "$capture/final-findings-amendment-alpha-attempt-1.prompt" \
+        'the missing recommendation is asked for first'
+    assert_file_exists "$capture/final-findings-continuation-alpha-attempt-1.prompt" \
+        'and then the ref is asked for again in a continuation'
+    assert_false 'with no second synthesis attempt' \
+        test -e "$capture/final-synthesis-alpha-attempt-2.prompt"
+    assert_eq '2' "$(jq '.findings | length' "$final_findings")" \
+        'the continued final keeps the finding it had and adds the one asked again'
+}
+
 run_final_continuation_case() {
     local case_dir="$suite_root/final-continuation"
     local reviews="$case_dir/reviews" fake_bin="$case_dir/bin" scenarios="$case_dir/scenarios" capture="$case_dir/captured-prompts"
@@ -2335,6 +2442,9 @@ run_dispute_resolution_case
 run_dispute_resolution_failure_case
 run_cross_continuation_case
 run_cross_continuation_salvage_case
+run_cross_amendment_continuation_case
+run_cross_partial_amendment_continuation_case
+run_final_amendment_continuation_case
 run_quorum_cross_case
 run_quorum_primary_case
 run_quorum_below_case

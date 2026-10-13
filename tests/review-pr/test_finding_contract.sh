@@ -451,6 +451,29 @@ assert_false 'without the content mode a stream with no unanswered ref stays wit
     ndjson_failure_continuation_drops 'finding[x14].failure_scenario'
 assert_false 'a structural field is left to the schema repair' \
     ndjson_failure_continuation_drops 'finding[x14].keys' content
+assert_false 'and so is a key left out before the amendment has had its turn' \
+    ndjson_failure_continuation_drops 'finding[x14].keys, finding[x14].failure_scenario' content
+assert_eq 'x14' "$(ndjson_failure_continuation_drops 'finding[x14].keys, finding[x14].failure_scenario' amended)" \
+    'after a failed amendment a key left out is content when the same record reports its failure scenario'
+assert_false 'but not when only another record does' \
+    ndjson_failure_continuation_drops 'finding[x11].keys, finding[x14].failure_scenario' amended
+# After a failed amendment the continuation is judged on the stream as it now
+# is: a finding the amendment completed is not asked for again (Tools 29285).
+NDJSON_AMENDED_FAILURE_REASON='schema_provenance_or_completeness_validation_failed: finding[x14].failure_scenario'
+assert_eq 'x14' "$(ndjson_amended_continuation_drops)" \
+    'only the finding the amendment left broken is set aside'
+NDJSON_AMENDED_FAILURE_REASON='schema_provenance_or_completeness_validation_failed: finding[x04].keys, finding[x04].failure_scenario; amendment_supplied_nothing_usable'
+assert_eq 'x04' "$(ndjson_amended_continuation_drops)" \
+    'a key left out with its failure scenario is set aside too, past the amendment note'
+NDJSON_AMENDED_FAILURE_REASON='schema_provenance_or_completeness_validation_failed: source_refs.missing[pi:x17], finding[x03].anchor'
+assert_eq 'x03' "$(ndjson_amended_continuation_drops)" \
+    'unanswered refs with a broken record are continued as before the amendment'
+NDJSON_AMENDED_FAILURE_REASON='schema_provenance_or_completeness_validation_failed: stream.no_complete, source_refs.missing[pi:x17]'
+assert_true 'and so is a stream that stopped short' ndjson_amended_continuation_drops
+NDJSON_AMENDED_FAILURE_REASON='schema_provenance_or_completeness_validation_failed: finding[x14].category'
+assert_false 'a structural field still goes to salvage' ndjson_amended_continuation_drops
+NDJSON_AMENDED_FAILURE_REASON=''
+assert_false 'and nothing is continued without a recorded failure' ndjson_amended_continuation_drops
 assert_false 'and so is a stream with nothing broken at record level' \
     ndjson_failure_continuation_drops 'stream.no_complete' content
 broken_draft="$test_root/cross-broken-and-truncated.ndjson"

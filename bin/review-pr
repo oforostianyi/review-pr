@@ -187,6 +187,9 @@ CONTINUATION_DROP_IDS=""
 NDJSON_ALLOW_PARTIAL_COVERAGE=false
 NDJSON_SALVAGE_MODE=false
 NDJSON_AMENDMENT_TRIED=false
+# The failure the stream still has after a failed amendment: the merged
+# stream's own when the amendment set some fields, else the original one.
+NDJSON_AMENDED_FAILURE_REASON=""
 QUOTA_MODE=false
 QUOTA_JSON=false
 QUOTA_CODEX_MINIMUM=""
@@ -6202,17 +6205,19 @@ ndjson_failure_is_truncation() {
 #
 # With "content" as the second argument no ref need be unanswered, but every
 # broken field must be content only the agent can write -- a failure scenario,
-# a recommendation or an anchor -- which the field amendment already asked for
-# and did not get. On ListingSyncer 973 (2026-10-12) Pi answered the amendment
-# for one of two findings and the other was dropped; the schema repair that came
-# next runs without tools and may not write content either.
+# a recommendation or an anchor. On ListingSyncer 973 (2026-10-12) Pi answered
+# the amendment for one of two findings and the salvage that came next dropped
+# the other; the schema repair runs without tools and may not write content
+# either. "amended", used once the field amendment has failed, also counts a key
+# left out when the same finding reports such a field, since that is the key it
+# left out; before the amendment that case may be the schema repair's.
 ndjson_failure_continuation_drops() {
     local detail=$1 mode=${2:-refs}
     local remainder=$detail
-    local item field missing=false
-    local -a drops=()
+    local item field id missing=false
+    local -a drops=() content_ids=() keys_ids=()
 
-    [[ "$mode" == content || "$detail" == *'source_refs.missing['* ]] || return 1
+    [[ "$mode" != refs || "$detail" == *'source_refs.missing['* ]] || return 1
     while [[ -n "$remainder" ]]; do
         if [[ "$remainder" == *', '* ]]; then
             item=${remainder%%, *}
@@ -6226,22 +6231,48 @@ ndjson_failure_continuation_drops() {
             'source_refs.missing['*']') missing=true ;;
             'finding['*'].'*)
                 field=${item##*].}
+                id=${item#finding[}
+                id=${id%%]*}
+                [[ "$id" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
                 if [[ "$mode" == content ]]; then
                     case "$field" in
-                        failure_scenario | recommendation | anchor) ;;
+                        failure_scenario | recommendation | anchor) content_ids+=("$id") ;;
+                        *) return 1 ;;
+                    esac
+                elif [[ "$mode" == amended ]]; then
+                    case "$field" in
+                        failure_scenario | recommendation | anchor) content_ids+=("$id") ;;
+                        keys) keys_ids+=("$id") ;;
                         *) return 1 ;;
                     esac
                 fi
-                item=${item#finding[}
-                item=${item%%]*}
-                [[ "$item" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
-                [[ " ${drops[*]} " == *" ${item} "* ]] || drops+=("$item")
+                [[ " ${drops[*]} " == *" ${id} "* ]] || drops+=("$id")
                 ;;
             *) return 1 ;;
         esac
     done
-    [[ "$missing" == true || ( "$mode" == content && ${#drops[@]} -gt 0 ) ]] || return 1
+    # A key left out is reported apart from the field it was; it is content only
+    # when the same finding also reports a content field.
+    for id in "${keys_ids[@]}"; do
+        [[ " ${content_ids[*]} " == *" ${id} "* ]] || return 1
+    done
+    [[ "$missing" == true || ( "$mode" != refs && ${#drops[@]} -gt 0 ) ]] || return 1
     printf '%s' "${drops[*]}"
+}
+
+# Whether a stream whose field amendment failed can still be continued, judged
+# on what the stream holds now: NDJSON_AMENDED_FAILURE_REASON names only the
+# findings the amendment left broken, so a finding it did complete is kept
+# instead of being asked for again. Prints the source ids to set aside.
+ndjson_amended_continuation_drops() {
+    local detail=${NDJSON_AMENDED_FAILURE_REASON#*: }
+
+    [[ -n "$NDJSON_AMENDED_FAILURE_REASON" ]] || return 1
+    detail=${detail%%; *}
+    if ndjson_failure_is_truncation "$detail"; then
+        return 0
+    fi
+    ndjson_failure_continuation_drops "$detail" || ndjson_failure_continuation_drops "$detail" amended
 }
 
 # Splits a truncated draft into the part that is kept and the work that is left.
@@ -7721,6 +7752,7 @@ attempt_ndjson_amendment() {
     local log_diagnostic="${diagnostic_base}.log"
 
     NDJSON_AMENDMENT_TRIED=false
+    NDJSON_AMENDED_FAILURE_REASON=$original_failure_reason
     label="$(amendment_phase_label "$phase") findings amendment"
     [[ "$phase" != primary ]] || label='primary findings amendment'
     section=$phase
@@ -7806,6 +7838,7 @@ attempt_ndjson_amendment() {
             FINDING_CONTRACT_FAILURE_REASON=""
             return 0
         fi
+        NDJSON_AMENDED_FAILURE_REASON=$FINDING_CONTRACT_FAILURE_REASON
         case "$phase" in
             primary) PRIMARY_RAW_OUTPUTS[$agent]=$actual_raw PRIMARY_FINDINGS_OUTPUTS[$agent]=$actual_findings ;;
             cross) CROSS_RAW_OUTPUTS[$agent]=$actual_raw CROSS_FINDINGS_OUTPUTS[$agent]=$actual_findings ;;
@@ -10294,6 +10327,12 @@ run_review_phase() {
                 # A stream that stopped short of the required source refs is
                 # continued; every other failure gets the bounded no-tools
                 # schema repair. The two are mutually exclusive by construction.
+                # After a field amendment that failed, a continuation is chosen
+                # again from what the stream still lacks, since it asks the agent
+                # with its tools; the schema repair is not run, as it may not
+                # write what the amendment could not get (Tools 29285,
+                # 2026-10-13: Pi cut its amendment off mid-string and its
+                # verdict was dropped).
                 cross_recovery=attempt_cross_ndjson_repair
                 CONTINUATION_DROP_IDS=""
                 if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
@@ -10312,6 +10351,14 @@ run_review_phase() {
                     read_token_usage "${TEMP_USAGE_FILES[$agent]}"
                     token_display=$TOKEN_USAGE_DISPLAY
                 elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] && "$cross_recovery" "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
+                    "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
+                    "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
+                    read_token_usage "${TEMP_USAGE_FILES[$agent]}"
+                    token_display=$TOKEN_USAGE_DISPLAY
+                elif [[ "$NDJSON_AMENDMENT_TRIED" == true ]] \
+                    && CONTINUATION_DROP_IDS=$(ndjson_amended_continuation_drops) \
+                    && { activity_log "Asking ${agent} again for the cross-review refs the amendment left without a complete verdict${CONTINUATION_DROP_IDS:+: ${CONTINUATION_DROP_IDS}}"; true; } \
+                    && attempt_cross_ndjson_continuation "$agent" "$attempt" "${TEMP_OUTPUTS[$agent]}" \
                     "${TEMP_LOGS[$agent]}" "${TEMP_USAGE_FILES[$agent]}" \
                     "${TEMP_USAGE_JSON_FILES[$agent]}" "${phase_started_at[$agent]}"; then
                     read_token_usage "${TEMP_USAGE_FILES[$agent]}"
@@ -12987,6 +13034,8 @@ run_final_synthesis_attempt() {
             printf 'final ndjson-v1 validation failed before repair: %s\n' "$FINDING_CONTRACT_FAILURE_REASON" >>"$final_log"
             # A stream that stopped short of the required cross-review refs is
             # continued; every other failure gets the bounded no-tools repair.
+            # As in the cross-review, a failed field amendment may still be
+            # followed by a continuation, never by the repair.
             final_recovery=attempt_final_ndjson_repair
             CONTINUATION_DROP_IDS=""
             if ndjson_failure_is_truncation "${FINDING_CONTRACT_FAILURE_REASON#*: }"; then
@@ -13006,6 +13055,13 @@ run_final_synthesis_attempt() {
                 final_token_display=$TOKEN_USAGE_DISPLAY
             elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] \
                 && "$final_recovery" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
+                final_finished_at=$(date +%s)
+                read_token_usage "$final_usage"
+                final_token_display=$TOKEN_USAGE_DISPLAY
+            elif [[ "$NDJSON_AMENDMENT_TRIED" == true ]] \
+                && CONTINUATION_DROP_IDS=$(ndjson_amended_continuation_drops) \
+                && { activity_log "Asking ${FINAL_SYNTHESIZER} again for the final refs the amendment left without a complete finding${CONTINUATION_DROP_IDS:+: ${CONTINUATION_DROP_IDS}}"; true; } \
+                && attempt_final_ndjson_continuation "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
                 final_finished_at=$(date +%s)
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY

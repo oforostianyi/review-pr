@@ -492,6 +492,31 @@ case "$behavior" in
         emit_valid_ndjson_final | jq -c 'if .record == "finding" and .classification == "CONFIRMED" then del(.recommendation) else . end'
         write_usage null 58
         ;;
+    # The second verdict without its failure scenario, and an amendment cut off
+    # inside its string, as Pi wrote on Tools 29285: only a continuation, which
+    # asks for that ref again, can bring the verdict back.
+    cross-ndjson-second-missing-failure-scenario)
+        emit_valid_ndjson_cross | jq -c 'if .record == "finding" and (.source_id | endswith(":C-002")) then del(.failure_scenario) else . end'
+        write_usage null 58
+        ;;
+    amendment-cut-off)
+        prompt_block_lines 'FINDINGS TO AMEND' | head -n 1 | jq -j '"{\"record\":\"amendment\",\"source_id\":\"" + .source_id + "\",\"failure_scenario\":\"Cut off before the closing quote."'
+        printf '\n'
+        write_usage null 21
+        ;;
+    # Answers the amendment for the first finding it lists and leaves the rest.
+    amendment-scenario-first-only)
+        prompt_block_lines 'FINDINGS TO AMEND' | head -n 1 | jq -c '{record: "amendment", source_id,
+            failure_scenario: "Mock amendment: a request reaches the changed branch."}'
+        write_usage null 21
+        ;;
+    # A final split in two whose second record lost its recommendation; nothing
+    # is disputed, so the draft holds no resolution and can be continued.
+    final-ndjson-second-missing-recommendation)
+        emit_valid_ndjson_final resolved source null general_engineering '' CONFIRMED true \
+            | jq -c 'if .record == "finding" and .source_id == "FINAL-002" then del(.recommendation) else . end'
+        write_usage null 58
+        ;;
     amendment-scenario-from-prompt)
         prompt_block_lines 'FINDINGS TO AMEND' | jq -c '{record: "amendment", source_id,
             failure_scenario: "Mock amendment: a request reaches the changed branch.", claim: "An amendment may not rewrite the claim."}'
