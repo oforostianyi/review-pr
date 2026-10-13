@@ -527,7 +527,7 @@ run_uses_codex() {
     [[ -z "$FALLBACK_SYNTHESIZER" ]] || agents+=("$FALLBACK_SYNTHESIZER")
     [[ "$scope" != all ]] || agents+=("${REVIEW_AGENTS[@]}")
     for agent in "${agents[@]}"; do
-        [[ -n "$agent" && "$(agent_type "$agent")" == codex ]] && return 0
+        [[ -n "$agent" && "${AGENT_TYPES[$agent]:-$agent}" == codex ]] && return 0
     done
     return 1
 }
@@ -583,7 +583,7 @@ codex_agents_short_of_quota() {
     CODEX_QUOTA_SKIPPED_AGENTS=()
     [[ -n "$QUOTA_CODEX_MINIMUM" ]] || return 0
     for agent in "$@"; do
-        [[ "$(agent_type "$agent")" != codex ]] || codex_agents+=("$agent")
+        [[ "${AGENT_TYPES[$agent]:-$agent}" != codex ]] || codex_agents+=("$agent")
     done
     (( ${#codex_agents[@]} > 0 )) || return 0
     codex_quota_short || return 0
@@ -2312,7 +2312,7 @@ agent_effort_arguments() {
     # decide" already meant, so auto is a name for that rather than a value to
     # forward.
     [[ -n "$effort" && "$effort" != auto ]] || return 0
-    case "$(agent_type "$agent")" in
+    case "${AGENT_TYPES[$agent]:-$agent}" in
         claude) printf '%s\n' --effort "$effort" ;;
         codex) printf '%s\n' -c "model_reasoning_effort=\"${effort}\"" ;;
         pi) printf '%s\n' --thinking "$effort" ;;
@@ -2334,7 +2334,7 @@ dashboard_agent_label() {
         effort=$FINALIZATION_EFFORT
     fi
 
-    label=$(agent_label "$agent")
+    label=${AGENT_LABELS[$agent]:-$agent}
     if [[ -z "$model" && -z "$effort" ]]; then
         printf '%s\n' "$label"
         return
@@ -2439,7 +2439,7 @@ build_review_matrix_table_header() {
     REVIEW_MATRIX_TABLE_SEPARATOR='|---|'
     for agent in "${REVIEW_AGENTS[@]}"; do
         [[ "$agent" != "$excluded_agent" ]] || continue
-        label=$(markdown_table_value "$(agent_label "$agent")")
+        label=$(markdown_table_value "${AGENT_LABELS[$agent]:-$agent}")
         REVIEW_MATRIX_TABLE_HEADER+=" ${label} |"
         REVIEW_MATRIX_TABLE_SEPARATOR+='---|'
     done
@@ -2467,7 +2467,7 @@ prepend_agent_report_header() {
         *) die "Cannot generate agent report metadata for unknown phase: ${phase}" ;;
     esac
 
-    reviewer_label=$(agent_label "$agent")
+    reviewer_label=${AGENT_LABELS[$agent]:-$agent}
     model=$(jq -r '.model // empty' "$usage_json_file" 2>/dev/null || true)
     effort=$(jq -r '.reasoning_effort // .effort // empty' "$usage_json_file" 2>/dev/null || true)
     [[ -n "$model" ]] || model=${AGENT_MODELS[$agent]:-}
@@ -3660,7 +3660,7 @@ agent_skill_instruction() {
                 default_directory=${DEFAULT_CONFIG_FILE%/*}
                 [[ "$default_directory" == "$CONFIG_DIRECTORY" ]] || skill_directories+=("$default_directory")
                 for skill_directory in "${skill_directories[@]}"; do
-                    for skill_owner in "$agent" "$(agent_type "$agent")"; do
+                    for skill_owner in "$agent" "${AGENT_TYPES[$agent]:-$agent}"; do
                         candidate_skill_file="${skill_directory}/skills/${skill_owner}/${skill_name}/SKILL.md"
                         if [[ -f "$candidate_skill_file" && ! -L "$candidate_skill_file" && -r "$candidate_skill_file" ]]; then
                             AGENT_SKILL_FILE=$candidate_skill_file
@@ -3680,7 +3680,7 @@ agent_skill_instruction() {
         return
     fi
 
-    case "$(agent_type "$agent")" in
+    case "${AGENT_TYPES[$agent]:-$agent}" in
         claude)
             AGENT_SKILL_INSTRUCTION="Use any applicable code-review skill and repository instructions available in your current installation."
             ;;
@@ -3771,9 +3771,9 @@ validate_configuration() {
             continue
         fi
 
-        case "$(agent_type "$agent")" in
+        case "${AGENT_TYPES[$agent]:-$agent}" in
             claude | codex)
-                require_command "$(agent_type "$agent")"
+                require_command "${AGENT_TYPES[$agent]:-$agent}"
                 ;;
             pi)
                 require_command pi
@@ -3913,7 +3913,7 @@ show_configuration() {
         fi
         printf '%s: label=%q model=%q effort=%q timeout=%q max_tool_calls=%q execution=%q\n' \
             "$agent" \
-            "$(agent_label "$agent")" \
+            "${AGENT_LABELS[$agent]:-$agent}" \
             "${AGENT_MODELS[$agent]:-}" \
             "${AGENT_EFFORTS[$agent]:-}" \
             "$(if (( ${AGENT_TIMEOUT_SECONDS[$agent]:-0} == 0 )); then printf disabled; else format_duration "${AGENT_TIMEOUT_SECONDS[$agent]}"; fi)" \
@@ -8203,13 +8203,13 @@ preserve_agent_failure_artifacts() {
         mv -- "$usage_json_file" "$destination"
         activity_log "Failure usage details: ${destination}"
     fi
-    agent_kind=$(agent_type "$agent")
+    agent_kind=${AGENT_TYPES[$agent]:-$agent}
     [[ "$agent_kind" != codex || -z "$phase" ]] || note_codex_resumable_session "$agent" "$phase" "$response_file"
     if [[ ( "$agent_kind" == pi || "$agent_kind" == codex ) && -s "$response_file" ]]; then
         destination="${artifact_base}-events.jsonl"
         assert_new_target "$destination"
         mv -- "$response_file" "$destination"
-        activity_log "Raw $(agent_label "$agent") events: ${destination}"
+        activity_log "Raw ${AGENT_LABELS[$agent]:-$agent} events: ${destination}"
     fi
     if [[ -s "$output_file" ]]; then
         if [[ "$phase" == "primary review" && "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]] \
@@ -8293,7 +8293,7 @@ write_primary_prompt() {
     local output_contract_block
 
     agent_skill_instruction "$reviewer"
-    reviewer_label=$(agent_label "$reviewer")
+    reviewer_label=${AGENT_LABELS[$reviewer]:-$reviewer}
     if [[ "$PRIMARY_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         read_heredoc output_contract_block <<EOF
 Output contract: ndjson-v1. This orchestrator contract overrides any Markdown formatting requested by a skill. Return only newline-delimited JSON: exactly one complete JSON object per physical line, with no Markdown fence, preamble, commentary, blank prose, or trailing text. Emit the whole stream in one single final message: the turn ends when a message is sent, so a message that carries only part of the records is an incomplete review, not a first instalment. Every backslash inside a string value must be doubled: a PHP class name is written "GuzzleHttp\\\\Handler\\\\MockHandler", never "GuzzleHttp\\Handler\\MockHandler", which is not valid JSON and rejects the whole record.
@@ -8384,7 +8384,7 @@ write_cross_prompt() {
 
     (( $# >= 2 && $# % 2 == 0 )) || die "Cross-review prompt for ${reviewer} needs label/report pairs"
     agent_skill_instruction "$reviewer"
-    reviewer_label=$(agent_label "$reviewer")
+    reviewer_label=${AGENT_LABELS[$reviewer]:-$reviewer}
     if [[ "$CROSS_COMPARISON_MODE" == inline ]]; then
         build_review_matrix_table_header "$CROSS_REVIEW_LANGUAGE" "$reviewer"
         read_heredoc comparison_prompt_block <<EOF
@@ -8613,7 +8613,7 @@ write_final_prompt() {
     local report
 
     agent_skill_instruction "$FINAL_SYNTHESIZER"
-    synthesizer_label=$(agent_label "$FINAL_SYNTHESIZER")
+    synthesizer_label=${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}
     if [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
         comparison_prompt_block='Extended comparison content is not part of this machine-readable synthesis. A standalone comparison may be generated later from the deterministic final report.'
         [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] || dispute_contract_block=$FINAL_RESOLUTION_CONTRACT_BLOCK
@@ -8813,7 +8813,7 @@ write_comparison_prompt() {
 This pull-request comparison report is managed by the review-pr orchestrator. This is orchestrated mode.
 
 Phase: standalone comparison synthesis
-Synthesizer: $(agent_label "$FINAL_SYNTHESIZER") (${FINAL_SYNTHESIZER})
+Synthesizer: ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER} (${FINAL_SYNTHESIZER})
 GitHub repository: ${GITHUB_REPOSITORY}
 Pull request: #${PR_NUMBER}
 Base branch: ${BASE_REF}
@@ -9549,7 +9549,7 @@ start_agent() {
         write_unavailable_usage_summary "$usage_json_file" "$agent" "$phase" "$model" "$effort"
         (
             cd "$agent_working_directory"
-            run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" env \
+            run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" env \
                 REVIEW_PR_ARTIFACT_ONLY="$artifact_only" \
                 REVIEW_PR_CONTRACT_TEST="$CONTRACT_TEST_MODE" \
                 REVIEW_PR_AGENT="$agent" \
@@ -9583,7 +9583,7 @@ start_agent() {
 
     if [[ "$command_template" != '[]' ]]; then
         write_unavailable_usage_summary "$usage_json_file" "$agent" "$phase" "$model" "$effort"
-        run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" run_configured_command_in_worktree \
+        run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" run_configured_command_in_worktree \
             "$agent" "$phase" "$prompt_file" "$command_template" "$model" "$effort" "$attempt" "$usage_file" "$usage_json_file" \
             >"$output_file" 2>"$log_file" &
 
@@ -9592,7 +9592,7 @@ start_agent() {
         return
     fi
 
-    case "$(agent_type "$agent")" in
+    case "${AGENT_TYPES[$agent]:-$agent}" in
         codex)
             local response_file="${usage_file}.events"
             local resume_key="${agent}|${phase}" resume_session='' resume_prompt=''
@@ -9613,7 +9613,7 @@ start_agent() {
                 if [[ -n "$resume_session" ]]; then
                     # resume takes no --sandbox; the read-only sandbox is pinned
                     # through the config override rather than left to the session.
-                    if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec resume \
+                    if run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" codex exec resume \
                         "$resume_session" \
                         -c 'sandbox_mode="read-only"' \
                         --json \
@@ -9637,7 +9637,7 @@ start_agent() {
                     fi
                 fi
                 if [[ -z "$resume_session" ]]; then
-                    if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" codex exec \
+                    if run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" codex exec \
                         --sandbox read-only \
                         "${codex_session_arguments[@]}" \
                         --color never \
@@ -9663,7 +9663,7 @@ start_agent() {
             TEMP_FILES+=("$response_file")
             (
                 cd "$agent_working_directory"
-                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" claude \
+                if run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" claude \
                     --print \
                     --no-session-persistence \
                     --output-format json \
@@ -9721,7 +9721,7 @@ start_agent() {
             fi
             (
                 cd "$agent_working_directory"
-                if run_with_agent_timeout "$timeout_seconds" "$(agent_label "$agent") ${phase}" "${pi_guard_env[@]}" pi \
+                if run_with_agent_timeout "$timeout_seconds" "${AGENT_LABELS[$agent]:-$agent} ${phase}" "${pi_guard_env[@]}" pi \
                     --no-session \
                     --mode json \
                     "${pi_system_prompt_arguments[@]}" \
@@ -9898,7 +9898,7 @@ initialize_dashboard() {
     if [[ "$mode" == rerun ]]; then
         DASHBOARD_SECTIONS=(cross_inputs final)
         for agent in "${REVIEW_AGENTS[@]}"; do
-            key=$(dashboard_key cross_inputs "$agent")
+            key="cross_inputs|${agent}"
             DASHBOARD_ROWS+=("$key")
             DASHBOARD_LABELS[$key]=$(dashboard_agent_label "$agent" cross_inputs)
             DASHBOARD_STATUSES[$key]=LOADED
@@ -9910,7 +9910,7 @@ initialize_dashboard() {
     else
         DASHBOARD_SECTIONS=(primary cross final)
         for agent in "${REVIEW_AGENTS[@]}"; do
-            key=$(dashboard_key primary "$agent")
+            key="primary|${agent}"
             DASHBOARD_ROWS+=("$key")
             DASHBOARD_LABELS[$key]=$(dashboard_agent_label "$agent" primary)
             DASHBOARD_STATUSES[$key]=WAITING
@@ -9920,7 +9920,7 @@ initialize_dashboard() {
             DASHBOARD_TOKENS[$key]='-'
         done
         for agent in "${REVIEW_AGENTS[@]}"; do
-            key=$(dashboard_key cross "$agent")
+            key="cross|${agent}"
             DASHBOARD_ROWS+=("$key")
             DASHBOARD_LABELS[$key]=$(dashboard_agent_label "$agent" cross)
             DASHBOARD_STATUSES[$key]=WAITING
@@ -9931,7 +9931,7 @@ initialize_dashboard() {
         done
     fi
 
-    key=$(dashboard_key final "$FINAL_SYNTHESIZER")
+    key="final|${FINAL_SYNTHESIZER}"
     DASHBOARD_ROWS+=("$key")
     DASHBOARD_LABELS[$key]=$(dashboard_agent_label "$FINAL_SYNTHESIZER" final)
     DASHBOARD_STATUSES[$key]=WAITING
@@ -9942,7 +9942,7 @@ initialize_dashboard() {
 
     if [[ "$FINAL_COMPARISON_MODE" == standalone ]]; then
         DASHBOARD_SECTIONS+=(comparison)
-        key=$(dashboard_key comparison "$FINAL_SYNTHESIZER")
+        key="comparison|${FINAL_SYNTHESIZER}"
         DASHBOARD_ROWS+=("$key")
         DASHBOARD_LABELS[$key]=$(dashboard_agent_label "$FINAL_SYNTHESIZER" final)
         DASHBOARD_STATUSES[$key]=WAITING
@@ -10009,7 +10009,7 @@ set_dashboard_status() {
     local tokens=${7:--}
     local key
 
-    key=$(dashboard_key "$section" "$agent")
+    key="${section}|${agent}"
     [[ -v "DASHBOARD_STATUSES[$key]" ]] || return
     DASHBOARD_STATUSES[$key]=$status
     DASHBOARD_PIDS[$key]=$pid
@@ -10026,7 +10026,7 @@ prepare_dashboard_phase() {
     local key
 
     for agent in "$@"; do
-        key=$(dashboard_key "$section" "$agent")
+        key="${section}|${agent}"
         [[ -v "DASHBOARD_STATUSES[$key]" ]] || continue
         DASHBOARD_STATUSES[$key]=QUEUED
     done
@@ -11036,7 +11036,7 @@ create_full_manifest() {
     # per map and agent: ten processes for each reviewer on every run.
     local -a agent_rows=()
     for agent in "${REVIEW_AGENTS[@]}"; do
-        agent_rows+=("$agent" "$(agent_label "$agent")" "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
+        agent_rows+=("$agent" "${AGENT_LABELS[$agent]:-$agent}" "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
             "${PRIMARY_OUTPUTS[$agent]##*/}" "${CROSS_OUTPUTS[$agent]##*/}")
     done
     local manifest_maps
@@ -13041,7 +13041,7 @@ run_comparison_synthesis() {
     local comparison_draft=""
     local -a comparison_prompt_arguments=()
 
-    if [[ "$(agent_type "$FINAL_SYNTHESIZER")" == codex ]] && codex_quota_short; then
+    if [[ "${AGENT_TYPES[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}" == codex ]] && codex_quota_short; then
         COMPARISON_FAILURE_REASON="Codex quota below ${QUOTA_CODEX_MINIMUM}% before the standalone comparison: ${CODEX_QUOTA_SHORTFALL}"
         return 1
     fi
@@ -13055,18 +13055,18 @@ run_comparison_synthesis() {
     survivor_agents cross comparison_cross_sources
     if [[ "$RERUN_FINAL" != true ]]; then
         for agent in "${comparison_primary_sources[@]}"; do
-            comparison_prompt_arguments+=("Primary $(agent_label "$agent")" "${PRIMARY_OUTPUTS[$agent]}")
+            comparison_prompt_arguments+=("Primary ${AGENT_LABELS[$agent]:-$agent}" "${PRIMARY_OUTPUTS[$agent]}")
         done
     fi
     for agent in "${comparison_cross_sources[@]}"; do
-        comparison_prompt_arguments+=("Cross-review $(agent_label "$agent")" "${CROSS_OUTPUTS[$agent]}")
+        comparison_prompt_arguments+=("Cross-review ${AGENT_LABELS[$agent]:-$agent}" "${CROSS_OUTPUTS[$agent]}")
     done
     # Pi's @file loader can truncate a large attachment from the beginning.
     # Keep the canonical verdict at the tail so it survives that truncation.
     comparison_prompt_arguments+=("Final core synthesis" "$FINAL_REPORT")
     write_comparison_prompt "$comparison_prompt" "${comparison_prompt_arguments[@]}"
 
-    activity_log "Starting standalone comparison synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
+    activity_log "Starting standalone comparison synthesis with ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}"
     start_agent "$FINAL_SYNTHESIZER" "comparison synthesis" "$comparison_prompt" "$comparison_output" "$comparison_log" "$comparison_usage" "$comparison_usage_json"
     comparison_pid=$STARTED_PID
     comparison_started_at=$EPOCHSECONDS
@@ -13294,7 +13294,7 @@ run_final_synthesis_attempt() {
         final_status=0
         final_started_at=$EPOCHSECONDS
     else
-        activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
+        activity_log "Starting final synthesis with ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}"
         start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
         final_pid=$STARTED_PID
         final_started_at=$EPOCHSECONDS
@@ -13348,7 +13348,7 @@ run_final_synthesis_attempt() {
         if ! process_final_ndjson_output "$final_output" \
             && ! run_ndjson_salvage final "$FINAL_SYNTHESIZER" "$final_output" "$recovery_reason"; then
             FINAL_FAILURE_REASON="invalid final ndjson-v1 output (${recovery_reason}); salvage kept nothing"
-            activity_log "Could not salvage the final synthesis draft from $(agent_label "$FINAL_SYNTHESIZER"): ${FINDING_CONTRACT_FAILURE_REASON}"
+            activity_log "Could not salvage the final synthesis draft from ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}: ${FINDING_CONTRACT_FAILURE_REASON}"
             return 1
         fi
     elif [[ "$FINAL_FINDING_CONTRACT_MODE" == ndjson-v1 ]]; then
@@ -13583,7 +13583,7 @@ salvage_final_synthesis() {
         FINALIZATION_MODEL=$(jq -r '.model' "$descriptor")
         FINALIZATION_EFFORT=$(jq -r '.effort' "$descriptor")
         FINALIZATION_EFFORT_CONFIGURED=$(jq -r '.effort_configured' "$descriptor")
-        log "Every final synthesis attempt failed the contract; salvaging the draft from $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
+        log "Every final synthesis attempt failed the contract; salvaging the draft from ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
         if [[ "$FALLBACK_SYNTHESIS_USED" == true && "$(jq -r '.fallback' "$descriptor")" != true \
             && -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]]; then
             atomic_manifest_update '.final_fallback.outcome = "failed"'
@@ -13598,7 +13598,7 @@ run_final_synthesis() {
     local agent
     local -a primary_sources=() cross_sources=()
 
-    if [[ "$(agent_type "$FINAL_SYNTHESIZER")" == codex ]] && codex_quota_short; then
+    if [[ "${AGENT_TYPES[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}" == codex ]] && codex_quota_short; then
         FINAL_FAILURE_REASON="Codex quota below ${QUOTA_CODEX_MINIMUM}% before the final synthesis: ${CODEX_QUOTA_SHORTFALL}"
         return 1
     fi
@@ -13621,14 +13621,14 @@ run_final_synthesis() {
         FINAL_SOURCE_POLICY_INSTRUCTION='Inspect the actual checked-out PR/source whenever necessary; source code is the source of truth.'
         for agent in "${primary_sources[@]}"; do
             FINAL_PROMPT_ARGUMENTS+=(
-                "Primary $(agent_label "$agent")"
+                "Primary ${AGENT_LABELS[$agent]:-$agent}"
                 "${PRIMARY_OUTPUTS[$agent]}"
             )
         done
     fi
     for agent in "${cross_sources[@]}"; do
         FINAL_PROMPT_ARGUMENTS+=(
-            "Cross-review $(agent_label "$agent")"
+            "Cross-review ${AGENT_LABELS[$agent]:-$agent}"
             "${CROSS_OUTPUTS[$agent]}"
         )
     done
@@ -13692,7 +13692,7 @@ run_fallback_final_synthesis() {
     FINALIZATION_MODEL=${FALLBACK_MODEL:-${AGENT_MODELS[$FALLBACK_SYNTHESIZER]:-}}
     FINALIZATION_EFFORT=$FALLBACK_EFFORT
     FINALIZATION_EFFORT_CONFIGURED=$FALLBACK_EFFORT_CONFIGURED
-    log "Final synthesis by $(agent_label "$failed_synthesizer")${failed_model:+ on ${failed_model}} failed (${short_reason}); handing it to $(agent_label "$FINAL_SYNTHESIZER")${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
+    log "Final synthesis by ${AGENT_LABELS[$failed_synthesizer]:-$failed_synthesizer}${failed_model:+ on ${failed_model}} failed (${short_reason}); handing it to ${AGENT_LABELS[$FINAL_SYNTHESIZER]:-$FINAL_SYNTHESIZER}${FINALIZATION_MODEL:+ on ${FINALIZATION_MODEL}}"
     if [[ -n "${MANIFEST_FILE:-}" && -s "${MANIFEST_FILE:-}" ]]; then
         atomic_manifest_update \
             '.final_fallback = {from: $from, from_model: (if $from_model == "" then null else $from_model end),
@@ -13815,7 +13815,7 @@ EOF
             canonical="${root}/${agent}-${phase}-findings.json"
             rendered="${root}/${agent}-${phase}.md"
             write_contract_test_prompt "$agent" "$phase" "$prompt"
-            log "Contract test: $(agent_label "$agent") / ${phase}"
+            log "Contract test: ${AGENT_LABELS[$agent]:-$agent} / ${phase}"
             start_agent "$agent" "$phase_name" "$prompt" "$output" "$log_file" "$usage_file" "$usage_json"
             if wait "$STARTED_PID"; then status=0; else status=$?; fi
             RUNNING_PIDS=()
@@ -13861,11 +13861,11 @@ EOF
                     summary_effort=$FINALIZATION_EFFORT
                 fi
             fi
-            summary=$(jq -c --arg agent "$agent" --arg agent_label "$(agent_label "$agent")" --arg phase "$phase" \
+            summary=$(jq -c --arg agent "$agent" --arg agent_label "${AGENT_LABELS[$agent]:-$agent}" --arg phase "$phase" \
                 --arg model "$summary_model" --arg effort "$summary_effort" \
                 --arg result "$result" --argjson passed "$status_json" \
                 '. + [{agent:$agent,"label":$agent_label,phase:$phase,model:(if $model=="" then null else $model end),effort:(if $effort=="" then null else $effort end),result:$result,passed:$passed}]' <<<"$summary")
-            printf '%-18s %-8s %s\n' "$(agent_label "$agent")" "$phase" "${result^^}"
+            printf '%-18s %-8s %s\n' "${AGENT_LABELS[$agent]:-$agent}" "$phase" "${result^^}"
         done
     done
     jq -n --arg version "$REVIEW_PR_VERSION" --arg timestamp "$timestamp" --argjson results "$summary" \
@@ -14339,7 +14339,7 @@ if [[ "$RESUME_RUN" == true ]]; then
             ERROR_LOGS[$agent]="${WORK_DIR}/${REPORT_STEM}-cross-${agent}-resume-${TIMESTAMP}-error.log"
             cross_prompt_arguments=()
             for other_agent in "${PRIMARY_AGENTS[@]}"; do
-                [[ "$other_agent" == "$agent" ]] || cross_prompt_arguments+=("$(agent_label "$other_agent")" "${PRIMARY_OUTPUTS[$other_agent]}")
+                [[ "$other_agent" == "$agent" ]] || cross_prompt_arguments+=("${AGENT_LABELS[$other_agent]:-$other_agent}" "${PRIMARY_OUTPUTS[$other_agent]}")
             done
             write_cross_prompt "$agent" "${PROMPT_FILES[$agent]}" "${cross_prompt_arguments[@]}"
         done
@@ -14580,7 +14580,7 @@ for agent in "${PRIMARY_AGENTS[@]}"; do
             continue
         fi
         cross_prompt_arguments+=(
-            "$(agent_label "$other_agent")"
+            "${AGENT_LABELS[$other_agent]:-$other_agent}"
             "${PRIMARY_OUTPUTS[$other_agent]}"
         )
     done
