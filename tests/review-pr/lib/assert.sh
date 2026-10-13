@@ -4,6 +4,18 @@ set -euo pipefail
 
 TEST_ASSERTIONS=0
 
+# The tests write thousands of short-lived files. An endpoint scanner on the
+# development laptop checks every one of them under /tmp but leaves /dev/shm
+# alone (it chooses by path, not by file system), so the suite runs there when
+# /dev/shm is a writable tmpfs with room to spare; an explicit TMPDIR, macOS, or
+# a container with a small /dev/shm keeps the usual temporary directory.
+if [[ -z "${TMPDIR:-}" && -d /dev/shm && -w /dev/shm ]]; then
+    shm_free_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }') || shm_free_kb=0
+    [[ "$shm_free_kb" =~ ^[0-9]+$ ]] || shm_free_kb=0
+    (( shm_free_kb < 1048576 )) || export TMPDIR=/dev/shm
+    unset shm_free_kb
+fi
+
 fail() {
     printf 'not ok - %s\n' "$*" >&2
     exit 1
