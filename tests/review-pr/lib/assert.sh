@@ -16,6 +16,15 @@ if [[ -z "${TMPDIR:-}" && -d /dev/shm && -w /dev/shm ]]; then
     unset shm_free_kb
 fi
 
+# Every fixture repository commits, pushes and fetches, and git follows each of
+# those with an automatic maintenance run -- several hundred processes in the
+# pipeline tests that keep nothing tidy, since the repositories are thrown away.
+if [[ -z "${GIT_CONFIG_COUNT:-}" ]]; then
+    export GIT_CONFIG_COUNT=2
+    export GIT_CONFIG_KEY_0=maintenance.auto GIT_CONFIG_VALUE_0=false
+    export GIT_CONFIG_KEY_1=gc.auto GIT_CONFIG_VALUE_1=0
+fi
+
 fail() {
     printf 'not ok - %s\n' "$*" >&2
     exit 1
