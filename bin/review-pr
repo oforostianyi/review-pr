@@ -681,7 +681,9 @@ phase_seconds_json() {
         else
             value=null
         fi
-        json=$(jq -c --arg key "$key" --argjson value "$value" '. + {($key): $value}' <<<"$json")
+        # Keys are fixed words and values whole seconds or null, so the object
+        # is written as jq -c would print it, without starting jq four times.
+        [[ "$json" == '{}' ]] && json="{\"${key}\":${value}}" || json="${json%\}},\"${key}\":${value}}"
     done
     printf '%s' "$json"
 }
@@ -10769,48 +10771,27 @@ create_full_manifest() {
     if (( MAX_CONCURRENCY > 0 )); then
         configured_concurrency_json=$MAX_CONCURRENCY
     fi
+    # One jq builds every per-agent map, in reviewer order, instead of one jq
+    # per map and agent: ten processes for each reviewer on every run.
+    local -a agent_rows=()
     for agent in "${REVIEW_AGENTS[@]}"; do
-        labels_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg agent_label "$(agent_label "$agent")" \
-            '. + {($agent): $agent_label}' <<<"$labels_json")
-        timeout_seconds_json=$(jq -c \
-            --arg agent "$agent" \
-            --argjson timeout_seconds "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
-            '. + {($agent): $timeout_seconds}' <<<"$timeout_seconds_json")
-        primary_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${PRIMARY_OUTPUTS[$agent]##*/}" \
-            '. + {($agent): $file}' <<<"$primary_json")
-        cross_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${CROSS_OUTPUTS[$agent]##*/}" \
-            '. + {($agent): $file}' <<<"$cross_json")
-        primary_usage_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${WORK_DIR}/${REPORT_STEM}-${agent}-usage.json" \
-            '. + {($agent): ($file | split("/") | last)}' <<<"$primary_usage_json")
-        primary_raw_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${REPORT_STEM}-${agent}-raw.ndjson" \
-            '. + {($agent): $file}' <<<"$primary_raw_json")
-        primary_findings_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${REPORT_STEM}-${agent}-findings.json" \
-            '. + {($agent): $file}' <<<"$primary_findings_json")
-        cross_raw_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${REPORT_STEM}-cross-${agent}-raw.ndjson" \
-            '. + {($agent): $file}' <<<"$cross_raw_json")
-        cross_findings_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${REPORT_STEM}-cross-${agent}-findings.json" \
-            '. + {($agent): $file}' <<<"$cross_findings_json")
-        cross_usage_json=$(jq -c \
-            --arg agent "$agent" \
-            --arg file "${WORK_DIR}/${REPORT_STEM}-cross-${agent}-usage.json" \
-            '. + {($agent): ($file | split("/") | last)}' <<<"$cross_usage_json")
+        agent_rows+=("$agent" "$(agent_label "$agent")" "${AGENT_TIMEOUT_SECONDS[$agent]:-0}" \
+            "${PRIMARY_OUTPUTS[$agent]##*/}" "${CROSS_OUTPUTS[$agent]##*/}")
     done
+    eval "$(jq -nr --arg stem "$REPORT_STEM" '
+        [$ARGS.positional | range(0; length; 5) as $i | .[$i:$i + 5]] as $rows
+        | def map_of(value): reduce $rows[] as $row ({}; . + {($row[0]): ($row | value)});
+        "labels_json=\(map_of(.[1]) | tojson | @sh)",
+        "timeout_seconds_json=\(map_of(.[2] | tonumber) | tojson | @sh)",
+        "primary_json=\(map_of(.[3]) | tojson | @sh)",
+        "cross_json=\(map_of(.[4]) | tojson | @sh)",
+        "primary_usage_json=\(map_of("\($stem)-\(.[0])-usage.json") | tojson | @sh)",
+        "primary_raw_json=\(map_of("\($stem)-\(.[0])-raw.ndjson") | tojson | @sh)",
+        "primary_findings_json=\(map_of("\($stem)-\(.[0])-findings.json") | tojson | @sh)",
+        "cross_raw_json=\(map_of("\($stem)-cross-\(.[0])-raw.ndjson") | tojson | @sh)",
+        "cross_findings_json=\(map_of("\($stem)-cross-\(.[0])-findings.json") | tojson | @sh)",
+        "cross_usage_json=\(map_of("\($stem)-cross-\(.[0])-usage.json") | tojson | @sh)"
+    ' --args "${agent_rows[@]}")"
 
     MANIFEST_FILE="${WORK_DIR}/${REPORT_STEM}-manifest.json"
     assert_new_target "$MANIFEST_FILE"
@@ -11023,20 +11004,23 @@ update_full_manifest_phase() {
     # Only agents that ran in this invocation report an attempt count and
     # status. A resumed run keeps the values recorded for agents whose
     # artifacts were preserved instead of overwriting them with unknown/0.
+    # Built in one jq, in reviewer order, rather than one jq per agent and map.
+    local -a status_rows=()
     for agent in "${REVIEW_AGENTS[@]}"; do
         if [[ -v "PHASE_ATTEMPTS[$agent]" ]]; then
-            attempts_json=$(jq -c \
-                --arg agent "$agent" \
-                --argjson attempts "${PHASE_ATTEMPTS[$agent]}" \
-                '. + {($agent): $attempts}' <<<"$attempts_json")
+            status_rows+=(attempts "$agent" "${PHASE_ATTEMPTS[$agent]}")
         fi
         if [[ -v "PHASE_AGENT_STATUSES[$agent]" ]]; then
-            agent_status_json=$(jq -c \
-                --arg agent "$agent" \
-                --arg agent_status "${PHASE_AGENT_STATUSES[$agent]}" \
-                '. + {($agent): $agent_status}' <<<"$agent_status_json")
+            status_rows+=(status "$agent" "${PHASE_AGENT_STATUSES[$agent]}")
         fi
     done
+    if (( ${#status_rows[@]} > 0 )); then
+        eval "$(jq -nr '
+            [$ARGS.positional | range(0; length; 3) as $i | .[$i:$i + 3]] as $rows
+            | "attempts_json=\(reduce ($rows[] | select(.[0] == "attempts")) as $row ({}; . + {($row[1]): ($row[2] | fromjson)}) | tojson | @sh)",
+              "agent_status_json=\(reduce ($rows[] | select(.[0] == "status")) as $row ({}; . + {($row[1]): $row[2]}) | tojson | @sh)"
+        ' --args "${status_rows[@]}")"
+    fi
     atomic_manifest_update \
         '(.attempts[$phase] // {}) as $previous_attempts |
          (.agent_status[$phase] // {}) as $previous_status |
