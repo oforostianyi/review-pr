@@ -444,7 +444,7 @@ read_codex_quota() {
     local cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/review-pr" cache_file raw normalized message
 
     cache_file="${cache_dir}/quota-codex.json"
-    if [[ -s "$cache_file" ]] && jq -e --argjson now "$(date +%s)" \
+    if [[ -s "$cache_file" ]] && jq -e --argjson now "$EPOCHSECONDS" \
         '.available == true and ((.checked_at | fromdate) > ($now - 60))' "$cache_file" >/dev/null 2>&1; then
         cat -- "$cache_file"
         return 0
@@ -475,8 +475,10 @@ format_quota_reset() {
     local epoch=$1
 
     [[ "$epoch" =~ ^[0-9]+$ ]] || return 0
-    review_pr_date -d "@${epoch}" '+%a %d %b %H:%M' 2>/dev/null \
-        || review_pr_date -r "$epoch" '+%a %d %b %H:%M' 2>/dev/null || true
+    local formatted
+
+    review_pr_format_time formatted '%a %d %b %H:%M' "$epoch"
+    printf '%s\n' "$formatted"
 }
 
 # `review-pr quota [codex] [--json]`. Exit 0 when the quota was read, whatever it
@@ -659,9 +661,9 @@ report_skill_copies() {
 timed_phase() {
     local key=$1 status=0
     shift
-    PHASE_STARTED[$key]=$(date +%s)
+    PHASE_STARTED[$key]=$EPOCHSECONDS
     "$@" || status=$?
-    PHASE_SECONDS[$key]=$(( $(date +%s) - PHASE_STARTED[$key] ))
+    PHASE_SECONDS[$key]=$(( $EPOCHSECONDS - PHASE_STARTED[$key] ))
     return "$status"
 }
 
@@ -670,7 +672,7 @@ timed_phase() {
 phase_seconds_json() {
     local key value now json='{}'
 
-    now=$(date +%s)
+    now=$EPOCHSECONDS
     for key in primary cross final comparison; do
         if [[ -n "${PHASE_SECONDS[$key]:-}" ]]; then
             value=${PHASE_SECONDS[$key]}
@@ -1011,10 +1013,31 @@ show_version() {
 }
 
 review_pr_date() {
+    local formatted
+
+    if (( $# == 1 )) && [[ "$1" == +* ]]; then
+        review_pr_format_time formatted "${1#+}"
+        printf '%s\n' "$formatted"
+        return
+    fi
     if [[ -n "$REVIEW_PR_TIMEZONE" ]]; then
         TZ=$REVIEW_PR_TIMEZONE date "$@"
     else
         date "$@"
+    fi
+}
+
+# Formats a time, now unless an epoch is given, into the named variable with the
+# shell's own strftime instead of starting date: a run logs hundreds of lines
+# and every one of them used to start a process. TZ has to be given as a prefix:
+# Bash re-reads the zone for a temporary assignment, not for a local variable.
+review_pr_format_time() {
+    local target=$1 format=$2 epoch=${3:--1}
+
+    if [[ -n "$REVIEW_PR_TIMEZONE" ]]; then
+        TZ=$REVIEW_PR_TIMEZONE printf -v "$target" "%(${format})T" "$epoch"
+    else
+        printf -v "$target" "%(${format})T" "$epoch"
     fi
 }
 
@@ -1031,8 +1054,9 @@ timezone_is_known() {
 }
 
 log() {
-    local message
-    message=$(printf '[review-pr %s] %s' "$(review_pr_date '+%Y-%m-%d %H:%M:%S %Z')" "$*")
+    local message stamp
+    review_pr_format_time stamp '%Y-%m-%d %H:%M:%S %Z'
+    message="[review-pr ${stamp}] $*"
     # A line printed into the live table leaves the cursor one row below where
     # the next redraw assumes it is, so every later frame strands a copy of its
     # top line and the header appears two or three times. While the table is up
@@ -9539,7 +9563,7 @@ record_run_history() {
 
     [[ -n "$RUN_HISTORY_FILE" ]] || return 0
     if [[ "$event" == finished && "$RUN_HISTORY_STARTED_AT" -gt 0 ]]; then
-        duration=$(( $(date +%s) - RUN_HISTORY_STARTED_AT ))
+        duration=$(( $EPOCHSECONDS - RUN_HISTORY_STARTED_AT ))
     fi
     entry=$(jq -c -n \
         --argjson schema_version 1 \
@@ -9582,7 +9606,7 @@ open_run_history() {
     [[ -n "$REVIEWS_ROOT" && -d "$REVIEWS_ROOT" ]] || return 0
     RUN_HISTORY_FILE="${REVIEWS_ROOT}/run-history.jsonl"
     [[ ! -L "$RUN_HISTORY_FILE" ]] || { RUN_HISTORY_FILE=""; return 0; }
-    RUN_HISTORY_STARTED_AT=$(date +%s)
+    RUN_HISTORY_STARTED_AT=$EPOCHSECONDS
     record_run_history started
 }
 
@@ -9596,7 +9620,7 @@ initialize_dashboard() {
     local key
 
     DASHBOARD_ROWS=()
-    DASHBOARD_PIPELINE_STARTED_AT=$(date +%s)
+    DASHBOARD_PIPELINE_STARTED_AT=$EPOCHSECONDS
     DASHBOARD_LABELS=()
     DASHBOARD_STATUSES=()
     DASHBOARD_PIDS=()
@@ -9811,6 +9835,7 @@ dashboard_status_color() {
 render_dashboard_snapshot() {
     local move_cursor=$1
     local now
+    local updated_at=""
     local section
     local label
     local status
@@ -9836,7 +9861,7 @@ render_dashboard_snapshot() {
     local footer_color=""
     local -a spinner_frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
-    now=$(date +%s)
+    now=$EPOCHSECONDS
     dashboard_elapsed=$(format_dashboard_elapsed "$((now - DASHBOARD_PIPELINE_STARTED_AT))")
     spinner=${spinner_frames[$((now % ${#spinner_frames[@]}))]}
     # Keep every decoration within the table width so it cannot wrap in a
@@ -9945,9 +9970,11 @@ render_dashboard_snapshot() {
     printf '\033[2K\r\n' >&2
     printf '\033[2K\r%s%s%s\n' "$footer_color" "$footer_separator" "$reset_color" >&2
     if [[ "$DASHBOARD_SHOW_PID" == true ]]; then
-        footer_status="Updated: $(review_pr_date '+%H:%M:%S %Z') · Elapsed: ${dashboard_elapsed} · Ctrl+C to stop"
+        review_pr_format_time updated_at '%H:%M:%S %Z'
+        footer_status="Updated: ${updated_at} · Elapsed: ${dashboard_elapsed} · Ctrl+C to stop"
     else
-        footer_status="Updated: $(review_pr_date '+%H:%M:%S') · Elapsed: ${dashboard_elapsed} · Ctrl+C"
+        review_pr_format_time updated_at '%H:%M:%S'
+        footer_status="Updated: ${updated_at} · Elapsed: ${dashboard_elapsed} · Ctrl+C"
     fi
     printf '\033[2K\r%s%s%s\n' "$footer_color" "$footer_status" "$reset_color" >&2
 }
@@ -10160,7 +10187,7 @@ heartbeat_agent() {
             return
         fi
 
-        now=$(date +%s)
+        now=$EPOCHSECONDS
         log "Still running ${phase}: ${agent} ($(format_duration "$((now - started_at))"))"
     done
 }
@@ -10222,7 +10249,7 @@ run_review_phase() {
         round_agents=()
         for agent in "${agents[@]}"; do
             if [[ " ${CODEX_QUOTA_SKIPPED_AGENTS[*]} " == *" ${agent} "* ]]; then
-                now=$(date +%s)
+                now=$EPOCHSECONDS
                 exhausted_failures+=("${agent} (Codex quota below ${QUOTA_CODEX_MINIMUM}%: ${CODEX_QUOTA_SHORTFALL}; 0 attempts)")
                 PHASE_AGENT_STATUSES[$agent]=failed
                 set_dashboard_status "$dashboard_section" "$agent" FAILED "" "$now" "$now" ""
@@ -10263,7 +10290,7 @@ run_review_phase() {
             AGENT_START_DELAY_SECONDS=0
             phase_pids[$agent]=$STARTED_PID
             pid_agents[$STARTED_PID]=$agent
-            phase_started_at[$agent]=$(date +%s)
+            phase_started_at[$agent]=$EPOCHSECONDS
             set_dashboard_status \
                 "$dashboard_section" \
                 "$agent" \
@@ -10304,7 +10331,7 @@ run_review_phase() {
             failure_reason="empty output"
         fi
 
-        now=$(date +%s)
+        now=$EPOCHSECONDS
         read_token_usage "${TEMP_USAGE_FILES[$agent]}"
         token_display=$TOKEN_USAGE_DISPLAY
         stop_reason=$(jq -r '.stop_reason // ""' "${TEMP_USAGE_JSON_FILES[$agent]}" 2>/dev/null || true)
@@ -12775,7 +12802,7 @@ run_comparison_synthesis() {
     activity_log "Starting standalone comparison synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
     start_agent "$FINAL_SYNTHESIZER" "comparison synthesis" "$comparison_prompt" "$comparison_output" "$comparison_log" "$comparison_usage" "$comparison_usage_json"
     comparison_pid=$STARTED_PID
-    comparison_started_at=$(date +%s)
+    comparison_started_at=$EPOCHSECONDS
     set_dashboard_status comparison "$FINAL_SYNTHESIZER" RUNNING "$comparison_pid" "$comparison_started_at" 0
     heartbeat_agent "comparison synthesis" "$FINAL_SYNTHESIZER" "$comparison_pid" "$comparison_started_at" &
     comparison_heartbeat_pid=$!
@@ -12788,7 +12815,7 @@ run_comparison_synthesis() {
     kill "$comparison_heartbeat_pid" 2>/dev/null || true
     wait "$comparison_heartbeat_pid" 2>/dev/null || true
     RUNNING_PIDS=()
-    comparison_finished_at=$(date +%s)
+    comparison_finished_at=$EPOCHSECONDS
     read_token_usage "$comparison_usage"
     comparison_token_display=$TOKEN_USAGE_DISPLAY
     stop_reason=$(jq -r '.stop_reason // ""' "$comparison_usage_json" 2>/dev/null || true)
@@ -12848,7 +12875,7 @@ run_comparison_synthesis() {
             kill "$repair_heartbeat_pid" 2>/dev/null || true
             wait "$repair_heartbeat_pid" 2>/dev/null || true
             RUNNING_PIDS=()
-            comparison_finished_at=$(date +%s)
+            comparison_finished_at=$EPOCHSECONDS
             repair_stop_reason=$(jq -r '.stop_reason // ""' "$repair_usage_json" 2>/dev/null || true)
 
             if (( repair_status == 0 )) \
@@ -12998,12 +13025,12 @@ run_final_synthesis_attempt() {
         recovery_reason=$(jq -r '.reason' "$salvage_candidate")
         final_pid=""
         final_status=0
-        final_started_at=$(date +%s)
+        final_started_at=$EPOCHSECONDS
     else
         activity_log "Starting final synthesis with $(agent_label "$FINAL_SYNTHESIZER")"
         start_agent "$FINAL_SYNTHESIZER" "final synthesis" "$FINAL_PROMPT_FILE" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$attempt"
         final_pid=$STARTED_PID
-        final_started_at=$(date +%s)
+        final_started_at=$EPOCHSECONDS
         set_dashboard_status final "$FINAL_SYNTHESIZER" "$(dashboard_attempt_status "$attempt")" "$final_pid" "$final_started_at" 0
         heartbeat_agent "final synthesis" "$FINAL_SYNTHESIZER" "$final_pid" "$final_started_at" &
         final_heartbeat_pid=$!
@@ -13017,7 +13044,7 @@ run_final_synthesis_attempt() {
         wait "$final_heartbeat_pid" 2>/dev/null || true
         RUNNING_PIDS=()
     fi
-    final_finished_at=$(date +%s)
+    final_finished_at=$EPOCHSECONDS
     read_token_usage "$final_usage"
     final_token_display=$TOKEN_USAGE_DISPLAY
     final_stop_reason=$(jq -r '.stop_reason // ""' "$final_usage_json" 2>/dev/null || true)
@@ -13078,19 +13105,19 @@ run_final_synthesis_attempt() {
             fi
             if attempt_ndjson_amendment final "$FINAL_SYNTHESIZER" 1 "$final_output" "$final_log" "$final_usage" \
                 "$final_usage_json" "$final_started_at" "$error_log"; then
-                final_finished_at=$(date +%s)
+                final_finished_at=$EPOCHSECONDS
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY
             elif [[ "$NDJSON_AMENDMENT_TRIED" != true ]] \
                 && "$final_recovery" "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
-                final_finished_at=$(date +%s)
+                final_finished_at=$EPOCHSECONDS
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY
             elif [[ "$NDJSON_AMENDMENT_TRIED" == true ]] \
                 && CONTINUATION_DROP_IDS=$(ndjson_amended_continuation_drops) \
                 && { activity_log "Asking ${FINAL_SYNTHESIZER} again for the final refs the amendment left without a complete finding${CONTINUATION_DROP_IDS:+: ${CONTINUATION_DROP_IDS}}"; true; } \
                 && attempt_final_ndjson_continuation "$final_output" "$final_log" "$final_usage" "$final_usage_json" "$final_started_at" "$error_log"; then
-                final_finished_at=$(date +%s)
+                final_finished_at=$EPOCHSECONDS
                 read_token_usage "$final_usage"
                 final_token_display=$TOKEN_USAGE_DISPLAY
             else
@@ -13100,7 +13127,7 @@ run_final_synthesis_attempt() {
                 recovery_reason=$FINDING_CONTRACT_FAILURE_REASON
                 keep_final_salvage_candidate "$final_output" "$final_usage" "$final_usage_json" "$recovery_reason"
                 FINDING_CONTRACT_FAILURE_REASON=$recovery_reason
-                set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$(date +%s)" "$final_token_display"
+                set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$final_pid" "$final_started_at" "$EPOCHSECONDS" "$final_token_display"
                 preserve_error_log "$final_log" "$error_log"
                 preserve_agent_failure_artifacts "$FINAL_SYNTHESIZER" "$final_output" "$final_usage" "$final_usage_json" "$error_log" "final synthesis"
                 FINAL_FAILURE_REASON="invalid final ndjson-v1 output (${FINDING_CONTRACT_FAILURE_REASON})"
@@ -13196,7 +13223,7 @@ run_final_synthesis_attempt() {
             final_token_display=$TOKEN_USAGE_DISPLAY
             activity_log 'Final anchors were repaired without changing non-anchor report content'
         else
-            set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$repair_pid" "$final_started_at" "$(date +%s)" "$final_token_display"
+            set_dashboard_status final "$FINAL_SYNTHESIZER" FAILED "$repair_pid" "$final_started_at" "$EPOCHSECONDS" "$final_token_display"
             preserve_error_log "$repair_log" "${error_log%.log}-anchor-repair.log"
             if [[ -s "$repair_output" ]]; then
                 invalid_output="${error_log%.log}-anchor-repair-invalid.md"

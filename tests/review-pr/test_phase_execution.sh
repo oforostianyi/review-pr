@@ -463,6 +463,32 @@ SOURCE_MANIFEST=""
 assert_true 'a forced rerun with no source manifest records nothing and does not fail' \
     record_final_rerun_on_source_manifest '2026-09-22T09:00:00+0200'
 
+# Times are formatted by the shell instead of date, and must read the same as
+# date does, in the configured zone and in the machine's own.
+fixed_epoch=1760000000
+date_at() { date -d "@${fixed_epoch}" "$@" 2>/dev/null || date -r "$fixed_epoch" "$@"; }
+saved_timezone=$REVIEW_PR_TIMEZONE
+for zone in America/New_York Asia/Kathmandu ''; do
+    REVIEW_PR_TIMEZONE=$zone
+    review_pr_format_time formatted '%Y-%m-%dT%H:%M:%S%z %Z' "$fixed_epoch"
+    if [[ -n "$zone" ]]; then
+        expected=$(TZ=$zone date_at '+%Y-%m-%dT%H:%M:%S%z %Z')
+    else
+        expected=$(date_at '+%Y-%m-%dT%H:%M:%S%z %Z')
+    fi
+    assert_eq "$expected" "$formatted" "a time formatted in ${zone:-the machine zone} reads as date prints it"
+done
+REVIEW_PR_TIMEZONE=America/New_York
+assert_eq "$(TZ=America/New_York date '+%Z')" "$(review_pr_date '+%Z')" \
+    'review_pr_date still answers a single format in the configured zone'
+assert_eq "$(TZ=America/New_York date_at '+%a %d %b %H:%M')" "$(format_quota_reset "$fixed_epoch")" \
+    'a quota reset time is shown in the configured zone'
+review_pr_format_time formatted '%Z'
+printf -v machine_zone '%(%Z)T' -1
+assert_eq "$(date '+%Z')" "$machine_zone" 'and the zone does not stay changed afterwards'
+REVIEW_PR_TIMEZONE=$saved_timezone
+unset -f date_at
+
 # A run identifier ends in whatever abbreviation the configured timezone has, and
 # some zones have no abbreviation at all -- date prints a numeric offset instead.
 assert_true 'a Central European identifier is still accepted' \
