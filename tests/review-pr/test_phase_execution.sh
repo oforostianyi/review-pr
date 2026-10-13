@@ -191,6 +191,21 @@ assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'failed runner cannot publish a
 assert_file_exists "$CASE_DIR/alpha-error-partial.md" 'non-zero runner partial output is preserved'
 assert_file_exists "$CASE_DIR/alpha-error.log" 'non-zero runner stderr is preserved'
 
+# The timeout is kept by one watchdog per command rather than a loop that reads
+# the clock every second; a command that ends first takes the watchdog with it.
+watchdog_status=0
+run_with_agent_timeout 4711 'quick fixture' bash -c 'exit 7' || watchdog_status=$?
+assert_eq 7 "$watchdog_status" 'a command that ends before its timeout returns its own status'
+assert_false 'and leaves no watchdog sleeping out the timeout' pgrep -f -x 'sleep 4711'
+watchdog_status=0
+watchdog_started=$EPOCHSECONDS
+run_with_agent_timeout 1 'hanging fixture' sleep 4712 2>"$suite_root/watchdog.log" || watchdog_status=$?
+assert_eq 124 "$watchdog_status" 'a command past its timeout is stopped and reported as timed out'
+assert_true 'within moments of the timeout' test "$((EPOCHSECONDS - watchdog_started))" -le 3
+assert_false 'and is not left running' pgrep -f -x 'sleep 4712'
+assert_file_contains "$suite_root/watchdog.log" 'hanging fixture exceeded its configured timeout of 1s' \
+    'the console names the command that timed out'
+
 prepare_phase_case timeout alpha beta
 printf 'hang\n' >"$SCENARIO_DIR/alpha-primary-review"
 MAX_CONCURRENCY=2

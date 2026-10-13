@@ -9106,14 +9106,19 @@ write_pi_comparison_payload() {
     [[ -s "$payload_file" ]] || die "Could not extract Pi comparison report payload: ${prompt_file}"
 }
 
+# Waits for the command under a single watchdog that sleeps out the timeout,
+# instead of waking every second to read the clock: that loop started two
+# processes a second for every running agent, thousands over one review, and an
+# endpoint scanner inspects each one. The watchdog exits 124 only when it
+# stopped the command itself.
 run_with_agent_timeout() {
     local timeout_seconds=$1
     local timeout_label=$2
     shift 2
     local command_pid
+    local watchdog_pid
+    local watchdog_status
     local exit_status
-    local started_at
-    local now
     local timed_out=false
 
     # A retry's pause is spent here, in the agent's own background process, so
@@ -9132,32 +9137,44 @@ run_with_agent_timeout() {
     # when job control is disabled. Preserve the caller's prompt descriptor.
     "$@" <&0 &
     command_pid=$!
-    started_at=$(date +%s)
-    trap 'kill -TERM "$command_pid" 2>/dev/null || true; wait "$command_pid" 2>/dev/null || true; exit 143' HUP INT TERM
-
-    while kill -0 "$command_pid" 2>/dev/null; do
-        now=$(date +%s)
-        if (( now - started_at >= timeout_seconds )); then
-            timed_out=true
-            printf 'review-pr: %s exceeded its configured timeout of %s; terminating it.\n' \
-                "$timeout_label" "$(format_duration "$timeout_seconds")" >&2
-            kill -TERM "$command_pid" 2>/dev/null || true
-            for _ in 1 2 3 4 5; do
-                kill -0 "$command_pid" 2>/dev/null || break
-                sleep 1
-            done
-            kill -KILL "$command_pid" 2>/dev/null || true
-            break
-        fi
-        sleep 1
-    done
+    (
+        local sleep_pid fired=false
+        trap - EXIT HUP INT
+        # Stopped once the command is over: before the timeout that is no
+        # timeout at all, after it the command was still stopped by this.
+        trap '[[ -z "${sleep_pid:-}" ]] || kill "$sleep_pid" 2>/dev/null; [[ "$fired" != true ]] || exit 124; exit 0' TERM
+        sleep "$timeout_seconds" &
+        sleep_pid=$!
+        wait "$sleep_pid" 2>/dev/null || exit 0
+        sleep_pid=""
+        kill -0 "$command_pid" 2>/dev/null || exit 0
+        fired=true
+        printf 'review-pr: %s exceeded its configured timeout of %s; terminating it.\n' \
+            "$timeout_label" "$(format_duration "$timeout_seconds")" >&2
+        kill -TERM "$command_pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$command_pid" 2>/dev/null || exit 124
+            sleep 1
+        done
+        kill -KILL "$command_pid" 2>/dev/null || true
+        exit 124
+    ) </dev/null &
+    watchdog_pid=$!
+    trap 'kill -TERM "$command_pid" "$watchdog_pid" 2>/dev/null || true; wait "$command_pid" 2>/dev/null || true; wait "$watchdog_pid" 2>/dev/null || true; exit 143' HUP INT TERM
 
     if wait "$command_pid"; then
         exit_status=0
     else
         exit_status=$?
     fi
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    if wait "$watchdog_pid"; then
+        watchdog_status=0
+    else
+        watchdog_status=$?
+    fi
     trap - HUP INT TERM
+    [[ "$watchdog_status" != 124 ]] || timed_out=true
 
     if [[ "$timed_out" == true ]]; then
         return 124
