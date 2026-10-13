@@ -22,6 +22,7 @@ USING_LEGACY_REPORTS=false
 WORK_DIR=""
 SCRATCH_DIR=""
 SCRATCH_DIR_OWNED=false
+QUOTA_RPC_LINE=""
 SCRATCH_DIR_DEVICE=""
 declare -A DIRECTORY_DEVICES=()
 LOCK_DIR=""
@@ -406,8 +407,26 @@ readonly CODEX_QUOTA_NORMALIZE_JQ='
 # Asks a short-lived `codex app-server` for its rate limits and prints the raw
 # response line. Returns 1 when Codex is missing or does not answer, and the
 # caller treats that as unknown.
+# Whether the app server's output so far holds the answer to a request id; the
+# answer's first line is left in QUOTA_RPC_LINE. Read in the shell: the wait
+# used to start grep and sleep five times a second.
+quota_rpc_answered() {
+    local output=$1 id=$2 text="" line
+
+    QUOTA_RPC_LINE=""
+    { IFS= read -r -d '' text || :; } <"$output" 2>/dev/null || return 1
+    [[ "$text" =~ \"id\":${id}[,}] ]] || return 1
+    while IFS= read -r line; do
+        if [[ "$line" =~ \"id\":${id}[,}] ]]; then
+            QUOTA_RPC_LINE=$line
+            return 0
+        fi
+    done <<<"$text"
+    return 1
+}
+
 codex_app_server_rate_limits() {
-    local directory fifo output writer pid deadline response=""
+    local directory fifo output writer pid deadline response="" pause_fd
     local timeout=${REVIEW_PR_QUOTA_TIMEOUT_SECONDS:-20}
 
     command -v codex >/dev/null 2>&1 || return 1
@@ -424,19 +443,22 @@ codex_app_server_rate_limits() {
     # SIGPIPE ends that subshell, not the run.
     ( printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"review-pr\",\"version\":\"${REVIEW_PR_VERSION}\"}}}" >&"$writer" ) 2>/dev/null || true
     deadline=$((SECONDS + timeout))
-    while (( SECONDS < deadline )) && ! grep -q '"id":1[,}]' "$output" 2>/dev/null; do
+    # Pauses are reads with a timeout on a pipe this function holds both ends of.
+    exec {pause_fd}<> <(:)
+    while (( SECONDS < deadline )) && ! quota_rpc_answered "$output" 1; do
         kill -0 "$pid" 2>/dev/null || break
-        sleep 0.2
+        read -r -t 0.2 -u "$pause_fd" _ 2>/dev/null || :
     done
-    if grep -q '"id":1[,}]' "$output" 2>/dev/null; then
+    if quota_rpc_answered "$output" 1; then
         ( printf '%s\n' '{"jsonrpc":"2.0","method":"initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}' >&"$writer" ) 2>/dev/null || true
-        while (( SECONDS < deadline )) && ! grep -q '"id":2[,}]' "$output" 2>/dev/null; do
+        while (( SECONDS < deadline )) && ! quota_rpc_answered "$output" 2; do
             kill -0 "$pid" 2>/dev/null || break
-            sleep 0.2
+            read -r -t 0.2 -u "$pause_fd" _ 2>/dev/null || :
         done
-        response=$(grep '"id":2[,}]' "$output" 2>/dev/null | head -n 1)
+        ! quota_rpc_answered "$output" 2 || response=$QUOTA_RPC_LINE
     fi
+    exec {pause_fd}<&-
     exec {writer}>&-
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
