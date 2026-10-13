@@ -5940,8 +5940,8 @@ run_measurement() {
         return 0
     fi
     mapfile -t argv < <(jq -r '.[]' <<<"$argv_json")
-    make_temp_file stdout_file "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement-stdout."
-    make_temp_file stderr_file "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement-stderr."
+    make_temp_file stdout_file "${SCRATCH_DIR:-${WORK_DIR:-${TMPDIR:-/tmp}}}/.measurement-stdout."
+    make_temp_file stderr_file "${SCRATCH_DIR:-${WORK_DIR:-${TMPDIR:-/tmp}}}/.measurement-stderr."
     started=$EPOCHREALTIME
     if (cd "$cwd" && run_with_agent_timeout "$MEASUREMENT_TIMEOUT_SECONDS" measurement "${argv[@]}" >"$stdout_file" 2>"$stderr_file" </dev/null); then
         exit_status=0
@@ -5973,8 +5973,8 @@ attach_measurements() {
 
     [[ "$EXECUTE_MEASUREMENTS_ENABLED" == true ]] || return 0
     count=$(jq '.resolutions | length' "$canonical_file")
-    make_temp_file measurement_json "${WORK_DIR:-${TMPDIR:-/tmp}}/.measurement."
-    make_temp_file updated "${WORK_DIR:-${TMPDIR:-/tmp}}/.resolutions-measured."
+    make_temp_file measurement_json "${SCRATCH_DIR:-${WORK_DIR:-${TMPDIR:-/tmp}}}/.measurement."
+    make_temp_file updated "${SCRATCH_DIR:-${WORK_DIR:-${TMPDIR:-/tmp}}}/.resolutions-measured."
     for (( index = 0; index < count; index++ )); do
         command_json=$(jq -c --argjson i "$index" '.resolutions[$i] | if (.verification_method | IN("command", "test")) then .command else null end' "$canonical_file")
         if [[ "$command_json" == null ]]; then
@@ -9956,7 +9956,10 @@ initialize_dashboard() {
         DASHBOARD_TOKENS[$key]='-'
     fi
 
-    make_temp_file DASHBOARD_STATE_FILE "${WORK_DIR}/.${REPORT_STEM}-dashboard.tmp."
+    # The state, the message file and its offset are rewritten for every status
+    # change and log line while the table is up, so they live in the scratch
+    # directory with the run's other intermediate files.
+    make_temp_file DASHBOARD_STATE_FILE "${SCRATCH_DIR:-$WORK_DIR}/.${REPORT_STEM}-dashboard.tmp."
     DASHBOARD_STATE_TEMP_FILE="${DASHBOARD_STATE_FILE}.new.$$"
     DASHBOARD_MESSAGE_FILE="${DASHBOARD_STATE_FILE}.messages"
     : >"$DASHBOARD_MESSAGE_FILE"
