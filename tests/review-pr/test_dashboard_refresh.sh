@@ -103,11 +103,12 @@ assert_false 'and prints nothing twice' test -s "$flushed"
 flush_dashboard_messages true 2>"$flushed"
 assert_false 'the last flush, when the table is down, empties the message file' test -s "$DASHBOARD_MESSAGE_FILE"
 
-# A writer can append while a flush copies: the flush measures the file and a
-# burst lands before the copy is done. The copy read to the file's end and let
-# head cut it short, so tail went on writing into a pipe head had closed, and
-# under pipefail the SIGPIPE ended the shell that was flushing. A stand-in for wc
-# reports the size the file had before a mebibyte arrived.
+# A writer can append while a flush runs. The flush reads the file once and
+# prints what that reading holds past the offset; a burst that lands after the
+# reading waits for the next flush. (It used to measure with wc and copy with
+# tail and head, and the SIGPIPE of a burst between the two ended the flushing
+# shell under pipefail.) A stand-in for the reading returns the file as it was
+# before a mebibyte arrived.
 burst_case="$suite_root/burst"
 mkdir -p -- "$burst_case"
 DASHBOARD_MESSAGE_FILE="$burst_case/messages.txt"
@@ -116,7 +117,7 @@ head -c 1048576 /dev/zero | tr '\0' x >>"$DASHBOARD_MESSAGE_FILE"
 set +e
 (
     set -e
-    wc() { printf '14\n'; }
+    read_dashboard_messages() { DASHBOARD_MESSAGE_TEXT=$'measured line\n'; }
     flush_dashboard_messages
 ) 2>"$burst_case/flushed.txt"
 burst_status=$?
@@ -126,6 +127,20 @@ assert_eq 'measured line' "$(cat "$burst_case/flushed.txt")" \
     'the flush prints exactly what it measured'
 assert_eq 14 "$(cat "${DASHBOARD_MESSAGE_FILE}.offset")" \
     'and leaves the burst for the next flush'
+
+# Offsets count bytes, as wc -c did, however many bytes a character takes.
+utf8_case="$suite_root/utf8"
+mkdir -p -- "$utf8_case"
+DASHBOARD_MESSAGE_FILE="$utf8_case/messages.txt"
+printf 'Перевірка — перший рядок\n' >"$DASHBOARD_MESSAGE_FILE"
+flush_dashboard_messages 2>"$utf8_case/first.txt"
+printf 'другий рядок без кінця' >>"$DASHBOARD_MESSAGE_FILE"
+flush_dashboard_messages 2>"$utf8_case/second.txt"
+assert_eq 'Перевірка — перший рядок' "$(<"$utf8_case/first.txt")" 'a message in Cyrillic is printed whole'
+assert_eq $'другий рядок без кінця\n.' "$(cat "$utf8_case/second.txt"; printf .)" \
+    'and the next flush prints only what followed it, completed with a newline'
+assert_eq "$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')" "$(<"${DASHBOARD_MESSAGE_FILE}.offset")" \
+    'the offset is the byte size of the file'
 
 # Both ways the table comes down print what the run said last while it was up:
 # stop_dashboard at the end of a run, and cleanup on the way out of one that

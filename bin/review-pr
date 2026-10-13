@@ -312,6 +312,7 @@ DASHBOARD_COLOR_ENABLED=false
 DASHBOARD_SHOW_PID=true
 DASHBOARD_ACTIVE=false
 DASHBOARD_MESSAGE_FILE=""
+DASHBOARD_MESSAGE_TEXT=""
 DASHBOARD_TERMINAL_FD=""
 RUN_HISTORY_FILE=""
 RUN_HISTORY_STARTED_AT=0
@@ -10343,36 +10344,41 @@ restore_dashboard_stderr() {
     DASHBOARD_TERMINAL_FD=""
 }
 
+# Reads the message file into DASHBOARD_MESSAGE_TEXT in the shell, where with
+# LC_ALL=C a length and an offset count bytes as wc -c and tail -c did: the
+# refresher used to start wc, tr, tail and head for every frame of the table.
+read_dashboard_messages() {
+    DASHBOARD_MESSAGE_TEXT=""
+    { IFS= read -r -d '' DASHBOARD_MESSAGE_TEXT || :; } <"$DASHBOARD_MESSAGE_FILE" 2>/dev/null || DASHBOARD_MESSAGE_TEXT=""
+}
+
 # Whether the run said anything the last flush did not print.
 dashboard_messages_pending() {
-    local offset=0 size
+    local offset=0 LC_ALL=C
 
     [[ -n "${DASHBOARD_MESSAGE_FILE:-}" && -s "$DASHBOARD_MESSAGE_FILE" ]] || return 1
     [[ ! -s "${DASHBOARD_MESSAGE_FILE}.offset" ]] || offset=$(<"${DASHBOARD_MESSAGE_FILE}.offset")
-    size=$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')
-    (( size > offset ))
+    read_dashboard_messages
+    (( ${#DASHBOARD_MESSAGE_TEXT} > offset ))
 }
 
 # Prints what the run said while the table was up. A captured line need not end
 # in a newline, and the frame must still start on a line of its own. The file is
 # read from where the last flush stopped, up to its size at the start of this
 # one, and it is emptied only once the table is down: emptying it after printing
-# lost whatever a writer appended between the two. tail seeks to the offset, so
-# a flush reads only what is new, and head stops at the measured size. A burst
-# appended in between leaves tail writing into a pipe head has closed; that
-# SIGPIPE is expected, and it is kept out of the pipeline's status, where under
-# pipefail it ended the shell that was flushing -- the refresher, or the run
-# itself on its way out.
+# lost whatever a writer appended between the two. The file is read once, and
+# what follows the offset in that reading is printed, so a burst appended in the
+# meantime waits for the next flush.
 flush_dashboard_messages() {
-    local final=${1:-false} offset_file="${DASHBOARD_MESSAGE_FILE:-}.offset" offset=0 size
+    local final=${1:-false} offset_file="${DASHBOARD_MESSAGE_FILE:-}.offset" offset=0 size LC_ALL=C
 
     [[ -n "${DASHBOARD_MESSAGE_FILE:-}" && -f "$DASHBOARD_MESSAGE_FILE" ]] || return 0
     [[ ! -s "$offset_file" ]] || offset=$(<"$offset_file")
-    size=$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')
+    read_dashboard_messages
+    size=${#DASHBOARD_MESSAGE_TEXT}
     if (( size > offset )); then
-        { tail -c +"$((offset + 1))" -- "$DASHBOARD_MESSAGE_FILE" 2>/dev/null || true; } \
-            | head -c "$((size - offset))" >&2
-        [[ -z "$(tail -c +"$size" -- "$DASHBOARD_MESSAGE_FILE" 2>/dev/null | head -c 1)" ]] || printf '\n' >&2
+        printf '%s' "${DASHBOARD_MESSAGE_TEXT:offset}" >&2
+        [[ "${DASHBOARD_MESSAGE_TEXT: -1}" == $'\n' ]] || printf '\n' >&2
         offset=$size
     fi
     if [[ "$final" == true ]]; then
