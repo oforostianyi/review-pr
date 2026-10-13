@@ -3937,7 +3937,7 @@ new_temp_file() {
 # in the run's work directory as before. The directory is removed when the run
 # ends, and one left by a run that was killed is removed by the next run.
 setup_scratch_dir() {
-    local setting=${REVIEW_PR_SCRATCH_DIR:-auto} root free_kb stale pid
+    local setting=${REVIEW_PR_SCRATCH_DIR:-auto} root free_kb stale pid explicit=false
 
     case "$setting" in
         work) return 0 ;;
@@ -3947,12 +3947,24 @@ setup_scratch_dir() {
             [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb >= 262144 )) || return 0
             root="/dev/shm/review-pr-${UID}"
             ;;
-        *) root=$setting ;;
+        *) root=$setting explicit=true ;;
     esac
-    mkdir -p -- "$root" 2>/dev/null || return 0
+    [[ "$root" != -* ]] || root="./${root}"
+    # A root the user named and that cannot be used is said out loud; the
+    # automatic choice falls back to the work directory without a word.
+    if ! mkdir -p -- "$root" 2>/dev/null; then
+        [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} cannot be created; keeping intermediate files in the work directory"
+        return 0
+    fi
     # A shared tmpfs: use the root only when this user owns it and it is no link.
-    [[ -d "$root" && ! -L "$root" && -O "$root" ]] || return 0
-    chmod 700 -- "$root" 2>/dev/null || return 0
+    if [[ ! -d "$root" || -L "$root" || ! -O "$root" ]]; then
+        [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} is not a directory owned by this user; keeping intermediate files in the work directory"
+        return 0
+    fi
+    if ! chmod 700 "$root" 2>/dev/null; then
+        [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} cannot be made private; keeping intermediate files in the work directory"
+        return 0
+    fi
     for stale in "$root"/run-*; do
         [[ -d "$stale" && ! -L "$stale" ]] || continue
         pid=${stale##*/run-}
@@ -3961,7 +3973,8 @@ setup_scratch_dir() {
         kill -0 "$pid" 2>/dev/null || rm -rf -- "$stale"
     done
     SCRATCH_DIR="${root}/run-$$-${SRANDOM}"
-    if ! mkdir -m 700 -- "$SCRATCH_DIR" 2>/dev/null; then
+    if ! mkdir -m 700 "$SCRATCH_DIR" 2>/dev/null; then
+        [[ "$explicit" != true ]] || log "WARNING: REVIEW_PR_SCRATCH_DIR ${root} does not take a directory for this run; keeping intermediate files in the work directory"
         SCRATCH_DIR=""
         return 0
     fi

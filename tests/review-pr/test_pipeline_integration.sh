@@ -100,6 +100,15 @@ report_root_of() {
     fi
 }
 
+# A final rerun is named by the second it starts in, so two reruns of the same
+# run within one second would share a name; on a fast machine they did.
+wait_for_next_second() {
+    local second=$EPOCHSECONDS
+    while (( EPOCHSECONDS == second )); do
+        sleep 0.05
+    done
+}
+
 run_full_success_case() {
     local case_dir="$suite_root/success"
     local reviews="$case_dir/reviews"
@@ -279,6 +288,7 @@ run_full_success_case() {
         'recording a rerun does not rewrite what the source run itself did'
 
     forced_rerun_status=0
+    wait_for_next_second
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_FAKE_GH_LOG="$gh_log" \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
@@ -296,6 +306,7 @@ run_full_success_case() {
     mv -- "$legacy_manifest_temp" "$manifest"
     gh_calls_before=$(wc -l <"$gh_log" | tr -d ' ')
     sleep 1
+    wait_for_next_second
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_FAKE_GH_LOG="$gh_log" \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
@@ -1055,6 +1066,7 @@ run_ndjson_cross_case() {
 
     sleep 1
     forced_rerun_status=0
+    wait_for_next_second
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
         REVIEW_PR_MOCK_CAPTURE_DIR="$capture" \
@@ -1072,6 +1084,7 @@ run_ndjson_cross_case() {
     sleep 1
     printf '%s\n' final-mislabelled-agent >"$scenarios/alpha-final-synthesis"
     mislabelled_status=0
+    wait_for_next_second
     PATH="$fake_bin:$PATH" \
         REVIEW_PR_MOCK_BEHAVIOR=valid-ndjson \
         REVIEW_PR_MOCK_SCENARIO_DIR="$scenarios" \
