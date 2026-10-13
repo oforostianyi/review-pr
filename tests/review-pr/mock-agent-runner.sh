@@ -12,31 +12,40 @@ phase_key=${phase_key//\//-}
 
 # The orchestrator supplies the prompt on stdin. Keep it: structured mocks
 # derive their required source refs and dispute list from its control blocks.
-prompt_text=$(cat)
+# Read in the shell, trailing newlines dropped as $(cat) dropped them.
+prompt_text=""
+IFS= read -r -d '' prompt_text || :
+while [[ "$prompt_text" == *$'\n' ]]; do
+    prompt_text=${prompt_text%$'\n'}
+done
 if [[ -n "${REVIEW_PR_MOCK_CAPTURE_DIR:-}" ]]; then
-    mkdir -p -- "$REVIEW_PR_MOCK_CAPTURE_DIR"
+    [[ -d "$REVIEW_PR_MOCK_CAPTURE_DIR" ]] || mkdir -p -- "$REVIEW_PR_MOCK_CAPTURE_DIR"
     printf '%s\n' "$prompt_text" >"${REVIEW_PR_MOCK_CAPTURE_DIR}/${phase_key}-${agent}-attempt-${attempt}.prompt"
 fi
 
 # Prints the JSON lines of one "===== BEGIN <name> =====" ... "===== END <name> =====" prompt block.
 prompt_block_lines() {
-    local name=$1
-    awk -v begin="===== BEGIN ${name} =====" -v end="===== END ${name} =====" '
-        $0 == begin {inside = 1; next}
-        $0 == end {inside = 0}
-        inside && /^\{/ {print}
-    ' <<<"$prompt_text"
+    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false
+
+    while IFS= read -r line; do
+        if [[ "$line" == "$begin" ]]; then inside=true; continue; fi
+        [[ "$line" != "$end" ]] || inside=false
+        [[ "$inside" != true || "$line" != \{* ]] || printf '%s\n' "$line"
+    done <<<"$prompt_text"
+    return 0
 }
 
 # The whole of a block, for one that holds a single indented JSON document rather
 # than one record per line -- the preserved baseline a repair prompt carries.
 prompt_block_text() {
-    local name=$1
-    awk -v begin="===== BEGIN ${name} =====" -v end="===== END ${name} =====" '
-        $0 == begin {inside = 1; next}
-        $0 == end {inside = 0}
-        inside {print}
-    ' <<<"$prompt_text"
+    local begin="===== BEGIN ${1} =====" end="===== END ${1} =====" line inside=false
+
+    while IFS= read -r line; do
+        if [[ "$line" == "$begin" ]]; then inside=true; continue; fi
+        [[ "$line" != "$end" ]] || inside=false
+        [[ "$inside" != true ]] || printf '%s\n' "$line"
+    done <<<"$prompt_text"
+    return 0
 }
 
 # Replaces the first literal occurrence of $1 with $2 on stdin. Portable across
@@ -52,7 +61,7 @@ if [[ -n "$scenario_directory" && -f "${scenario_directory}/${agent}-${phase_key
 fi
 
 if [[ -n "${REVIEW_PR_MOCK_EVENT_LOG:-}" ]]; then
-    printf 'start\t%s\t%s\t%s\t%s\n' "$agent" "$phase_key" "$attempt" "$(date +%s)" >>"$REVIEW_PR_MOCK_EVENT_LOG"
+    printf 'start\t%s\t%s\t%s\t%s\n' "$agent" "$phase_key" "$attempt" "$EPOCHSECONDS" >>"$REVIEW_PR_MOCK_EVENT_LOG"
 fi
 
 write_usage() {
@@ -431,12 +440,12 @@ case "$behavior" in
         write_usage null 33
         ;;
     valid)
-        sleep "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}"
+        [[ "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}" == 0 ]] || sleep "$REVIEW_PR_MOCK_DELAY_SECONDS"
         emit_valid_output
         write_usage null 41
         ;;
     valid-ndjson)
-        sleep "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}"
+        [[ "${REVIEW_PR_MOCK_DELAY_SECONDS:-0}" == 0 ]] || sleep "$REVIEW_PR_MOCK_DELAY_SECONDS"
         emit_valid_for_phase
         write_usage null 55
         ;;
@@ -711,5 +720,5 @@ EOF
 esac
 
 if [[ -n "${REVIEW_PR_MOCK_EVENT_LOG:-}" ]]; then
-    printf 'end\t%s\t%s\t%s\t%s\n' "$agent" "$phase_key" "$attempt" "$(date +%s)" >>"$REVIEW_PR_MOCK_EVENT_LOG"
+    printf 'end\t%s\t%s\t%s\t%s\n' "$agent" "$phase_key" "$attempt" "$EPOCHSECONDS" >>"$REVIEW_PR_MOCK_EVENT_LOG"
 fi

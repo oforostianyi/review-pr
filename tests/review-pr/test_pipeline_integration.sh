@@ -25,11 +25,14 @@ cleanup_suite() {
 }
 trap cleanup_suite EXIT
 
-make_repository() {
-    local case_dir=$1
-    local origin="$case_dir/origin.git"
-    local seed="$case_dir/seed"
-    local checkout="$case_dir/review"
+# The fixture repositories are all alike, and building one took seventeen git
+# commands and four pushes. One is built here, before any case runs (a cache
+# built inside $(make_repository) would be lost with its subshell), and each
+# case gets a private copy of it with its own origin.
+repository_template="$suite_root/.repository-template"
+build_repository_template() {
+    local origin="$repository_template/origin.git"
+    local seed="$repository_template/seed"
 
     git init --bare --quiet "$origin"
     git init --quiet "$seed"
@@ -49,6 +52,18 @@ make_repository() {
     git -C "$seed" push --quiet origin HEAD:refs/pull/123/head
     git -C "$seed" push --quiet origin HEAD:refs/pull/122/head
     git --git-dir="$origin" symbolic-ref HEAD refs/heads/main
+}
+build_repository_template
+
+make_repository() {
+    local case_dir=$1
+    local origin="$case_dir/origin.git"
+    local seed="$case_dir/seed"
+    local checkout="$case_dir/review"
+
+    cp -R -p -- "$repository_template/origin.git" "$origin"
+    cp -R -p -- "$repository_template/seed" "$seed"
+    git -C "$seed" remote set-url origin "$origin"
     git clone --quiet --branch main "$origin" "$checkout"
     printf '%s\n' "$checkout"
 }
