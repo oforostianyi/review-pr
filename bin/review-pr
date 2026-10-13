@@ -4486,7 +4486,7 @@ resolve_anchor_paths() {
 # named only claude and pi, and the whole synthesis was run again.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 derived=0 noun language
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 derived=0 noun language counts
     local derived_defs='
         def ref_agents: [.source_refs[].agent] | unique;
         def derivable_contributors:
@@ -4501,29 +4501,25 @@ fill_presentation_defaults() {
         cross) language=$CROSS_REVIEW_LANGUAGE ;;
         *) language=$FINALIZATION_LANGUAGE ;;
     esac
-    feedback=$(jq '[.[] | select(.record == "finding" and (has("existing_feedback") | not))] | length' "$records_file" 2>/dev/null) || return 0
-    undefined=$(jq "$EXISTING_FEEDBACK_JQ_DEFS"'
-        [.[] | select(.record == "finding" and has("existing_feedback") and (.existing_feedback | valid_existing_feedback | not))] | length' \
-        "$records_file" 2>/dev/null) || return 0
-    if [[ "$phase" == final ]]; then
-        flags=$(jq '[.[] | select(.record == "finding" and (has("include_in_rejected_summary") | not))] | length' "$records_file" 2>/dev/null) || return 0
-    fi
-    if [[ "$phase" != primary ]]; then
-        optional=$(jq '[.[] | select(.record == "finding" and (.classification | IN("REJECTED", "UNCERTAIN"))
-            and ((has("failure_scenario") and has("recommendation")) | not))] | length' "$records_file" 2>/dev/null) || return 0
-    fi
-    escapes=$(jq "$LITERAL_UNICODE_JQ_DEFS"'
-        [.[] | select(.record == "finding" or .record == "complete")
-            | select(any([.title, .claim, .failure_scenario, .recommendation, .summary][] | strings;
-                . != decode_literal_unicode))] | length' "$records_file" 2>/dev/null) || return 0
-    pr_level_files=$(jq '[.[] | select(.record == "finding" and (.anchor | type) == "object"
-        and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
-        and .anchor.start == null and .anchor["end"] == null)] | length' "$records_file" 2>/dev/null) || return 0
-    if [[ "$phase" == primary && -n "$agent" ]]; then
-        contributors=$(jq '[.[] | select(.record == "finding" and (has("contributing_agents") | not))] | length' "$records_file" 2>/dev/null) || return 0
-    else
-        derived=$(jq "$derived_defs"'[.[] | select(.record == "finding" and derivable_contributors)] | length' "$records_file" 2>/dev/null) || return 0
-    fi
+    # Every count is taken in one jq rather than one jq per count; a count that
+    # does not apply to the phase stays 0, and any failure skips the fill as
+    # each separate count used to.
+    counts=$(jq -r --arg phase "$phase" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS$derived_defs"'
+        def count(f): [.[] | select(f)] | length;
+        [count(.record == "finding" and (has("existing_feedback") | not)),
+         count(.record == "finding" and has("existing_feedback") and (.existing_feedback | valid_existing_feedback | not)),
+         (if $phase == "final" then count(.record == "finding" and (has("include_in_rejected_summary") | not)) else 0 end),
+         (if $phase != "primary" then count(.record == "finding" and (.classification | IN("REJECTED", "UNCERTAIN"))
+             and ((has("failure_scenario") and has("recommendation")) | not)) else 0 end),
+         count((.record == "finding" or .record == "complete")
+             and any([.title, .claim, .failure_scenario, .recommendation, .summary][] | strings; . != decode_literal_unicode)),
+         count(.record == "finding" and (.anchor | type) == "object"
+             and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
+             and .anchor.start == null and .anchor["end"] == null),
+         (if $phase == "primary" and $agent != "" then count(.record == "finding" and (has("contributing_agents") | not)) else 0 end),
+         (if $phase == "primary" and $agent != "" then 0 else count(.record == "finding" and derivable_contributors) end)]
+        | map(tostring) | join(" ")' "$records_file" 2>/dev/null) || return 0
+    read -r feedback undefined flags optional escapes pr_level_files contributors derived <<<"$counts"
     (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors + derived > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
     jq --arg phase "$phase" --arg language "$language" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS$derived_defs"'
