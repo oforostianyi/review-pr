@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.26.3] - 2026-10-13
+
 ### Fixed
 
 - A cross-review or final finding left incomplete after a failed field amendment is asked for again
