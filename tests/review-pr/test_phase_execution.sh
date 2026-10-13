@@ -463,6 +463,25 @@ SOURCE_MANIFEST=""
 assert_true 'a forced rerun with no source manifest records nothing and does not fail' \
     record_final_rerun_on_source_manifest '2026-09-22T09:00:00+0200'
 
+# Temporary files are made by the shell instead of mktemp and must come out the
+# same: empty, private to their owner, never a name already taken.
+temp_dir="$suite_root/temp-files"
+mkdir -p "$temp_dir"
+umask_before=$(umask)
+make_temp_file made_file "$temp_dir/.fixture.tmp."
+assert_true 'a temporary file is created empty' test -f "$made_file" -a ! -s "$made_file"
+assert_eq 600 "$(stat -c '%a' "$made_file" 2>/dev/null || stat -f '%Lp' "$made_file")" \
+    'and readable by its owner only, as mktemp makes it'
+assert_true 'with six random characters after the prefix' \
+    bash -c '[[ "$1" =~ /\.fixture\.tmp\.[A-Za-z0-9]{6}$ ]]' _ "$made_file"
+assert_eq "$umask_before" "$(umask)" 'the umask is restored afterwards'
+assert_false 'and noclobber is left as it was' test -o noclobber
+for _ in $(seq 50); do make_temp_file made_file "$temp_dir/.many."; done
+assert_eq 50 "$(find "$temp_dir" -name '.many.*' | wc -l | tr -d ' ')" 'fifty calls make fifty distinct files'
+made_status=0
+(make_temp_file made_file "$suite_root/missing/.fixture.") 2>/dev/null || made_status=$?
+assert_eq 1 "$made_status" 'a directory that cannot take the file fails the call'
+
 # Times are formatted by the shell instead of date, and must read the same as
 # date does, in the configured zone and in the machine's own.
 fixed_epoch=1760000000
