@@ -672,6 +672,26 @@ The subcommand reads only the canonical final sidecar a structured run already p
 
 Confirmed findings are exported by default. `--include uncertain` adds the claims that could not be settled, and `--include all` adds refuted ones too; an agent should act on the confirmed set and reproduce an uncertain claim before touching anything. Findings with no natural changed-line anchor, such as a missing test or migration, keep an empty anchor and are listed after the anchored ones instead of being dropped. Without `--run`, the freshest final synthesis for that pull request is used, including one produced by `--rerun-final`. A run without `reporting.finding_contract.final = ndjson-v1` publishes no such sidecar and is refused with that reason.
 
+## Free space in the reviews directory
+
+Every run keeps what its agents streamed and logged in its work directory, so a review that went
+wrong can be looked into later. Those event streams, logs and failed attempts are most of the reviews
+directory, and nothing reads them once the run is over. `prune` compresses them with gzip for pull
+requests that GitHub reports merged or closed, and removes the temporary files that killed runs left
+in any review:
+
+```bash
+review-pr prune           # says what it would do, changes nothing
+review-pr prune --apply   # does it
+```
+
+Reports, fix-lists, manifests, findings, usage files and prompts are never touched, nor are the
+streams and logs of an open pull request or of one whose state GitHub does not report, so a resume,
+`--rerun-final` and `--same-head` work as before. The state of every pull request of a repository
+comes from one GitHub query. `--apply` refuses while a review runs; a dry run then counts that
+review's temporary files and says the review is running. A compressed file reads back with
+`gzip -dc`.
+
 ## Upgrade
 
 Get the newer version the same way you got the first one — pull the checkout and check out the newer tag, or extract a newer archive — and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended. Each file is renamed into place rather than rewritten where it stands, so a review already running keeps reading the build it started with instead of a half-replaced script.

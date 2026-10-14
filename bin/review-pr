@@ -203,6 +203,8 @@ NDJSON_AMENDMENT_TRIED=false
 NDJSON_AMENDED_FAILURE_REASON=""
 QUOTA_MODE=false
 QUOTA_JSON=false
+PRUNE_MODE=false
+PRUNE_APPLY=false
 QUOTA_CODEX_MINIMUM=""
 CODEX_QUOTA_SHORTFALL=""
 CODEX_QUOTA_SUMMARY=""
@@ -543,6 +545,173 @@ show_quota() {
     return 0
 }
 
+# `review-pr prune [--apply]`. The work directory of a run keeps what an agent
+# streamed and logged, and most of the reviews directory is that: on 2026-10-14
+# the event streams of agents alone took 560 MB of 794. Nothing reads them once
+# the run is over; they are kept to look into a run that went wrong. Prune
+# compresses them for pull requests that are merged or closed, and removes the
+# temporary files killed runs left anywhere. Reports, fix-lists, manifests,
+# findings, usage and prompts are not touched, nor is anything of an open pull
+# request but its leftovers, so a resume and --same-head work as before. Without
+# --apply it only says what it would do.
+prune_review_outputs() {
+    local apply=$1 history="${REVIEWS_ROOT}/run-history.jsonl"
+    local dir name number repository state file line restore_shopt
+    local compress_bytes=0 leftover_bytes=0 open_count=0 unknown_count=0 index
+    local -a running=() review_dirs=() manifests=() compress=() leftovers=() sized=()
+    local -A dir_repository=() repository_numbers=() pr_state=() file_bytes=() row_compress=() row_leftovers=()
+
+    [[ -d "$REVIEWS_ROOT" ]] || { printf 'Nothing to prune: %s does not exist.\n' "$REVIEWS_ROOT"; return 0; }
+    mapfile -t running < <(running_review_pids "$history")
+    # A running review is still writing its temporary files and may be resumed;
+    # a dry run only reads, so it says so and goes on.
+    if (( ${#running[@]} > 0 )); then
+        [[ "$apply" != true ]] || die "A review is running (PID ${running[*]}); prune --apply once no review runs"
+        printf 'A review is running (PID %s): its temporary files are counted below, and --apply waits until it ends.\n' "${running[*]}"
+    fi
+
+    restore_shopt=$(shopt -p nullglob dotglob globstar || :)
+    shopt -s nullglob dotglob globstar
+    for dir in "$REVIEWS_ROOT"/*/[0-9]*-*/; do
+        name=${dir%/}; name=${name##*/}
+        [[ "${name%%-*}" =~ ^[0-9]+$ && -d "${dir}work" && ! -L "${dir%/}" ]] || continue
+        review_dirs+=("${dir%/}")
+        manifests+=("${dir}"work/*-manifest.json "${dir}"work/*/*-manifest.json)
+    done
+    # The repository of each review, from its manifests in one jq, and from the
+    # run history for reviews whose manifests predate the field.
+    if (( ${#manifests[@]} > 0 )); then
+        while IFS=$'\t' read -r file repository; do
+            dir=${file%/work/*}
+            [[ -n "${dir_repository[$dir]:-}" ]] || dir_repository[$dir]=$repository
+        done < <(jq -r 'select(.github_repository | type == "string") | [input_filename, .github_repository] | @tsv' \
+            "${manifests[@]}" 2>/dev/null)
+    fi
+    if [[ -f "$history" ]]; then
+        while IFS=$'\t' read -r name repository; do
+            for dir in "${review_dirs[@]}"; do
+                [[ "${dir##*/}" != "$name" || -n "${dir_repository[$dir]:-}" ]] || dir_repository[$dir]=$repository
+            done
+        done < <(jq -nRr '[inputs | fromjson? | select((.review_id | type) == "string" and (.repository | type) == "string")]
+            | unique_by(.review_id)[] | [.review_id, .repository] | @tsv' <"$history" 2>/dev/null)
+    fi
+    # Last, the folder a review sits in is named after its repository, as a
+    # configured repository's GitHub name makes it.
+    for repository in "${REPOSITORY_GITHUB[@]}"; do
+        name=${repository//\//-}
+        for dir in "${review_dirs[@]}"; do
+            [[ -n "${dir_repository[$dir]:-}" ]] || [[ "${dir%/*}" != "${REVIEWS_ROOT}/${name,,}" ]] \
+                || dir_repository[$dir]=$repository
+        done
+    done
+    for dir in "${review_dirs[@]}"; do
+        repository=${dir_repository[$dir]:-}
+        [[ "$repository" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || continue
+        name=${dir##*/}
+        repository_numbers[$repository]+=" ${name%%-*}"
+    done
+    for repository in "${!repository_numbers[@]}"; do
+        # shellcheck disable=SC2086 # The numbers are digits split on spaces.
+        while read -r number state; do
+            pr_state["${repository}#${number}"]=$state
+        done < <(pull_request_states "$repository" ${repository_numbers[$repository]})
+    done
+
+    for dir in "${review_dirs[@]}"; do
+        name=${dir##*/}
+        number=${name%%-*}
+        repository=${dir_repository[$dir]:-}
+        state=${pr_state["${repository}#${number}"]:-}
+        case "$state" in
+            MERGED | CLOSED) ;;
+            OPEN) open_count=$((open_count + 1)) ;;
+            *) unknown_count=$((unknown_count + 1)) ;;
+        esac
+        for file in "$dir"/work/**; do
+            [[ -f "$file" && ! -L "$file" ]] || continue
+            case "${file##*/}" in
+                .*.tmp.* | .*.publish.??????) leftovers+=("$file"); row_leftovers[$dir]=$(( ${row_leftovers[$dir]:-0} + 1 )) ;;
+                *.gz | *-usage.json) ;;
+                *-events.jsonl | *.log | *-error-*)
+                    [[ "$state" != MERGED && "$state" != CLOSED ]] && continue
+                    compress+=("$file"); row_compress[$dir]=$(( ${row_compress[$dir]:-0} + 1 )) ;;
+            esac
+        done
+    done
+    eval "$restore_shopt"
+
+    # Sizes from one wc per batch, not one stat per file.
+    sized=("${compress[@]}" "${leftovers[@]}")
+    for (( index = 0; index < ${#sized[@]}; index += 500 )); do
+        while read -r line; do
+            file=${line#*[0-9] }
+            [[ "$file" != total ]] || continue
+            file_bytes[$file]=${line%% *}
+        done < <(wc -c -- "${sized[@]:index:500}" | sed 's/^ *//')
+    done
+    for file in "${compress[@]}"; do compress_bytes=$((compress_bytes + ${file_bytes[$file]:-0})); done
+    for file in "${leftovers[@]}"; do leftover_bytes=$((leftover_bytes + ${file_bytes[$file]:-0})); done
+
+    printf 'Reviews directory: %s\n' "$REVIEWS_ROOT"
+    for dir in "${review_dirs[@]}"; do
+        [[ -n "${row_compress[$dir]:-}" || -n "${row_leftovers[$dir]:-}" ]] || continue
+        name=${dir##*/}
+        repository=${dir_repository[$dir]:-?}
+        printf '  %-40s %-8s compress %4d  remove %4d\n' "${repository}#${name%%-*}" \
+            "${pr_state["${repository}#${name%%-*}"]:-UNKNOWN}" "${row_compress[$dir]:-0}" "${row_leftovers[$dir]:-0}"
+    done
+    printf 'Open pull requests keep their streams and logs: %d. State unknown, kept the same way: %d.\n' "$open_count" "$unknown_count"
+    if [[ "$apply" != true ]]; then
+        printf 'Would compress %d files (%s) and remove %d leftover temporary files (%s). Run with --apply to do it.\n' \
+            "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
+        return 0
+    fi
+    for (( index = 0; index < ${#compress[@]}; index += 500 )); do
+        gzip -f -- "${compress[@]:index:500}" || die 'gzip failed; the files it did not reach are left as they were'
+    done
+    for (( index = 0; index < ${#leftovers[@]}; index += 500 )); do
+        rm -f -- "${leftovers[@]:index:500}"
+    done
+    printf 'Compressed %d files (%s before) and removed %d leftover temporary files (%s).\n' \
+        "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
+}
+
+format_megabytes() {
+    local bytes=$1
+    printf '%d.%d MB' "$((bytes / 1048576))" "$((bytes * 10 / 1048576 % 10))"
+}
+
+# The PIDs of review runs that started, have not finished, and are still running
+# as review-pr. A PID the run history names but that now belongs to another
+# program is not a review.
+running_review_pids() {
+    local history=$1 pid command
+
+    [[ -f "$history" ]] || return 0
+    while read -r pid; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        command=$(ps -p "$pid" -o command= 2>/dev/null) || continue
+        [[ "$command" != *review-pr* ]] || printf '%s\n' "$pid"
+    done < <(jq -nRr '[inputs | fromjson? | select(.pid | type == "number")]
+        | group_by(.pid)[] | select(last.event == "started") | last.pid' <"$history" 2>/dev/null)
+}
+
+# Prints "<number> <state>" for pull requests of one repository, in one GraphQL
+# query; a pull request GitHub does not report is left out.
+pull_request_states() {
+    local repository=$1 number query
+    shift
+
+    query="query { repository(owner: \"${repository%%/*}\", name: \"${repository#*/}\") {"
+    for number in "$@"; do
+        query+=" p${number}: pullRequest(number: ${number}) { state }"
+    done
+    query+=" } }"
+    { gh api graphql -f query="$query" 2>/dev/null || :; } \
+        | jq -r '(.data.repository // {}) | to_entries[] | select(.value.state? | type == "string")
+            | "\(.key[1:]) \(.value.state)"' 2>/dev/null || :
+}
+
 # The agents a run starts: every reviewer and both synthesizers, or only the
 # synthesizers for a --rerun-final.
 run_uses_codex() {
@@ -626,6 +795,7 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] contract-test [--agent <name>]... [--phase <primary|cross|final|all>] [--output <directory>]
        ${0##*/} [--config <file>] findings [--run <timestamp>] [--include <confirmed|uncertain|all>] <pull-request-number>
        ${0##*/} [--config <file>] quota [codex] [--json]
+       ${0##*/} [--config <file>] prune [--apply]
        ${0##*/} --version
 EOF
 }
@@ -1190,9 +1360,10 @@ cleanup() {
 }
 
 # The temporary files of the run that are still there, in LEFTOVER_TEMP_FILES:
-# those it recorded, and the staging copies of a publication across file systems
-# that an agent's subshell made and was killed before renaming into place. The
-# subshell recorded those in its own TEMP_FILES, which ended with it.
+# those it recorded, and those an agent's subshell made -- a staging copy of a
+# publication across file systems, the files of a field amendment -- which the
+# subshell recorded in its own TEMP_FILES, gone with it. Kept in the work
+# directory, without a scratch directory, the amendment files outlived every run.
 collect_leftover_temp_files() {
     local temp_file directory
 
@@ -1202,7 +1373,7 @@ collect_leftover_temp_files() {
     done
     for directory in "${WORK_DIR:-}" "${REPORT_DIR:-}"; do
         [[ -n "$directory" ]] || continue
-        for temp_file in "$directory"/.*.publish.??????; do
+        for temp_file in "$directory"/.*.publish.?????? "$directory"/.*.tmp.*; do
             [[ ! -f "$temp_file" ]] || LEFTOVER_TEMP_FILES+=("$temp_file")
         done
     done
@@ -13988,6 +14159,14 @@ while (( $# > 0 )); do
             QUOTA_MODE=true
             shift
             ;;
+        prune)
+            PRUNE_MODE=true
+            shift
+            ;;
+        --apply)
+            PRUNE_APPLY=true
+            shift
+            ;;
         --json)
             QUOTA_JSON=true
             shift
@@ -14094,6 +14273,16 @@ if [[ "$QUOTA_MODE" == true ]]; then
     if show_quota; then exit 0; else exit $?; fi
 fi
 [[ "$QUOTA_JSON" == false ]] || die '--json is only valid for the quota subcommand'
+if [[ "$PRUNE_MODE" == true ]]; then
+    (( $# == 0 )) || die 'prune does not accept a pull-request target'
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] \
+        || die 'prune cannot be combined with PR workflow options'
+    [[ -n "$REVIEWS_ROOT" ]] || REVIEWS_ROOT="${HOME}/review-pr"
+    [[ "$REVIEWS_ROOT" == /* ]] || die "Reviews directory must be an absolute path: ${REVIEWS_ROOT}"
+    prune_review_outputs "$PRUNE_APPLY"
+    exit 0
+fi
+[[ "$PRUNE_APPLY" == false ]] || die '--apply is only valid for the prune subcommand'
 activate_default_repository
 
 if [[ "$SHOW_CONFIG" == false && $# == 1 ]]; then

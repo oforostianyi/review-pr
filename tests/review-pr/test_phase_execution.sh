@@ -531,6 +531,7 @@ staging_case="$suite_root/staging"
 mkdir -p "$staging_case/work" "$staging_case/report"
 printf 'partial\n' >"$staging_case/work/.alpha-usage.json.publish.Ab12Cd"
 printf 'partial\n' >"$staging_case/report/.final.md.publish.Xy34Zw"
+printf 'partial\n' >"$staging_case/work/.alpha-amendment-reply.tmp.Qw56Er"
 printf 'kept\n' >"$staging_case/work/alpha-usage.json"
 (
     WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" TEMP_FILES=()
@@ -541,6 +542,8 @@ assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.alpha-us
     'a staging copy left in the work directory is cleared'
 assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.final.md.publish.Xy34Zw" \
     'and one left in the report directory'
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.alpha-amendment-reply.tmp.Qw56Er" \
+    'as is a temporary file a subshell made without a scratch directory'
 assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/alpha-usage.json" "$staging_case/leftovers.txt"
 
 # A file leaving the scratch directory for another file system is copied next
