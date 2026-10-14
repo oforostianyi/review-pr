@@ -407,7 +407,8 @@ keys remain language-independent.
   `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
   CONFIRMED finding owes both and still fails without them. A primary finding without
   `contributing_agents` gets `[<reviewer>]`, the only value a primary finding can have; one that
-  names another agent still fails. A cross-review or final finding whose `contributing_agents` is
+  names another agent still fails. A primary finding without `classification` gets `null`, the
+  only value a primary finding can have. A cross-review or final finding whose `contributing_agents` is
   missing or names other agents than its `source_refs` gets the agents of those refs, the only
   value it can have; one whose refs are themselves unusable still fails.
   All of these are filled in before validation, without a model, and the console says so; a key a

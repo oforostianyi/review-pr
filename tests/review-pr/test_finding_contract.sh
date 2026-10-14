@@ -115,6 +115,25 @@ assert_eq '["codex"]|["codex"]' "$(jq -r '[.findings[].contributing_agents | toj
     'each finding names the reviewer that wrote it'
 assert_file_contains "$contributors_log" 'Set contributing_agents to [codex] for 2 primary findings from codex that left it out' \
     'and the log says so'
+# A primary finding's classification can only be null, so a record that leaves
+# it out gets null instead of failing the whole stream (Pi on ListingSyncer 967,
+# 2026-10-14: all five findings, a 12-minute retry).
+classification_input="$test_root/missing-classification.md"
+classification_findings="$test_root/missing-classification-findings.json"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.classification)'
+    sed -n '2,3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$classification_input"
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/missing-classification-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]=$classification_findings
+classification_log="$test_root/missing-classification.log"
+classification_status=0
+process_primary_ndjson_output "$classification_input" codex 2>"$classification_log" || classification_status=$?
+assert_eq 0 "$classification_status" 'a primary stream missing only classification is accepted'
+assert_eq 'true' "$(jq -r '[.findings[] | has("classification") and .classification == null] | all' "$classification_findings")" \
+    'each finding gets a null classification'
+assert_file_contains "$classification_log" 'Set classification to null for 1 primary finding from codex that left it out' \
+    'and the log says so'
 # A cross-review or final finding owes exactly the agents its source_refs name;
 # the final synthesis on Tools 29269 (2026-10-12) added one more and was run
 # again. Any other value is set to them, a value already right in another order

@@ -4701,7 +4701,7 @@ resolve_anchor_paths() {
 # named only claude and pi, and the whole synthesis was run again.
 fill_presentation_defaults() {
     local phase=$1 agent=$2 records_file=$3 quiet=${4:-false}
-    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 derived=0 noun language counts
+    local filled_file feedback=0 undefined=0 flags=0 optional=0 escapes=0 pr_level_files=0 contributors=0 derived=0 classifications=0 noun language counts
     local derived_defs='
         def ref_agents: [.source_refs[].agent] | unique;
         def derivable_contributors:
@@ -4732,10 +4732,11 @@ fill_presentation_defaults() {
              and .anchor.kind == "pr-level" and (.anchor.file | type) == "string"
              and .anchor.start == null and .anchor["end"] == null),
          (if $phase == "primary" and $agent != "" then count(.record == "finding" and (has("contributing_agents") | not)) else 0 end),
-         (if $phase == "primary" and $agent != "" then 0 else count(.record == "finding" and derivable_contributors) end)]
+         (if $phase == "primary" and $agent != "" then 0 else count(.record == "finding" and derivable_contributors) end),
+         (if $phase == "primary" then count(.record == "finding" and (has("classification") | not)) else 0 end)]
         | map(tostring) | join(" ")' "$records_file" 2>/dev/null) || return 0
-    read -r feedback undefined flags optional escapes pr_level_files contributors derived <<<"$counts"
-    (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors + derived > 0 )) || return 0
+    read -r feedback undefined flags optional escapes pr_level_files contributors derived classifications <<<"$counts"
+    (( feedback + undefined + flags + optional + escapes + pr_level_files + contributors + derived + classifications > 0 )) || return 0
     new_temp_file "${phase}-presentation-defaults"; filled_file=$NEW_TEMP_FILE
     jq --arg phase "$phase" --arg language "$language" --arg agent "$agent" "$EXISTING_FEEDBACK_JQ_DEFS$LITERAL_UNICODE_JQ_DEFS$derived_defs"'
         def file_note($file):
@@ -4766,6 +4767,8 @@ fill_presentation_defaults() {
                then . + {include_in_rejected_summary: false} else . end)
             | (if $phase == "primary" and $agent != "" and (has("contributing_agents") | not)
                then . + {contributing_agents: [$agent]} else . end)
+            | (if $phase == "primary" and (has("classification") | not)
+               then . + {classification: null} else . end)
             | (if $phase != "primary" and derivable_contributors
                then .contributing_agents = ref_agents else . end)
             | (if $phase != "primary" and (.classification | IN("REJECTED", "UNCERTAIN"))
@@ -4795,6 +4798,10 @@ fill_presentation_defaults() {
     if (( contributors > 0 )); then
         noun=findings; (( contributors != 1 )) || noun=finding
         log "Set contributing_agents to [${agent}] for ${contributors} primary ${noun} from ${agent} that left it out"
+    fi
+    if (( classifications > 0 )); then
+        noun=findings; (( classifications != 1 )) || noun=finding
+        log "Set classification to null for ${classifications} primary ${noun}${agent:+ from ${agent}} that left it out"
     fi
     if (( derived > 0 )); then
         noun=findings; (( derived != 1 )) || noun=finding

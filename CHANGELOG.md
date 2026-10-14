@@ -4,6 +4,15 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.27.2] - 2026-10-14
+
+### Fixed
+
+- A primary finding that leaves out `classification` gets `null`, the only value a primary finding
+  can have, instead of failing the whole stream; the console says so. On ListingSyncer 967 Pi left
+  it out of all five findings, schema repair does not take a stream with a missing key, and the
+  review was run again for 12 minutes.
+
 ## [1.27.1] - 2026-10-14
 
 ### Fixed
