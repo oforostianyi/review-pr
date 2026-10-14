@@ -64,6 +64,8 @@ Example/Repository#104 MERGED
 Example/Repository#105 MERGED
 Other/Repository#100 OPEN
 Legacy/Repository#106 MERGED
+Legacy/Repository#108 MERGED
+Example/Repository#109 MERGED
 STATES
 PATH="$fake_bin:$PATH"
 
@@ -73,7 +75,7 @@ old_stamp=202601010000
 # One review per case: a run's agent streams and logs, the artifacts that stay,
 # and a temporary file a killed run left. Everything is a day old or more.
 write_review() {
-    local folder=$1 dir_name=$2 manifest_repository=$3 layout=${4:-nested}
+    local folder=$1 dir_name=$2 manifest_repository=$3 layout=${4:-nested} run=${5:-$run}
     local dir="$reviews/$folder/$dir_name" stem="${dir_name}-${run}" work
     work="$dir/work/$run"
     [[ "$layout" == nested ]] || work="$dir/work"
@@ -84,13 +86,12 @@ write_review() {
     printf 'log %s\n' "$dir_name" >"$work/${stem}-primary-pi-error-attempt-1.log"
     printf '{"tokens": 1}\n' >"$work/${stem}-primary-pi-error-attempt-1-usage.json"
     printf '{"findings": []}\n' >"$work/${stem}-final-findings.json"
-    printf 'prompt\n' >"$work/${stem}-primary-prompt.md"
+    printf 'review\n' >"$work/${stem}-claude.md"
     printf 'partial\n' >"$work/.${stem}-amendment-reply.tmp.Ab12Cd"
-    if [[ -n "$manifest_repository" ]]; then
-        jq -n --arg repository "$manifest_repository" '{github_repository: $repository}' >"$work/${stem}-manifest.json"
-    else
-        printf '{}\n' >"$work/${stem}-manifest.json"
-    fi
+    jq -n --arg repository "$manifest_repository" --arg stem "$stem" '
+        (if $repository == "" then {} else {github_repository: $repository} end)
+        + {artifacts: {primary: {claude: ($stem + "-claude.md")}, final_findings: ($stem + "-final-findings.json")}}' \
+        >"$work/${stem}-manifest.json"
 }
 write_review example-repository 100-task Example/Repository
 write_review example-repository 101-task Example/Repository
@@ -108,6 +109,27 @@ write_review other-repository 100-task Other/Repository
 write_review legacy-repository 106-task ''
 # A manifest naming a repository the folder is not named after is not believed.
 write_review legacy-repository 107-task Example/Repository
+# Known from its manifest alone, read after a manifest that is no JSON at all.
+write_review legacy-repository 108-task Legacy/Repository
+mkdir -p -- "$reviews/example-repository/100-task/work/20260101-000000-CEST"
+printf '{"github_repository": "Example/Repo' >"$reviews/example-repository/100-task/work/20260101-000000-CEST/100-task-20260101-000000-CEST-manifest.json"
+# A run in a zone whose abbreviation is a negative offset.
+write_review example-repository 109-task Example/Repository nested 20261001-120000--03
+# A reviewer whose key says error: its artifacts, which the manifest names, stay,
+# and only its failed attempt goes.
+work="$reviews/example-repository/100-task/work/$run"
+printf 'cross review\n' >"$work/100-task-${run}-cross-error-checker.md"
+printf '{}\n' >"$work/100-task-${run}-cross-error-checker-findings.json"
+printf 'log\n' >"$work/100-task-${run}-cross-error-checker-error-attempt-1.log"
+jq --arg stem "100-task-${run}" '.artifacts.cross_review = {"error-checker": ($stem + "-cross-error-checker.md")}
+    | .artifacts.cross_review_findings = {"error-checker": ($stem + "-cross-error-checker-findings.json")}' \
+    "$work/100-task-${run}-manifest.json" >"$work/manifest.tmp" && mv "$work/manifest.tmp" "$work/100-task-${run}-manifest.json"
+# A final rerun of that run: its failed attempt goes, its findings stay.
+printf 'log\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log"
+printf '{}\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-findings.json"
+# The worktree of a killed command agent: a checkout, counted and left alone.
+mkdir -p -- "$work/.100-task-${run}-tool-1.worktree.Ab12Cd"
+printf 'source\n' >"$work/.100-task-${run}-tool-1.worktree.Ab12Cd/handler-error-1.log"
 # A staging copy left beside the final report.
 printf 'partial\n' >"$reviews/example-repository/100-task/.100-task-${run}-final.md.publish.Cd34Ef"
 printf 'not a pull request\n' >"$reviews/example-repository/notes.txt"
@@ -132,7 +154,8 @@ run_prune() {
     "$repo_root/bin/review-pr" --config "$config" prune "$@"
 }
 work_of() {
-    local folder=$1 dir_name=$2 layout=${3:-nested}
+    local folder=$1 dir_name=$2 layout=${3:-nested} run=$run
+    [[ "$dir_name" != 109-task ]] || run=20261001-120000--03
     if [[ "$layout" == nested ]]; then
         printf '%s' "$reviews/$folder/$dir_name/work/$run"
     else
@@ -143,8 +166,8 @@ work_of() {
 before=$(tree_listing)
 output=$(run_prune 2>&1) || fail "prune failed: ${output}"
 assert_eq "$before" "$(tree_listing)" 'a dry run changes nothing'
-assert_true 'and says what it would do' grep -q 'Would compress 10 files' <<<"$output"
-assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 10 leftover temporary files' <<<"$output"
+assert_true 'and says what it would do' grep -q 'Would compress 16 files' <<<"$output"
+assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 12 leftover temporary files' <<<"$output"
 assert_true 'and the reviews whose state is not known' grep -q 'State unknown, kept the same way: 2' <<<"$output"
 assert_true 'and what is too fresh to touch' grep -q 'Files changed in the last day are left for later: 2' <<<"$output"
 assert_eq 3 "$(grep -c 'pullRequest' "$FAKE_GH_QUERIES")" 'one GitHub query per repository'
@@ -152,9 +175,9 @@ assert_eq 3 "$(grep -c 'pullRequest' "$FAKE_GH_QUERIES")" 'one GitHub query per 
 # A review that is running holds the files it writes: a dry run says so, and
 # --apply refuses. Only Bash running review-pr is a review; another program
 # under a reused PID is not, even one that names the script.
-mkdir -p -- "$suite_root/fake-install"
-printf 'sleep 30\n' >"$suite_root/fake-install/review-pr"
-bash "$suite_root/fake-install/review-pr" &
+mkdir -p -- "$suite_root/fake install"
+printf 'sleep 30\n' >"$suite_root/fake install/review-pr"
+bash "$suite_root/fake install/review-pr" &
 running_pid=$!
 printf '{"event":"started","pr":101,"pid":%s}\n' "$running_pid" >>"$reviews/run-history.jsonl"
 output=$(run_prune 2>&1) || fail "a dry run during a review failed: ${output}"
@@ -165,7 +188,7 @@ assert_eq 1 "$apply_status" '--apply refuses while a review runs'
 kill "$running_pid" 2>/dev/null || true
 wait "$running_pid" 2>/dev/null || true
 running_pid=""
-bash -c 'exec -a vim tail -f "$1" >/dev/null' vim "$suite_root/fake-install/review-pr" &
+bash -c 'exec -a vim tail -f "$1" >/dev/null' vim "$suite_root/fake install/review-pr" &
 running_pid=$!
 assert_true 'the stand-in runs under a command line that names the script' \
     bash -c 'sleep 0.2; ps -p "$1" -o command= | grep -q review-pr' _ "$running_pid"
@@ -180,28 +203,37 @@ assert_eq "$before" "$(tree_listing)" 'and nothing has changed'
 # GitHub not answering is said out loud, and nothing is compressed on a guess.
 output=$(FAKE_GH_FAIL=1 run_prune 2>&1) || fail "prune without GitHub failed: ${output}"
 assert_true 'a repository GitHub did not answer for is named' \
-    grep -q 'GitHub did not report the state of 6 pull requests of Example/Repository' <<<"$output"
+    grep -q 'GitHub did not report the state of 7 pull requests of Example/Repository' <<<"$output"
 assert_true 'and nothing is compressed' grep -q 'Would compress 0 files' <<<"$output"
 
 output=$(run_prune --apply 2>&1) || fail "prune --apply failed: ${output}"
-assert_true 'the outcome is reported' grep -q 'Compressed 10 files' <<<"$output"
+assert_true 'the outcome is reported' grep -q 'Compressed 16 files' <<<"$output"
 for review in example-repository/100-task example-repository/102-task example-repository/104-fix-x-error \
-    legacy-repository/106-task example-repository/105-task:flat; do
+    legacy-repository/106-task legacy-repository/108-task example-repository/109-task example-repository/105-task:flat; do
     layout=nested
     [[ "$review" != *:flat ]] || { layout=flat; review=${review%:flat}; }
     work=$(work_of "${review%%/*}" "${review#*/}" "$layout")
     stem="${review#*/}-${run}"
+    [[ "$review" != */109-task ]] || stem="${review#*/}-20261001-120000--03"
     assert_eq "event ${review#*/}" "$(gzip -dc "$work/${stem}-primary-pi-error-attempt-1-events.jsonl.gz")" \
         "the events of ${review} are compressed whole"
     assert_file_not_exists "$work/${stem}-primary-pi-error-attempt-1-events.jsonl" 'in place of the original'
     assert_file_exists "$work/${stem}-primary-pi-error-attempt-1.log.gz" "the log of ${review} is compressed"
     assert_file_exists "$work/${stem}-primary-pi-error-attempt-1-usage.json" 'usage stays readable as it is'
     assert_file_exists "$work/${stem}-final-findings.json" 'findings stay'
-    assert_file_exists "$work/${stem}-primary-prompt.md" 'prompts stay'
+    assert_file_exists "$work/${stem}-claude.md" "a reviewer's report stays"
     assert_file_exists "$work/${stem}-manifest.json" 'manifests stay, whatever the branch is called'
     assert_file_exists "$reviews/${review}/${stem}-final.md" 'reports stay'
     assert_file_not_exists "$work/.${stem}-amendment-reply.tmp.Ab12Cd" 'leftover temporary files go'
 done
+work=$(work_of example-repository 100-task)
+assert_file_exists "$work/100-task-${run}-cross-error-checker.md" 'the report of a reviewer whose key says error stays'
+assert_file_exists "$work/100-task-${run}-cross-error-checker-findings.json" 'and so do its findings'
+assert_file_exists "$work/100-task-${run}-cross-error-checker-error-attempt-1.log.gz" 'while its failed attempt is compressed'
+assert_file_exists "$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log.gz" \
+    "a final rerun's failed attempt is compressed"
+assert_file_exists "$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-findings.json" 'and its findings stay'
+assert_file_exists "$work/.100-task-${run}-tool-1.worktree.Ab12Cd/handler-error-1.log" "an agent's worktree is left alone"
 assert_file_not_exists "$reviews/example-repository/100-task/.100-task-${run}-final.md.publish.Cd34Ef" \
     'and so does a staging copy beside the final report'
 work=$(work_of example-repository 100-task)

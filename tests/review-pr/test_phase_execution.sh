@@ -536,6 +536,7 @@ printf 'partial\n' >"$staging_case/report/.this-run.md.publish.Xy34Zw"
 printf 'partial\n' >"$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er"
 printf 'live\n' >"$staging_case/work/.other-run-amendment-reply.tmp.Rt78Yu"
 printf 'live\n' >"$staging_case/report/.other-run.md.publish.Ui90Op"
+printf 'live\n' >"$staging_case/work/.this-run-final-rerun-20261002-120000-CEST-final-continuation-prompt.tmp.Zx12Cv"
 printf 'kept\n' >"$staging_case/work/this-run-usage.json"
 (
     WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
@@ -550,6 +551,17 @@ assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run
     'as is a temporary file a subshell made without a scratch directory'
 assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/this-run-usage.json" "$staging_case/leftovers.txt"
 assert_false 'and the files of another run are left alone' grep -q 'other-run' "$staging_case/leftovers.txt"
+assert_false 'nor those of a final rerun of this one, whose names start with its stem' \
+    grep -q 'final-rerun' "$staging_case/leftovers.txt"
+
+# The history of the runs is opened in a reviews directory that does not exist
+# yet too, so that prune can tell the first run of a new one is running.
+(
+    REVIEWS_ROOT="$suite_root/new-reviews-root" RUN_HISTORY_FILE="" PR_NUMBER=1
+    open_run_history
+    [[ -n "$RUN_HISTORY_FILE" ]]
+) || fail 'the run history of a new reviews directory is not opened'
+assert_true 'and the directory is created for it' test -d "$suite_root/new-reviews-root"
 
 # A file leaving the scratch directory for another file system is copied next
 # to its destination and renamed into place, so the destination never holds a

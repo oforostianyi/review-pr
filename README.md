@@ -685,16 +685,21 @@ review-pr prune           # says what it would do, changes nothing
 review-pr prune --apply   # does it
 ```
 
-Reports, fix-lists, manifests, findings, usage files and prompts are never touched, nor are the
-streams and logs of an open pull request or of one whose state GitHub does not report, so a resume,
-`--rerun-final` and `--same-head` work as before. A file is judged by what follows the run's
-timestamp in its name, never by the branch name before it. A review belongs to the repository its
+Reports, fix-lists, manifests, findings and usage files are never touched, and neither is any file
+a run's manifest names; nor are the streams and logs of an open pull request or of one whose state
+GitHub does not report, so a resume, `--rerun-final` and `--same-head` work as before. A file is
+judged by what follows the run's timestamp in its name, never by the branch name before it, and a
+failed attempt by how review-pr names one. Prompts are temporary files: a killed run's are removed
+with its other leftovers. A review belongs to the repository its
 folder is named after, as its manifests, the run history or the configuration say; when they do not
 agree on one, it is left alone. The states come from GitHub, fifty pull requests a query, and a
 repository GitHub did not answer for is named and kept. A file changed in the last day is not
 touched, so a review that is running keeps its files even if the run history missed it; `--apply`
 also refuses while the run history shows a review running. A compressed file reads back with
-`gzip -dc`.
+`gzip -dc`. Only reviews under `<reviews directory>/<owner>-<repository>/` are pruned; reviews of
+earlier layouts, directly in the reviews directory or in the checkout's `docs/reviews`, are not.
+The worktree a killed command agent left is counted, not removed: `git worktree prune` in the review
+checkout clears it.
 
 ## Upgrade
 

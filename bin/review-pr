@@ -31,6 +31,7 @@ LOCK_ACQUIRED=false
 
 declare -a TEMP_FILES=()
 declare -a LEFTOVER_TEMP_FILES=()
+PRUNE_SUFFIX=""
 declare -A JSON_LINE_CACHE=()
 # The umask the run started with, restored after each temporary file is made
 # private; read once, since reading it means a subshell.
@@ -561,10 +562,10 @@ readonly PRUNE_STATE_BATCH=50
 
 prune_review_outputs() {
     local apply=$1 history="${REVIEWS_ROOT}/run-history.jsonl"
-    local dir name number repository key state file line rest restore_shopt age_reference stamp
-    local compress_bytes=0 leftover_bytes=0 open_count=0 unknown_count=0 recent_count=0 index
+    local dir name number repository state file line restore_shopt age_reference stamp
+    local compress_bytes=0 leftover_bytes=0 open_count=0 unknown_count=0 recent_count=0 worktree_count=0 index
     local -a running=() review_dirs=() manifests=() compress=() leftovers=() sized=() numbers=()
-    local -A dir_candidates=() dir_repository=() repository_numbers=() pr_state=() file_bytes=()
+    local -A dir_candidates=() dir_repository=() repository_numbers=() pr_state=() file_bytes=() protected=()
     local -A row_compress=() row_leftovers=()
 
     [[ -d "$REVIEWS_ROOT" ]] || { printf 'Nothing to prune: %s does not exist.\n' "$REVIEWS_ROOT"; return 0; }
@@ -582,18 +583,26 @@ prune_review_outputs() {
         name=${dir%/}; name=${name##*/}
         [[ "${name%%-*}" =~ ^[0-9]+$ && -d "${dir}work" && ! -L "${dir%/}" ]] || continue
         review_dirs+=("${dir%/}")
-        manifests+=("${dir}"work/*-manifest.json "${dir}"work/*/*-manifest.json)
+        manifests+=("${dir}"work/*-manifest.json "${dir}"work/[0-9]*/*-manifest.json)
     done
     eval "$restore_shopt"
     # Every repository a review could belong to -- from its manifests, the run
     # history and the configured repositories -- counts only when the folder the
     # review sits in is named after it, and a review is pruned only when exactly
     # one is left: a pull request number means nothing without its repository.
+    # Manifests are read with grep, a line at a time, so one that is cut short
+    # or is no JSON at all costs only itself. Every file a manifest names is an
+    # artifact a later run, findings or a statistic reads, and is never compressed.
     if (( ${#manifests[@]} > 0 )); then
-        while IFS=$'\t' read -r file repository; do
-            prune_add_repository_candidate "${file%/work/*}" "$repository"
-        done < <(jq -r 'select(.github_repository | type == "string") | [input_filename, .github_repository] | @tsv' \
-            "${manifests[@]}" 2>/dev/null)
+        while IFS= read -r line; do
+            file=${line%%:*}
+            [[ "${line#*:}" =~ \"github_repository\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || continue
+            prune_add_repository_candidate "${file%/work/*}" "${BASH_REMATCH[1]}"
+        done < <(grep -H '"github_repository"' "${manifests[@]}" 2>/dev/null || :)
+        while IFS= read -r line; do
+            line=${line%\"}
+            protected[${line##*/}]=1
+        done < <(grep -hoE '"[^"]+\.(md|json|ndjson|jsonl|log)"' "${manifests[@]}" 2>/dev/null || :)
     fi
     if [[ -f "$history" ]]; then
         while IFS=$'\t' read -r name repository; do
@@ -641,14 +650,16 @@ prune_review_outputs() {
             OPEN) open_count=$((open_count + 1)) ;;
             *) unknown_count=$((unknown_count + 1)) ;;
         esac
-        for file in "$dir"/.* "$dir"/work/**; do
+        # The review directory, its work directory and the runs in it: a run
+        # keeps no deeper files of its own, and an agent's worktree a killed run
+        # left is a checkout of the repository, counted and left alone.
+        for file in "$dir"/.* "$dir"/work/* "$dir"/work/[0-9]*/*; do
+            if [[ -d "$file" && ! -L "$file" && "${file##*/}" == .*.worktree.* ]]; then
+                worktree_count=$((worktree_count + 1))
+                continue
+            fi
             [[ -f "$file" && ! -L "$file" ]] || continue
             name=${file##*/}
-            # A file is told by what follows the run's timestamp in its name: the
-            # name starts with the review id, which carries the branch, and a
-            # branch may say anything.
-            rest=""
-            [[ ! "$name" =~ ^.*-[0-9]{8}-[0-9]{6}-[^-]+-(.+)$ ]] || rest=${BASH_REMATCH[1]}
             case "$name" in
                 .*.tmp.* | .*.publish.?????? | .*.update.?????? | .measurement.?????? | .measurement-stdout.?????? \
                     | .measurement-stderr.?????? | .resolutions-measured.??????)
@@ -658,10 +669,17 @@ prune_review_outputs() {
                     ;;
             esac
             [[ "$file" == "$dir"/work/* && ( "$state" == MERGED || "$state" == CLOSED ) ]] || continue
-            case "$rest" in
-                "" | *.gz | *-usage.json) continue ;;
-                *-events.jsonl | *.log | *-error-* | error-*) ;;
-                *) continue ;;
+            [[ -z "${protected[$name]:-}" ]] || continue
+            prune_name_suffix "$name" "${dir##*/}" || continue
+            case "$PRUNE_SUFFIX" in
+                *.gz | *-usage.json) continue ;;
+                *-events.jsonl | *.log) ;;
+                *)
+                    # The file of a failed attempt or step: <phase>-<agent>-error...,
+                    # final-error..., comparison-error..., or error... of a
+                    # primary review named before reviewers were.
+                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(-|\.) ]] || continue
+                    ;;
             esac
             if [[ ! "$file" -ot "$age_reference" ]]; then recent_count=$((recent_count + 1)); continue; fi
             compress+=("$file"); row_compress[$dir]=$(( ${row_compress[$dir]:-0} + 1 ))
@@ -691,6 +709,7 @@ prune_review_outputs() {
     done
     printf 'Open pull requests keep their streams and logs: %d. State unknown, kept the same way: %d.\n' "$open_count" "$unknown_count"
     (( recent_count == 0 )) || printf 'Files changed in the last day are left for later: %d.\n' "$recent_count"
+    (( worktree_count == 0 )) || printf 'Agent worktrees killed runs left, kept (git worktree prune in the review checkout clears them): %d.\n' "$worktree_count"
     if [[ "$apply" != true ]]; then
         printf 'Would compress %d files (%s) and remove %d leftover temporary files (%s). Run with --apply to do it.\n' \
             "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
@@ -707,6 +726,24 @@ prune_review_outputs() {
     done
     printf 'Compressed %d files (%s before) and removed %d leftover temporary files (%s).\n' \
         "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
+}
+
+# Sets PRUNE_SUFFIX to what follows the run's timestamp, and a final rerun's,
+# in the name of a file of a review: the name starts with the review id, which
+# carries the branch, and a branch may say anything, an error or a date included.
+# Fails for a name that is not built that way.
+prune_name_suffix() {
+    local name=$1 review_id=$2 after
+
+    PRUNE_SUFFIX=""
+    [[ "$name" == "$review_id"-* ]] || return 1
+    after=${name#"$review_id"-}
+    [[ "$after" =~ ^${RUN_TIMESTAMP_PATTERN}-(.+)$ ]] || return 1
+    after=${BASH_REMATCH[3]}
+    if [[ "$after" =~ ^final-rerun-${RUN_TIMESTAMP_PATTERN}-(.+)$ ]]; then
+        after=${BASH_REMATCH[3]}
+    fi
+    PRUNE_SUFFIX=$after
 }
 
 # Records a repository a review could belong to, in dir_candidates of the
@@ -731,18 +768,18 @@ format_megabytes() {
 }
 
 # The PIDs of review runs that started, have not finished, and are still running
-# as review-pr: Bash running a script of that name. A PID the run history names
-# that now belongs to another program, an editor on the script included, is not
-# a review.
+# as review-pr: Bash with review-pr on its command line, wherever it is installed
+# and whatever its path holds. A PID the run history names that now belongs to
+# another program, an editor on the script included, is not a review.
 running_review_pids() {
-    local history=$1 pid command program script
+    local history=$1 pid command program
 
     [[ -f "$history" ]] || return 0
     while read -r pid; do
         [[ "$pid" =~ ^[0-9]+$ ]] || continue
         command=$(ps -p "$pid" -o command= 2>/dev/null) || continue
-        read -r program script _ <<<"$command"
-        [[ "${program##*/}" == bash* && "${script##*/}" == review-pr ]] && printf '%s\n' "$pid"
+        read -r program _ <<<"$command"
+        [[ "${program##*/}" == bash* && "$command" == *review-pr* ]] && printf '%s\n' "$pid"
     done < <(jq -nRr '[inputs | fromjson? | select(.pid | type == "number")]
         | group_by(.pid)[] | select(last.event == "started") | last.pid' <"$history" 2>/dev/null)
     return 0
@@ -1435,6 +1472,8 @@ collect_leftover_temp_files() {
     for directory in "${WORK_DIR:-}" "${REPORT_DIR:-}"; do
         [[ -n "$directory" ]] || continue
         for temp_file in "$directory/.${REPORT_STEM}"*.publish.?????? "$directory/.${REPORT_STEM}"-*.tmp.*; do
+            # A rerun of this run names its files after this run's stem too.
+            [[ "${temp_file##*/}" != ".${REPORT_STEM}-final-rerun-"* ]] || continue
             [[ ! -f "$temp_file" ]] || LEFTOVER_TEMP_FILES+=("$temp_file")
         done
     done
@@ -10166,7 +10205,10 @@ run_history_mode() {
 # A run that never reaches the reviews directory has nothing to append to, so
 # the log is opened only once the directory it belongs beside is known.
 open_run_history() {
-    [[ -n "$REVIEWS_ROOT" && -d "$REVIEWS_ROOT" ]] || return 0
+    # Created here, not later, so that the first run of a new reviews directory
+    # is in its history too: prune reads the history to tell a running review.
+    [[ -n "$REVIEWS_ROOT" && "$REVIEWS_ROOT" == /* ]] || return 0
+    [[ -d "$REVIEWS_ROOT" ]] || mkdir -p -- "$REVIEWS_ROOT" 2>/dev/null || return 0
     RUN_HISTORY_FILE="${REVIEWS_ROOT}/run-history.jsonl"
     [[ ! -L "$RUN_HISTORY_FILE" ]] || { RUN_HISTORY_FILE=""; return 0; }
     RUN_HISTORY_STARTED_AT=$EPOCHSECONDS
