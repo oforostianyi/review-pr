@@ -537,12 +537,20 @@ printf 'partial\n' >"$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er"
 printf 'live\n' >"$staging_case/work/.other-run-amendment-reply.tmp.Rt78Yu"
 printf 'live\n' >"$staging_case/report/.other-run.md.publish.Ui90Op"
 printf 'live\n' >"$staging_case/work/.this-run-final-rerun-20261002-120000-CEST-final-continuation-prompt.tmp.Zx12Cv"
+printf 'partial\n' >"$staging_case/work/..this-run-anchor-records.tmp.AbCdEf.publish.XyZ123"
 printf 'kept\n' >"$staging_case/work/this-run-usage.json"
 (
     WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
+    REPORT_STEM_OWNED=true
     collect_leftover_temp_files
     printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
 ) >"$staging_case/leftovers.txt"
+(
+    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
+    REPORT_STEM_OWNED=false
+    collect_leftover_temp_files
+    printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
+) >"$staging_case/borrowed-leftovers.txt"
 assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run-usage.json.publish.Ab12Cd" \
     'a staging copy left in the work directory is cleared'
 assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.this-run.md.publish.Xy34Zw" \
@@ -553,6 +561,10 @@ assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work
 assert_false 'and the files of another run are left alone' grep -q 'other-run' "$staging_case/leftovers.txt"
 assert_false 'nor those of a final rerun of this one, whose names start with its stem' \
     grep -q 'final-rerun' "$staging_case/leftovers.txt"
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/..this-run-anchor-records.tmp.AbCdEf.publish.XyZ123" \
+    'the staging copy of a temporary file is cleared too'
+assert_eq '' "$(tr -d '\n' <"$staging_case/borrowed-leftovers.txt")" \
+    'and nothing is swept under a stem this invocation only borrowed from the run it reads'
 
 # The history of the runs is opened in a reviews directory that does not exist
 # yet too, so that prune can tell the first run of a new one is running.

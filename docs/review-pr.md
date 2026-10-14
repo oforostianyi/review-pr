@@ -345,7 +345,7 @@ Troubleshooting:
 - `headless mode cannot prompt` / `permission check failed`: add the exact missing **read-only** command or read-file scope through `/permissions`; do not use a global wildcard as a workaround.
 - `read_file` denied for the logical `Repository:` path: verify that the AGY runner is current. It appends the disposable runtime workspace path to the prompt; the logical repository path must not be used for file tools.
 - `connecting to sandbox server ... connection reset by peer`: this is a terminal-sandbox failure, not evidence that the command should receive a broader permission. Retry after confirming the narrow allowlist and retain the orchestrator error log for diagnosis.
-- `Antigravity returned an empty final response`: the runner preserves stream-event diagnostics in the matching `work/*-error-*.log`. Resolve the earliest denied tool call, then resume the same run with `review-pr <repository>#<pr> --run <timestamp>`.
+- `Antigravity returned an empty final response`: the runner preserves stream-event diagnostics in the matching `work/*-error-*.log` (`.log.gz` once `review-pr prune` has compressed it; read it with `gzip -dc`). Resolve the earliest denied tool call, then resume the same run with `review-pr <repository>#<pr> --run <timestamp>`.
 - `Antigravity CLI failed` immediately after worktree preparation: inspect the CLI log under `~/.gemini/antigravity-cli/log/`. A frequent model-selection cause is `--effort is not supported for model "claude-sonnet-4-6"`; set `agents.agy.effort` to `""`, then resume the same run.
 
 ## Finalization model and reasoning effort

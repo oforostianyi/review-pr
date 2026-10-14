@@ -32,6 +32,7 @@ LOCK_ACQUIRED=false
 declare -a TEMP_FILES=()
 declare -a LEFTOVER_TEMP_FILES=()
 PRUNE_SUFFIX=""
+REPORT_STEM_OWNED=false
 declare -A JSON_LINE_CACHE=()
 # The umask the run started with, restored after each temporary file is made
 # private; read once, since reading it means a subshell.
@@ -594,16 +595,22 @@ prune_review_outputs() {
     # or is no JSON at all costs only itself. Every file a manifest names is an
     # artifact a later run, findings or a statistic reads, and is never compressed.
     if (( ${#manifests[@]} > 0 )); then
-        while IFS= read -r line; do
-            file=${line%%:*}
-            [[ "${line#*:}" =~ \"github_repository\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || continue
-            prune_add_repository_candidate "${file%/work/*}" "${BASH_REMATCH[1]}"
-        done < <(grep -H '"github_repository"' "${manifests[@]}" 2>/dev/null || :)
-        while IFS= read -r line; do
-            line=${line#\"}
-            line=${line%\"}
-            protected[${line##*/}]=1
-        done < <(grep -hoE '"[^"]+\.(md|json|ndjson|jsonl|log)"' "${manifests[@]}" 2>/dev/null || :)
+        for (( index = 0; index < ${#manifests[@]}; index += 500 )); do
+            while IFS= read -r line; do
+                file=${line%%:*}
+                [[ "${line#*:}" =~ \"github_repository\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || continue
+                prune_add_repository_candidate "${file%/work/*}" "${BASH_REMATCH[1]}"
+            done < <(grep -H '"github_repository"' "${manifests[@]:index:500}" 2>/dev/null || :)
+            # A JSON string as written, escapes included: a branch may hold a
+            # quote, and the name the manifest gives must read as the file's.
+            while IFS= read -r line; do
+                line=${line#\"}
+                line=${line%\"}
+                line=${line//\\\"/\"}
+                line=${line//\\\\/\\}
+                protected[${line##*/}]=1
+            done < <(grep -hoE '"([^"\\]|\\.)+\.(md|json|ndjson|jsonl|log)"' "${manifests[@]:index:500}" 2>/dev/null || :)
+        done
     fi
     if [[ -f "$history" ]]; then
         while IFS=$'\t' read -r name repository; do
@@ -687,7 +694,7 @@ prune_review_outputs() {
                     # primary review named before reviewers were, and after
                     # "error" what review-pr writes there. A reviewer key may say
                     # error too: its own reports and findings do not go on so.
-                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(\.log|-attempt-|-schema-repair|-continuation-|-amendment-|-events\.jsonl|-partial-|-truncated-|-invalid|-anchor-) ]] \
+                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(\.log|-attempt-|-schema-repair|-continuation|-amendment|-events\.jsonl|-partial|-truncated|-invalid|-anchor-) ]] \
                         || continue
                     ;;
             esac
@@ -728,14 +735,21 @@ prune_review_outputs() {
     # Asked again right before anything changes: the GitHub queries take a while.
     mapfile -t running < <(running_review_pids "$history")
     (( ${#running[@]} == 0 )) || die "A review started meanwhile (PID ${running[*]}); prune --apply once no review runs"
+    # gzip goes on past a file it cannot compress, a file a review renamed
+    # meanwhile for one, so a failure is counted and said, not taken as an end.
+    local failed=0
     for (( index = 0; index < ${#compress[@]}; index += 500 )); do
-        gzip -f -- "${compress[@]:index:500}" || die 'gzip failed; the files it did not reach are left as they were'
+        gzip -f -- "${compress[@]:index:500}" 2>/dev/null || :
+    done
+    for file in "${compress[@]}"; do
+        [[ -f "${file}.gz" && ! -e "$file" ]] || failed=$((failed + 1))
     done
     for (( index = 0; index < ${#leftovers[@]}; index += 500 )); do
         rm -f -- "${leftovers[@]:index:500}"
     done
     printf 'Compressed %d files (%s before) and removed %d leftover temporary files (%s).\n' \
-        "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
+        "$(( ${#compress[@]} - failed ))" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"
+    (( failed == 0 )) || printf 'Could not compress %d files, which are left as they were; prune again to retry.\n' "$failed"
 }
 
 # Sets PRUNE_SUFFIX to what follows the run's timestamp, and a final rerun's,
@@ -782,16 +796,21 @@ format_megabytes() {
 # and whatever its path holds. A PID the run history names that now belongs to
 # another program, an editor on the script included, is not a review.
 running_review_pids() {
-    local history=$1 pid command program
+    local history=$1 pid command program cutoff
 
     [[ -f "$history" ]] || return 0
+    # A started record without its finished one stays in the history for good
+    # when a run was killed outright, and its PID comes round again. No review
+    # runs for two days, so an older record is not a running review.
+    review_pr_format_time cutoff '%Y-%m-%dT%H:%M:%S' "$((EPOCHSECONDS - 172800))"
     while read -r pid; do
         [[ "$pid" =~ ^[0-9]+$ ]] || continue
         command=$(ps -p "$pid" -o command= 2>/dev/null) || continue
         read -r program _ <<<"$command"
         [[ "${program##*/}" == bash* && "$command" == *review-pr* ]] && printf '%s\n' "$pid"
-    done < <(jq -nRr '[inputs | fromjson? | select(.pid | type == "number")]
-        | group_by(.pid)[] | select(last.event == "started") | last.pid' <"$history" 2>/dev/null)
+    done < <(jq -nRr --arg cutoff "$cutoff" '[inputs | fromjson? | select(.pid | type == "number")]
+        | group_by(.pid)[] | select(last.event == "started" and ((last.at // "") | tostring | .[0:19]) >= $cutoff)
+        | last.pid' <"$history" 2>/dev/null)
     return 0
 }
 
@@ -1478,10 +1497,16 @@ collect_leftover_temp_files() {
     done
     # Only names of this run: an artifact-only --rerun-final takes no lock and
     # shares the work directory of the run it reruns with any other rerun of it.
-    [[ -n "${REPORT_STEM:-}" ]] || return 0
+    # The stem must be this invocation's own: a --rerun-final reads its source
+    # run under that run's stem before it has one, and that run may still be
+    # writing.
+    [[ "$REPORT_STEM_OWNED" == true && -n "${REPORT_STEM:-}" ]] || return 0
     for directory in "${WORK_DIR:-}" "${REPORT_DIR:-}"; do
         [[ -n "$directory" ]] || continue
-        for temp_file in "$directory/.${REPORT_STEM}"*.publish.?????? "$directory/.${REPORT_STEM}"-*.tmp.*; do
+        # A temporary file published across file systems is staged as
+        # "..<stem>-...tmp.XXXXXX.publish.XXXXXX".
+        for temp_file in "$directory/.${REPORT_STEM}"*.publish.?????? "$directory/..${REPORT_STEM}"*.publish.?????? \
+            "$directory/.${REPORT_STEM}"-*.tmp.*; do
             # A rerun of this run names its files after this run's stem too.
             [[ "${temp_file##*/}" != ".${REPORT_STEM}-final-rerun-"* ]] || continue
             [[ ! -f "$temp_file" ]] || LEFTOVER_TEMP_FILES+=("$temp_file")
@@ -12145,6 +12170,7 @@ run_artifact_only_final_rerun() {
     TIMESTAMP=$(review_pr_date '+%Y%m%d-%H%M%S-%Z')
     rerun_stem="${REVIEW_ID}-${SOURCE_TIMESTAMP}-final-rerun-${TIMESTAMP}"
     REPORT_STEM=$rerun_stem
+    REPORT_STEM_OWNED=true
     FINAL_REPORT="${REPORT_DIR}/${rerun_stem}.md"
     FINAL_USAGE_OUTPUT="${WORK_DIR}/${rerun_stem}-usage.json"
     FINAL_ANCHOR_VALIDATION_OUTPUT="${WORK_DIR}/${rerun_stem}-anchor-validation.json"
@@ -14369,7 +14395,8 @@ fi
 
 if [[ "$SHOW_VERSION" == true ]]; then
     (( $# == 0 )) || die "--version does not accept a pull-request number"
-    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] || die "--version cannot be combined with other options"
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" \
+        && "$selected_subcommands" == 0 ]] || die "--version cannot be combined with other options"
     show_version
     exit 0
 fi
@@ -14508,6 +14535,8 @@ else
 fi
 
 acquire_repo_lock
+# Under the lock every stem this run takes is its own.
+REPORT_STEM_OWNED=true
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
     die "Tracked changes are present in the dedicated review repository; refusing to switch commits"

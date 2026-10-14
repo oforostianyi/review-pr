@@ -66,6 +66,7 @@ Other/Repository#100 OPEN
 Legacy/Repository#106 MERGED
 Legacy/Repository#108 MERGED
 Example/Repository#109 MERGED
+Example/Repository#110 MERGED
 STATES
 PATH="$fake_bin:$PATH"
 
@@ -143,6 +144,17 @@ jq --arg stem "100-task-${run}" '.artifacts.primary["error-checker"] = ($stem + 
     "$work/100-task-${run}-manifest.json" >"$work/manifest.tmp" && mv "$work/manifest.tmp" "$work/100-task-${run}-manifest.json"
 # The same pull request reviewed from a second branch: one pull request still.
 write_review example-repository 101-second-branch Example/Repository
+# The incomplete answer of a Markdown-contract run that hit its output limit.
+printf 'partial answer\n' >"$work/100-task-${run}-primary-pi-error-truncated.md"
+# A branch with a quote in it, which a manifest writes escaped, and a reviewer
+# whose artifacts look like a failed step's: the manifest still protects them.
+write_review example-repository '110-fix"parser' Example/Repository
+quoted_work=$(work_of_fixture example-repository '110-fix"parser')
+quoted_stem="110-fix\"parser-${run}"
+printf 'artifact\n' >"$quoted_work/${quoted_stem}-cross-logic-error-invalid-json.md"
+jq --arg name "${quoted_stem}-cross-logic-error-invalid-json.md" '.artifacts.cross_review = {"logic-error-invalid-json": $name}' \
+    "$quoted_work/${quoted_stem}-manifest.json" >"$quoted_work/manifest.tmp" \
+    && mv "$quoted_work/manifest.tmp" "$quoted_work/${quoted_stem}-manifest.json"
 # A final rerun of that run: its failed attempt goes, its findings stay.
 printf 'log\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log"
 printf '{}\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-findings.json"
@@ -156,8 +168,11 @@ mkdir -p -- "$reviews/contract-tests/$run"
 printf 'log\n' >"$reviews/contract-tests/$run/agent.log"
 # A run that started long ago under a PID no review holds now, and the history
 # of the legacy review.
+now_at() {
+    date '+%Y-%m-%dT%H:%M:%S%z'
+}
 {
-    printf '%s\n' '{"event":"started","pr":100,"pid":999999999}'
+    printf '{"event":"started","at":"%s","pr":100,"pid":999999999}\n' "$(now_at)"
     printf '%s\n' '{"event":"finished","pr":106,"review_id":"106-task","repository":"Legacy/Repository","pid":999999998}'
 } >"$reviews/run-history.jsonl"
 find "$reviews" -exec touch -t "$old_stamp" {} +
@@ -185,8 +200,8 @@ work_of() {
 before=$(tree_listing)
 output=$(run_prune 2>&1) || fail "prune failed: ${output}"
 assert_eq "$before" "$(tree_listing)" 'a dry run changes nothing'
-assert_true 'and says what it would do' grep -q 'Would compress 17 files' <<<"$output"
-assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 13 leftover temporary files' <<<"$output"
+assert_true 'and says what it would do' grep -q 'Would compress 20 files' <<<"$output"
+assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 14 leftover temporary files' <<<"$output"
 assert_true 'and the reviews whose state is not known' grep -q 'State unknown, kept the same way: 2' <<<"$output"
 assert_true 'each pull request counted once, whatever number of branches it was reviewed from' \
     grep -q 'Open pull requests keep their streams and logs: 2' <<<"$output"
@@ -200,12 +215,19 @@ mkdir -p -- "$suite_root/fake install"
 printf 'sleep 30\n' >"$suite_root/fake install/review-pr"
 bash "$suite_root/fake install/review-pr" &
 running_pid=$!
-printf '{"event":"started","pr":101,"pid":%s}\n' "$running_pid" >>"$reviews/run-history.jsonl"
+printf '{"event":"started","at":"%s","pr":101,"pid":%s}\n' "$(now_at)" "$running_pid" >>"$reviews/run-history.jsonl"
 output=$(run_prune 2>&1) || fail "a dry run during a review failed: ${output}"
 assert_true 'a dry run names the running review' grep -q "A review is running (PID ${running_pid})" <<<"$output"
 apply_status=0
 output=$(run_prune --apply 2>&1) || apply_status=$?
 assert_eq 1 "$apply_status" '--apply refuses while a review runs'
+# The same live PID under a started record two days old is a PID that came
+# round again after a run was killed outright: not a running review.
+grep -v "\"pid\":${running_pid}}" "$reviews/run-history.jsonl" >"$suite_root/history.tmp"
+printf '{"event":"started","at":"2026-01-01T00:00:00+0000","pr":101,"pid":%s}\n' "$running_pid" >>"$suite_root/history.tmp"
+cp "$suite_root/history.tmp" "$reviews/run-history.jsonl"
+output=$(run_prune 2>&1) || fail "a dry run failed: ${output}"
+assert_false 'a started record two days old is not a running review' grep -q 'A review is running' <<<"$output"
 kill "$running_pid" 2>/dev/null || true
 wait "$running_pid" 2>/dev/null || true
 running_pid=""
@@ -213,7 +235,7 @@ bash -c 'exec -a vim tail -f "$1" >/dev/null' vim "$suite_root/fake install/revi
 running_pid=$!
 assert_true 'the stand-in runs under a command line that names the script' \
     bash -c 'sleep 0.2; ps -p "$1" -o command= | grep -q review-pr' _ "$running_pid"
-printf '{"event":"started","pr":101,"pid":%s}\n' "$running_pid" >>"$reviews/run-history.jsonl"
+printf '{"event":"started","at":"%s","pr":101,"pid":%s}\n' "$(now_at)" "$running_pid" >>"$reviews/run-history.jsonl"
 output=$(run_prune 2>&1) || fail "a dry run failed: ${output}"
 assert_false 'a process that is not a review does not count as one' grep -q 'A review is running' <<<"$output"
 kill "$running_pid" 2>/dev/null || true
@@ -224,11 +246,11 @@ assert_eq "$before" "$(tree_listing)" 'and nothing has changed'
 # GitHub not answering is said out loud, and nothing is compressed on a guess.
 output=$(FAKE_GH_FAIL=1 run_prune 2>&1) || fail "prune without GitHub failed: ${output}"
 assert_true 'a repository GitHub did not answer for is named' \
-    grep -q 'GitHub did not report the state of 7 pull requests of Example/Repository' <<<"$output"
+    grep -q 'GitHub did not report the state of 8 pull requests of Example/Repository' <<<"$output"
 assert_true 'and nothing is compressed' grep -q 'Would compress 0 files' <<<"$output"
 
 output=$(run_prune --apply 2>&1) || fail "prune --apply failed: ${output}"
-assert_true 'the outcome is reported' grep -q 'Compressed 17 files' <<<"$output"
+assert_true 'the outcome is reported' grep -q 'Compressed 20 files' <<<"$output"
 for review in example-repository/100-task example-repository/102-task example-repository/104-fix-x-error \
     legacy-repository/106-task legacy-repository/108-task example-repository/109-task example-repository/105-task:flat; do
     layout=nested
@@ -255,6 +277,10 @@ for artifact in error-checker.md error-checker-raw.ndjson error-checker-findings
 done
 assert_file_exists "$work/100-task-${run}-cross-error-checker-error-attempt-1.log.gz" 'while its failed attempt is compressed'
 assert_file_exists "$work/100-task-${run}-final-error-anchor-validation.json" 'an artifact the manifest names stays'
+assert_file_exists "$work/100-task-${run}-primary-pi-error-truncated.md.gz" 'the incomplete answer of a failed attempt is compressed'
+assert_file_exists "$quoted_work/${quoted_stem}-cross-logic-error-invalid-json.md" \
+    'a manifest protects its artifacts when the branch holds a quote'
+assert_file_exists "$quoted_work/${quoted_stem}-primary-pi-error-attempt-1.log.gz" "while that run's failed attempt goes"
 assert_file_exists "$(work_of example-repository 102-task)/102-task-${run}-final-error-anchor-validation.json.gz" \
     'while the same kind of file no manifest names goes'
 assert_file_exists "$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log.gz" \
@@ -291,5 +317,25 @@ assert_true 'with the reason' grep -q 'Only one subcommand at a time' <<<"$usage
 usage_status=0
 run_prune 123 >/dev/null 2>&1 || usage_status=$?
 assert_eq 1 "$usage_status" 'prune takes no pull request'
+usage_status=0
+"$repo_root/bin/review-pr" --config "$config" --version prune >/dev/null 2>&1 || usage_status=$?
+assert_eq 1 "$usage_status" '--version does not swallow a subcommand'
+
+# A file gzip cannot read is counted and left; the rest of the batch and the
+# leftovers are still done.
+work=$(work_of example-repository 100-task)
+printf 'log\n' >"$work/100-task-${run}-final-error-attempt-2.log"
+printf 'log\n' >"$work/100-task-${run}-final-error-attempt-3.log"
+printf 'partial\n' >"$work/.100-task-${run}-late-reply.tmp.Kl90Mn"
+touch -t "$old_stamp" "$work/100-task-${run}-final-error-attempt-2.log" "$work/100-task-${run}-final-error-attempt-3.log" \
+    "$work/.100-task-${run}-late-reply.tmp.Kl90Mn"
+chmod 000 "$work/100-task-${run}-final-error-attempt-2.log"
+output=$(run_prune --apply 2>&1) || fail "prune --apply with an unreadable file failed: ${output}"
+chmod 600 "$work/100-task-${run}-final-error-attempt-2.log"
+assert_true 'the file that could not be compressed is named in the count' \
+    grep -q 'Could not compress 1 files' <<<"$output"
+assert_file_exists "$work/100-task-${run}-final-error-attempt-2.log" 'and left as it was'
+assert_file_exists "$work/100-task-${run}-final-error-attempt-3.log.gz" 'while the rest of the batch is compressed'
+assert_file_not_exists "$work/.100-task-${run}-late-reply.tmp.Kl90Mn" 'and the leftovers removed'
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"
