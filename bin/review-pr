@@ -434,7 +434,7 @@ codex_app_server_rate_limits() {
     directory=$(mktemp -d "${TMPDIR:-/tmp}/review-pr-quota.XXXXXX") || return 1
     fifo="$directory/in"
     output="$directory/out"
-    mkfifo -- "$fifo" || { rm -rf -- "$directory"; return 1; }
+    mkfifo -- "$fifo" "$directory/pause" || { rm -rf -- "$directory"; return 1; }
     : >"$output"
     codex app-server <"$fifo" >"$output" 2>/dev/null &
     pid=$!
@@ -443,8 +443,9 @@ codex_app_server_rate_limits() {
     # SIGPIPE ends that subshell, not the run.
     ( printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"review-pr\",\"version\":\"${REVIEW_PR_VERSION}\"}}}" >&"$writer" ) 2>/dev/null || true
     deadline=$((SECONDS + timeout))
-    # Pauses are reads with a timeout on a pipe this function holds both ends of.
-    exec {pause_fd}<> <(:)
+    # Pauses are reads with a timeout on a FIFO this function holds both ends of.
+    # A process substitution cannot be opened that way on macOS.
+    exec {pause_fd}<>"$directory/pause"
     while (( SECONDS < deadline )) && ! quota_rpc_answered "$output" 1; do
         kill -0 "$pid" 2>/dev/null || break
         read -r -t 0.2 -u "$pause_fd" _ 2>/dev/null || :
