@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly REVIEW_PR_VERSION="1.27.0"
 REVIEW_PR_SCRIPT_DIR=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || REVIEW_PR_SCRIPT_DIR=""
+REVIEW_PR_START_DIR=$PWD
 
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     printf 'review-pr requires Bash 5.1 or newer; found %s.\n' "$BASH_VERSION" >&2
@@ -29,6 +30,7 @@ LOCK_DIR=""
 LOCK_ACQUIRED=false
 
 declare -a TEMP_FILES=()
+declare -a LEFTOVER_TEMP_FILES=()
 declare -A JSON_LINE_CACHE=()
 # The umask the run started with, restored after each temporary file is made
 # private; read once, since reading it means a subshell.
@@ -1164,15 +1166,12 @@ cleanup() {
     done
     # One rm for every temporary file still there, not one per file: a run
     # leaves a few hundred, and each process is inspected by the endpoint scanner.
-    local -a leftover_temp_files=()
-    for temp_file in "${TEMP_FILES[@]}"; do
-        [[ ! -e "$temp_file" ]] || leftover_temp_files+=("$temp_file")
-    done
+    collect_leftover_temp_files
     # In chunks, so a very long run cannot exceed the argument limit and leave
     # every file behind.
     local chunk_start
-    for (( chunk_start = 0; chunk_start < ${#leftover_temp_files[@]}; chunk_start += 500 )); do
-        rm -f -- "${leftover_temp_files[@]:chunk_start:500}"
+    for (( chunk_start = 0; chunk_start < ${#LEFTOVER_TEMP_FILES[@]}; chunk_start += 500 )); do
+        rm -f -- "${LEFTOVER_TEMP_FILES[@]:chunk_start:500}"
     done
     if [[ "$SCRATCH_DIR_OWNED" == true && -n "$SCRATCH_DIR" ]]; then
         rm -rf -- "$SCRATCH_DIR"
@@ -1188,6 +1187,25 @@ cleanup() {
     release_repo_lock
 
     exit "$exit_status"
+}
+
+# The temporary files of the run that are still there, in LEFTOVER_TEMP_FILES:
+# those it recorded, and the staging copies of a publication across file systems
+# that an agent's subshell made and was killed before renaming into place. The
+# subshell recorded those in its own TEMP_FILES, which ended with it.
+collect_leftover_temp_files() {
+    local temp_file directory
+
+    LEFTOVER_TEMP_FILES=()
+    for temp_file in "${TEMP_FILES[@]}"; do
+        [[ ! -e "$temp_file" ]] || LEFTOVER_TEMP_FILES+=("$temp_file")
+    done
+    for directory in "${WORK_DIR:-}" "${REPORT_DIR:-}"; do
+        [[ -n "$directory" ]] || continue
+        for temp_file in "$directory"/.*.publish.??????; do
+            [[ ! -f "$temp_file" ]] || LEFTOVER_TEMP_FILES+=("$temp_file")
+        done
+    done
 }
 
 trap cleanup EXIT
@@ -3975,9 +3993,13 @@ setup_scratch_dir() {
             free_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 }') || return 0
             [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb >= 262144 )) || return 0
             ;;
-        *) root=$setting explicit=true ;;
+        *)
+            root=$setting explicit=true
+            # The run and its agents change directory, so a relative root is
+            # taken from where review-pr was started.
+            [[ "$root" == /* ]] || root="${REVIEW_PR_START_DIR}/${root}"
+            ;;
     esac
-    [[ "$root" != -* ]] || root="./${root}"
     # A root the user named and that cannot be used is said out loud; the
     # automatic choice falls back to the work directory without a word.
     if ! mkdir -p -- "$root" 2>/dev/null; then
@@ -4112,13 +4134,18 @@ make_temp_file() {
 
 # Prints a file as cat does, without starting cat: the prompts embed the
 # context, the facts, the changed-line map, the skill and every report this way.
-# The bytes are the file's own, a missing final newline included; only a NUL
-# byte, which none of these text files holds, would end the read early. A file
-# that cannot be opened fails the call, as cat does.
+# The bytes are the file's own, a missing final newline included. A read that
+# succeeds stopped at a NUL byte before the end, which a shell variable cannot
+# hold, so such a file goes through cat after all. A file that cannot be opened
+# fails the call, as cat does.
 emit_file() {
-    local content=""
+    local content="" stopped_at_nul=true
 
-    { IFS= read -r -d '' content || :; } <"$1" || return 1
+    { IFS= read -r -d '' content || stopped_at_nul=false; } <"$1" || return 1
+    if [[ "$stopped_at_nul" == true ]]; then
+        command cat -- "$1"
+        return
+    fi
     printf '%s' "$content"
 }
 
@@ -9443,15 +9470,22 @@ run_with_agent_timeout() {
     "$@" <&0 &
     command_pid=$!
     (
-        local sleep_pid fired=false
+        local sleep_pid="" fired=false cancelled=false
         trap - EXIT HUP INT
         # Stopped once the command is over: before the timeout that is no
-        # timeout at all, after it the command was still stopped by this.
-        trap '[[ -z "${sleep_pid:-}" ]] || kill "$sleep_pid" 2>/dev/null; [[ "$fired" != true ]] || exit 124; exit 0' TERM
+        # timeout at all, after it the command was still stopped by this. A stop
+        # that lands after the sleep started but before its PID is known is
+        # remembered, or the sleep would outlive the run for the whole timeout.
+        trap 'if [[ -n "$sleep_pid" ]]; then kill "$sleep_pid" 2>/dev/null; exit 0; fi; [[ "$fired" != true ]] || exit 124; cancelled=true' TERM
         sleep "$timeout_seconds" &
         sleep_pid=$!
+        if [[ "$cancelled" == true ]]; then
+            kill "$sleep_pid" 2>/dev/null
+            exit 0
+        fi
         wait "$sleep_pid" 2>/dev/null || exit 0
         sleep_pid=""
+        [[ "$cancelled" != true ]] || exit 0
         kill -0 "$command_pid" 2>/dev/null || exit 0
         fired=true
         printf 'review-pr: %s exceeded its configured timeout of %s; terminating it.\n' \
@@ -10376,9 +10410,20 @@ restore_dashboard_stderr() {
 # Reads the message file into DASHBOARD_MESSAGE_TEXT in the shell, where with
 # LC_ALL=C a length and an offset count bytes as wc -c and tail -c did: the
 # refresher used to start wc, tr, tail and head for every frame of the table.
+# A read that succeeds stopped at a NUL byte, and every later message would be
+# held back behind it; the file is then read in NUL-separated pieces and joined,
+# its NUL bytes left out the same way on every reading, so offsets still agree.
 read_dashboard_messages() {
+    local stopped_at_nul=true
+    local -a pieces=()
+
     DASHBOARD_MESSAGE_TEXT=""
-    { IFS= read -r -d '' DASHBOARD_MESSAGE_TEXT || :; } <"$DASHBOARD_MESSAGE_FILE" 2>/dev/null || DASHBOARD_MESSAGE_TEXT=""
+    { IFS= read -r -d '' DASHBOARD_MESSAGE_TEXT || stopped_at_nul=false; } <"$DASHBOARD_MESSAGE_FILE" 2>/dev/null \
+        || { DASHBOARD_MESSAGE_TEXT=""; return 0; }
+    if [[ "$stopped_at_nul" == true ]]; then
+        mapfile -d '' pieces <"$DASHBOARD_MESSAGE_FILE" 2>/dev/null || pieces=()
+        printf -v DASHBOARD_MESSAGE_TEXT '%s' "${pieces[@]}"
+    fi
 }
 
 # Whether the run said anything the last flush did not print.

@@ -4,6 +4,28 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-10-14
+
+### Fixed
+
+Six findings of a Codex and Pi cross-review of 1.27.0, each checked against the code first.
+
+- A file holding a NUL byte is embedded in a prompt or rebuilt as a report whole again. Since
+  1.27.0 files were printed by the shell, which stopped at the first NUL and dropped the rest of
+  the file without a word; such a file now goes through `cat`.
+- A NUL byte in what the run says while the status table is up no longer holds back every later
+  message, the final `ERROR` line included.
+- An agent's timeout watchdog no longer leaves its `sleep` running for the whole timeout when the
+  agent ends at the moment the watchdog starts. The orphaned `sleep` also kept the run's output
+  descriptors open, so whatever read them waited for the timeout.
+- A relative `REVIEW_PR_SCRATCH_DIR` is taken from the directory `review-pr` was started in. It was
+  used as given, and the run and its agents change directory, so their scratch paths broke.
+- The hidden staging copy of a file published from the scratch directory to another file system is
+  removed at the end of the run when the agent that made it was killed before renaming it into
+  place.
+- The test helper that waits for the next second waits a whole second at the very start of one,
+  not a tenth.
+
 ## [1.27.0] - 2026-10-14
 
 ### Added

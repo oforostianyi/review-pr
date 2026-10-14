@@ -142,6 +142,18 @@ assert_eq $'другий рядок без кінця\n.' "$(cat "$utf8_case/sec
 assert_eq "$(wc -c <"$DASHBOARD_MESSAGE_FILE" | tr -d ' ')" "$(<"${DASHBOARD_MESSAGE_FILE}.offset")" \
     'the offset is the byte size of the file'
 
+# A NUL byte in what the run said cannot stop the flushing: what follows it, and
+# whatever the run says afterwards, is still printed.
+nul_case="$suite_root/nul"
+mkdir -p -- "$nul_case"
+DASHBOARD_MESSAGE_FILE="$nul_case/messages.txt"
+printf 'before\0after\n' >"$DASHBOARD_MESSAGE_FILE"
+flush_dashboard_messages 2>"$nul_case/first.txt"
+printf 'later line\n' >>"$DASHBOARD_MESSAGE_FILE"
+flush_dashboard_messages 2>"$nul_case/second.txt"
+assert_eq 'beforeafter' "$(<"$nul_case/first.txt")" 'a message holding a NUL byte is printed without it'
+assert_eq 'later line' "$(<"$nul_case/second.txt")" 'and the next flush prints what followed'
+
 # Both ways the table comes down print what the run said last while it was up:
 # stop_dashboard at the end of a run, and cleanup on the way out of one that
 # died, whose ERROR line went into the message file like every other.

@@ -118,8 +118,11 @@ report_root_of() {
 # A final rerun is named by the second it starts in, so two reruns of the same
 # run within one second would share a name; on a fast machine they did.
 wait_for_next_second() {
-    local fraction=${EPOCHREALTIME#*.}
-    sleep "0.$(printf '%06d' $((1000000 - 10#$fraction)))"
+    local remaining=$((1000000 - 10#${EPOCHREALTIME#*.})) fraction
+
+    # At the very start of a second the whole second is left.
+    printf -v fraction '%06d' "$((remaining % 1000000))"
+    sleep "$((remaining / 1000000)).${fraction}"
 }
 
 run_full_success_case() {

@@ -493,6 +493,11 @@ made_status=0
 ) 2>/dev/null || made_status=$?
 assert_eq 1 "$made_status" 'a creation that keeps failing gives up rather than spinning'
 
+# A file is printed as cat prints it, a NUL byte and what follows it included.
+printf 'before\0after\ntail' >"$suite_root/nul.txt"
+assert_eq 17 "$(emit_file "$suite_root/nul.txt" | wc -c | tr -d ' ')" 'a file holding a NUL byte is printed whole'
+assert_eq 'tail' "$(emit_file "$suite_root/nul.txt" | tail -n 1)" 'up to its last line'
+
 # A run keeps its intermediate files in a scratch directory of its own, removes
 # the ones left by runs that are gone, and stays in the work directory when told.
 scratch_root="$suite_root/scratch-root"
@@ -512,6 +517,31 @@ SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
 REVIEW_PR_SCRATCH_DIR="$suite_root/scratch-link" setup_scratch_dir
 assert_eq '' "$SCRATCH_DIR" 'a root that is a symbolic link is not used'
 SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+# A relative root is taken from where review-pr was started: the run and its
+# agents change directory afterwards, and the paths have to hold everywhere.
+mkdir -p "$suite_root/launch"
+REVIEW_PR_START_DIR="$suite_root/launch" REVIEW_PR_SCRATCH_DIR=relative-scratch setup_scratch_dir
+assert_eq "$suite_root/launch/relative-scratch" "${SCRATCH_DIR%/run-*}" 'a relative root is resolved from the start directory'
+rm -rf "$SCRATCH_DIR"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+
+# The staging copy of a publication is cleared at the end of a run even when an
+# agent's subshell made it and was killed before renaming it into place.
+staging_case="$suite_root/staging"
+mkdir -p "$staging_case/work" "$staging_case/report"
+printf 'partial\n' >"$staging_case/work/.alpha-usage.json.publish.Ab12Cd"
+printf 'partial\n' >"$staging_case/report/.final.md.publish.Xy34Zw"
+printf 'kept\n' >"$staging_case/work/alpha-usage.json"
+(
+    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" TEMP_FILES=()
+    collect_leftover_temp_files
+    printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
+) >"$staging_case/leftovers.txt"
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.alpha-usage.json.publish.Ab12Cd" \
+    'a staging copy left in the work directory is cleared'
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.final.md.publish.Xy34Zw" \
+    'and one left in the report directory'
+assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/alpha-usage.json" "$staging_case/leftovers.txt"
 
 # A file leaving the scratch directory for another file system is copied next
 # to its destination and renamed into place, so the destination never holds a
