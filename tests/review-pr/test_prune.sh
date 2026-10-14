@@ -71,6 +71,9 @@ PATH="$fake_bin:$PATH"
 
 run="20261001-120000-CEST"
 old_stamp=202601010000
+work_of_fixture() {
+    printf '%s' "$reviews/$1/$2/work/$run"
+}
 
 # One review per case: a run's agent streams and logs, the artifacts that stay,
 # and a temporary file a killed run left. Everything is a day old or more.
@@ -115,15 +118,31 @@ mkdir -p -- "$reviews/example-repository/100-task/work/20260101-000000-CEST"
 printf '{"github_repository": "Example/Repo' >"$reviews/example-repository/100-task/work/20260101-000000-CEST/100-task-20260101-000000-CEST-manifest.json"
 # A run in a zone whose abbreviation is a negative offset.
 write_review example-repository 109-task Example/Repository nested 20261001-120000--03
-# A reviewer whose key says error: its artifacts, which the manifest names, stay,
-# and only its failed attempt goes.
+# Reviewers whose keys say error: their reports, raw streams and findings stay,
+# and only a failed attempt goes. An artifact the manifest names stays even when
+# its name looks like a failed step's, as an anchor validation of a failed final
+# synthesis does; the same name no manifest claims goes.
 work="$reviews/example-repository/100-task/work/$run"
-printf 'cross review\n' >"$work/100-task-${run}-cross-error-checker.md"
-printf '{}\n' >"$work/100-task-${run}-cross-error-checker-findings.json"
+for artifact in error-checker.md error-checker-raw.ndjson error-checker-findings.json \
+    cross-error-checker.md cross-error-checker-findings.json \
+    cross-logic-error-checker.md cross-logic-error-checker-raw.ndjson cross-logic-error-checker-findings.json; do
+    printf 'artifact\n' >"$work/100-task-${run}-${artifact}"
+done
 printf 'log\n' >"$work/100-task-${run}-cross-error-checker-error-attempt-1.log"
-jq --arg stem "100-task-${run}" '.artifacts.cross_review = {"error-checker": ($stem + "-cross-error-checker.md")}
-    | .artifacts.cross_review_findings = {"error-checker": ($stem + "-cross-error-checker-findings.json")}' \
+printf '{}\n' >"$work/100-task-${run}-final-error-anchor-validation.json"
+printf '{}\n' >"$(work_of_fixture example-repository 102-task)/102-task-${run}-final-error-anchor-validation.json"
+jq --arg stem "100-task-${run}" '.artifacts.primary["error-checker"] = ($stem + "-error-checker.md")
+    | .artifacts.primary_raw = {"error-checker": ($stem + "-error-checker-raw.ndjson")}
+    | .artifacts.primary_findings = {"error-checker": ($stem + "-error-checker-findings.json")}
+    | .artifacts.cross_review = {"error-checker": ($stem + "-cross-error-checker.md"),
+        "logic-error-checker": ($stem + "-cross-logic-error-checker.md")}
+    | .artifacts.cross_review_raw = {"logic-error-checker": ($stem + "-cross-logic-error-checker-raw.ndjson")}
+    | .artifacts.cross_review_findings = {"error-checker": ($stem + "-cross-error-checker-findings.json"),
+        "logic-error-checker": ($stem + "-cross-logic-error-checker-findings.json")}
+    | .artifacts.final_anchor_validation = ($stem + "-final-error-anchor-validation.json")' \
     "$work/100-task-${run}-manifest.json" >"$work/manifest.tmp" && mv "$work/manifest.tmp" "$work/100-task-${run}-manifest.json"
+# The same pull request reviewed from a second branch: one pull request still.
+write_review example-repository 101-second-branch Example/Repository
 # A final rerun of that run: its failed attempt goes, its findings stay.
 printf 'log\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log"
 printf '{}\n' >"$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-findings.json"
@@ -166,9 +185,11 @@ work_of() {
 before=$(tree_listing)
 output=$(run_prune 2>&1) || fail "prune failed: ${output}"
 assert_eq "$before" "$(tree_listing)" 'a dry run changes nothing'
-assert_true 'and says what it would do' grep -q 'Would compress 16 files' <<<"$output"
-assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 12 leftover temporary files' <<<"$output"
+assert_true 'and says what it would do' grep -q 'Would compress 17 files' <<<"$output"
+assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 13 leftover temporary files' <<<"$output"
 assert_true 'and the reviews whose state is not known' grep -q 'State unknown, kept the same way: 2' <<<"$output"
+assert_true 'each pull request counted once, whatever number of branches it was reviewed from' \
+    grep -q 'Open pull requests keep their streams and logs: 2' <<<"$output"
 assert_true 'and what is too fresh to touch' grep -q 'Files changed in the last day are left for later: 2' <<<"$output"
 assert_eq 3 "$(grep -c 'pullRequest' "$FAKE_GH_QUERIES")" 'one GitHub query per repository'
 
@@ -207,7 +228,7 @@ assert_true 'a repository GitHub did not answer for is named' \
 assert_true 'and nothing is compressed' grep -q 'Would compress 0 files' <<<"$output"
 
 output=$(run_prune --apply 2>&1) || fail "prune --apply failed: ${output}"
-assert_true 'the outcome is reported' grep -q 'Compressed 16 files' <<<"$output"
+assert_true 'the outcome is reported' grep -q 'Compressed 17 files' <<<"$output"
 for review in example-repository/100-task example-repository/102-task example-repository/104-fix-x-error \
     legacy-repository/106-task legacy-repository/108-task example-repository/109-task example-repository/105-task:flat; do
     layout=nested
@@ -227,9 +248,15 @@ for review in example-repository/100-task example-repository/102-task example-re
     assert_file_not_exists "$work/.${stem}-amendment-reply.tmp.Ab12Cd" 'leftover temporary files go'
 done
 work=$(work_of example-repository 100-task)
-assert_file_exists "$work/100-task-${run}-cross-error-checker.md" 'the report of a reviewer whose key says error stays'
-assert_file_exists "$work/100-task-${run}-cross-error-checker-findings.json" 'and so do its findings'
+for artifact in error-checker.md error-checker-raw.ndjson error-checker-findings.json \
+    cross-error-checker.md cross-error-checker-findings.json \
+    cross-logic-error-checker.md cross-logic-error-checker-raw.ndjson cross-logic-error-checker-findings.json; do
+    assert_file_exists "$work/100-task-${run}-${artifact}" "the ${artifact} of a reviewer whose key says error stays"
+done
 assert_file_exists "$work/100-task-${run}-cross-error-checker-error-attempt-1.log.gz" 'while its failed attempt is compressed'
+assert_file_exists "$work/100-task-${run}-final-error-anchor-validation.json" 'an artifact the manifest names stays'
+assert_file_exists "$(work_of example-repository 102-task)/102-task-${run}-final-error-anchor-validation.json.gz" \
+    'while the same kind of file no manifest names goes'
 assert_file_exists "$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-error-attempt-1.log.gz" \
     "a final rerun's failed attempt is compressed"
 assert_file_exists "$work/100-task-${run}-final-rerun-20261002-120000-CEST-final-findings.json" 'and its findings stay'

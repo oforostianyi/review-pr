@@ -565,7 +565,7 @@ prune_review_outputs() {
     local dir name number repository state file line restore_shopt age_reference stamp
     local compress_bytes=0 leftover_bytes=0 open_count=0 unknown_count=0 recent_count=0 worktree_count=0 index
     local -a running=() review_dirs=() manifests=() compress=() leftovers=() sized=() numbers=()
-    local -A dir_candidates=() dir_repository=() repository_numbers=() pr_state=() file_bytes=() protected=()
+    local -A dir_candidates=() dir_repository=() repository_numbers=() pr_state=() file_bytes=() protected=() counted=()
     local -A row_compress=() row_leftovers=()
 
     [[ -d "$REVIEWS_ROOT" ]] || { printf 'Nothing to prune: %s does not exist.\n' "$REVIEWS_ROOT"; return 0; }
@@ -600,6 +600,7 @@ prune_review_outputs() {
             prune_add_repository_candidate "${file%/work/*}" "${BASH_REMATCH[1]}"
         done < <(grep -H '"github_repository"' "${manifests[@]}" 2>/dev/null || :)
         while IFS= read -r line; do
+            line=${line#\"}
             line=${line%\"}
             protected[${line##*/}]=1
         done < <(grep -hoE '"[^"]+\.(md|json|ndjson|jsonl|log)"' "${manifests[@]}" 2>/dev/null || :)
@@ -622,6 +623,9 @@ prune_review_outputs() {
         [[ -n "$repository" && "$repository" != *$'\n'* ]] || continue
         dir_repository[$dir]=$repository
         name=${dir##*/}
+        # A pull request reviewed from two branches has two folders.
+        [[ -z "${counted["${repository,,}#${name%%-*}"]:-}" ]] || continue
+        counted["${repository,,}#${name%%-*}"]=1
         repository_numbers[$repository]+=" ${name%%-*}"
     done
     for repository in "${!repository_numbers[@]}"; do
@@ -645,11 +649,14 @@ prune_review_outputs() {
         name=${dir##*/}
         repository=${dir_repository[$dir]:-}
         state=${pr_state["${repository,,}#${name%%-*}"]:-}
-        case "$state" in
-            MERGED | CLOSED) ;;
-            OPEN) open_count=$((open_count + 1)) ;;
-            *) unknown_count=$((unknown_count + 1)) ;;
-        esac
+        if [[ -z "${counted["tally ${repository,,}#${name%%-*}"]:-}" ]]; then
+            counted["tally ${repository,,}#${name%%-*}"]=1
+            case "$state" in
+                MERGED | CLOSED) ;;
+                OPEN) open_count=$((open_count + 1)) ;;
+                *) unknown_count=$((unknown_count + 1)) ;;
+            esac
+        fi
         # The review directory, its work directory and the runs in it: a run
         # keeps no deeper files of its own, and an agent's worktree a killed run
         # left is a checkout of the repository, counted and left alone.
@@ -677,8 +684,11 @@ prune_review_outputs() {
                 *)
                     # The file of a failed attempt or step: <phase>-<agent>-error...,
                     # final-error..., comparison-error..., or error... of a
-                    # primary review named before reviewers were.
-                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(-|\.) ]] || continue
+                    # primary review named before reviewers were, and after
+                    # "error" what review-pr writes there. A reviewer key may say
+                    # error too: its own reports and findings do not go on so.
+                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(\.log|-attempt-|-schema-repair|-continuation-|-amendment-|-events\.jsonl|-partial-|-truncated-|-invalid|-anchor-) ]] \
+                        || continue
                     ;;
             esac
             if [[ ! "$file" -ot "$age_reference" ]]; then recent_count=$((recent_count + 1)); continue; fi
@@ -709,7 +719,7 @@ prune_review_outputs() {
     done
     printf 'Open pull requests keep their streams and logs: %d. State unknown, kept the same way: %d.\n' "$open_count" "$unknown_count"
     (( recent_count == 0 )) || printf 'Files changed in the last day are left for later: %d.\n' "$recent_count"
-    (( worktree_count == 0 )) || printf 'Agent worktrees killed runs left, kept (git worktree prune in the review checkout clears them): %d.\n' "$worktree_count"
+    (( worktree_count == 0 )) || printf 'Agent worktrees killed runs left, kept (git worktree remove --force <path> in the review checkout clears one): %d.\n' "$worktree_count"
     if [[ "$apply" != true ]]; then
         printf 'Would compress %d files (%s) and remove %d leftover temporary files (%s). Run with --apply to do it.\n' \
             "${#compress[@]}" "$(format_megabytes "$compress_bytes")" "${#leftovers[@]}" "$(format_megabytes "$leftover_bytes")"

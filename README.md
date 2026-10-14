@@ -698,8 +698,8 @@ touched, so a review that is running keeps its files even if the run history mis
 also refuses while the run history shows a review running. A compressed file reads back with
 `gzip -dc`. Only reviews under `<reviews directory>/<owner>-<repository>/` are pruned; reviews of
 earlier layouts, directly in the reviews directory or in the checkout's `docs/reviews`, are not.
-The worktree a killed command agent left is counted, not removed: `git worktree prune` in the review
-checkout clears it.
+The worktree a killed command agent left is counted, not removed: `git worktree remove --force <path>`
+in the review checkout clears it.
 
 ## Upgrade
 
