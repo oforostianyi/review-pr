@@ -4,6 +4,29 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-10-14
+
+### Added
+
+- A run keeps its intermediate files (agent logs, usage events, stream records, the dashboard
+  state) in a private scratch directory under `/dev/shm` when that is writable, and moves only the
+  finished artifacts into the work directory. Endpoint security tools that scan every file write
+  often leave `/dev/shm` alone. The directory is removed when the run ends, and by the next run if
+  the run was killed. `REVIEW_PR_SCRATCH_DIR=<path>` names another root, and
+  `REVIEW_PR_SCRATCH_DIR=work` keeps the old behaviour. Without `/dev/shm`, on macOS for one, the
+  work directory is used as before.
+
+### Changed
+
+- `review-pr` starts far fewer processes, which endpoint security tools check one by one. The
+  clock, temporary files, file reads and the dashboard no longer start `date`, `mktemp`, `cat`,
+  `wc`, `tr`, `head` or `tail`. The configuration, PR metadata, manifest maps and changed-line
+  maps are read with one `jq` each instead of one per field. An agent's timeout is kept by one
+  watchdog instead of a loop that woke every second, and the Codex quota answer is awaited
+  without `grep` and `sleep`. The integration tests start 59% fewer programs (41,419 → 17,109)
+  and run in half the time. Prompts, changed-line maps, repository facts and findings stay
+  byte-for-byte the same.
+
 ### Fixed
 
 - A continuation is no longer refused because one line of the draft needs a JSON repair. The
