@@ -9,9 +9,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 - `review-pr prune [--apply]` frees the reviews directory. It compresses with gzip the agent event
   streams, logs and failed attempts of pull requests GitHub reports merged or closed, and removes
   the temporary files killed runs left in any review. Reports, fix-lists, manifests, findings,
-  usage files and prompts stay as they are, and so does everything of an open pull request but its
-  leftovers. Without `--apply` it only says what it would do; `--apply` refuses while a review runs.
-  On 2026-10-14 the event streams of agents took 560 MB of the 794 MB reviews directory.
+  usage files and prompts stay as they are, and so does everything of an open pull request, or of
+  one whose repository or state is not certain, but its leftovers. Files changed in the last day are
+  left for later, so a running review keeps its files. Without `--apply` it only says what it would
+  do; `--apply` refuses while a review runs. On 2026-10-14 the event streams of agents took 560 MB
+  of the 794 MB reviews directory.
+- Two subcommands at once, or `--apply` without `prune`, are refused before anything runs:
+  `contract-test` took precedence and started paid agents.
 
 ### Fixed
 

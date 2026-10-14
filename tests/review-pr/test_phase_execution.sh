@@ -526,25 +526,30 @@ rm -rf "$SCRATCH_DIR"
 SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
 
 # The staging copy of a publication is cleared at the end of a run even when an
-# agent's subshell made it and was killed before renaming it into place.
+# agent's subshell made it and was killed before renaming it into place, and so
+# is a temporary file such a subshell made -- but only those of this run: a
+# --rerun-final takes no lock and shares the work directory of the run it reruns.
 staging_case="$suite_root/staging"
 mkdir -p "$staging_case/work" "$staging_case/report"
-printf 'partial\n' >"$staging_case/work/.alpha-usage.json.publish.Ab12Cd"
-printf 'partial\n' >"$staging_case/report/.final.md.publish.Xy34Zw"
-printf 'partial\n' >"$staging_case/work/.alpha-amendment-reply.tmp.Qw56Er"
-printf 'kept\n' >"$staging_case/work/alpha-usage.json"
+printf 'partial\n' >"$staging_case/work/.this-run-usage.json.publish.Ab12Cd"
+printf 'partial\n' >"$staging_case/report/.this-run.md.publish.Xy34Zw"
+printf 'partial\n' >"$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er"
+printf 'live\n' >"$staging_case/work/.other-run-amendment-reply.tmp.Rt78Yu"
+printf 'live\n' >"$staging_case/report/.other-run.md.publish.Ui90Op"
+printf 'kept\n' >"$staging_case/work/this-run-usage.json"
 (
-    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" TEMP_FILES=()
+    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
     collect_leftover_temp_files
     printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
 ) >"$staging_case/leftovers.txt"
-assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.alpha-usage.json.publish.Ab12Cd" \
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run-usage.json.publish.Ab12Cd" \
     'a staging copy left in the work directory is cleared'
-assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.final.md.publish.Xy34Zw" \
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.this-run.md.publish.Xy34Zw" \
     'and one left in the report directory'
-assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.alpha-amendment-reply.tmp.Qw56Er" \
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er" \
     'as is a temporary file a subshell made without a scratch directory'
-assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/alpha-usage.json" "$staging_case/leftovers.txt"
+assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/this-run-usage.json" "$staging_case/leftovers.txt"
+assert_false 'and the files of another run are left alone' grep -q 'other-run' "$staging_case/leftovers.txt"
 
 # A file leaving the scratch directory for another file system is copied next
 # to its destination and renamed into place, so the destination never holds a

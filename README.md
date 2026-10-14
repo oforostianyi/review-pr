@@ -687,9 +687,13 @@ review-pr prune --apply   # does it
 
 Reports, fix-lists, manifests, findings, usage files and prompts are never touched, nor are the
 streams and logs of an open pull request or of one whose state GitHub does not report, so a resume,
-`--rerun-final` and `--same-head` work as before. The state of every pull request of a repository
-comes from one GitHub query. `--apply` refuses while a review runs; a dry run then counts that
-review's temporary files and says the review is running. A compressed file reads back with
+`--rerun-final` and `--same-head` work as before. A file is judged by what follows the run's
+timestamp in its name, never by the branch name before it. A review belongs to the repository its
+folder is named after, as its manifests, the run history or the configuration say; when they do not
+agree on one, it is left alone. The states come from GitHub, fifty pull requests a query, and a
+repository GitHub did not answer for is named and kept. A file changed in the last day is not
+touched, so a review that is running keeps its files even if the run history missed it; `--apply`
+also refuses while the run history shows a review running. A compressed file reads back with
 `gzip -dc`.
 
 ## Upgrade
