@@ -761,7 +761,8 @@ pull_request_states() {
     done
     query+=" } }"
     response=$(gh api graphql -f query="$query" 2>/dev/null) || :
-    if ! jq -e '.data.repository | type == "object"' >/dev/null 2>&1 <<<"$response"; then
+    # An empty answer is checked apart: jq 1.6 -e succeeds on no input at all.
+    if [[ -z "$response" ]] || ! jq -e '.data.repository | type == "object"' >/dev/null 2>&1 <<<"$response"; then
         printf 'GitHub did not report the state of %d pull requests of %s; their files are kept.\n' "$#" "$repository" >&2
         return 0
     fi
