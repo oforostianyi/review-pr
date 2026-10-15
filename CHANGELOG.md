@@ -4,27 +4,30 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-10-15
+
 ### Added
 
 - `review-pr prune [--apply]` frees the reviews directory. It compresses with gzip the agent event
   streams, logs and failed attempts of pull requests GitHub reports merged or closed, and removes
   the temporary files killed runs left in any review. Reports, fix-lists, manifests, findings,
   usage files and every file a manifest names stay as they are, and so does everything of an open
-  pull request, or of one whose repository or state is not certain, but its leftovers. Files changed in the last day are
-  left for later, so a running review keeps its files. Without `--apply` it only says what it would
-  do; `--apply` refuses while a review runs. On 2026-10-14 the event streams of agents took 560 MB
-  of the 794 MB reviews directory.
-- Two subcommands at once, or `--apply` without `prune`, are refused before anything runs:
-  `contract-test` took precedence and started paid agents.
-- The run history is opened in a reviews directory that does not exist yet as well; the first run
-  of a new one was never recorded.
+  pull request, or of one whose repository or state is not certain, but its leftovers. Files
+  changed in the last day are left for later, so a running review keeps its files. Without
+  `--apply` it only says what it would do; `--apply` refuses while a review runs. On 2026-10-14 the
+  event streams of agents took 560 MB of the 794 MB reviews directory.
 
 ### Fixed
 
 - A run without a scratch directory (`REVIEW_PR_SCRATCH_DIR=work`, or macOS) removes the temporary
-  files of a field amendment at its end. An agent's subshell made them and recorded them in its own
-  list, which ended with it, so they outlived every run: 18 such pairs were left in the reviews
-  directory.
+  files an agent's subshell made, a field amendment's for one, at its end. The subshell recorded
+  them in its own list, which ended with it, so they outlived every run: 18 such pairs were left in
+  the reviews directory. Only files named after the run's own stem are removed, and never a final
+  rerun's.
+- Two subcommands at once, `--apply` without `prune`, or `--version` with a subcommand are refused
+  before anything runs: `contract-test prune` started paid agents.
+- The run history is opened in a reviews directory that does not exist yet as well; the first run
+  of a new one was never recorded.
 
 ## [1.27.2] - 2026-10-14
 
