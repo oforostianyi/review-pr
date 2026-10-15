@@ -4,6 +4,37 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.28.1] - 2026-10-15
+
+### Fixed
+
+- A primary draft that leaves out `contributing_agents` and needs a schema repair or a field
+  amendment for anything else gets them, as its processing would, before the repair is judged. The
+  repair baseline was built without the reviewer, so such a draft was refused both and went straight
+  to salvage, losing the records it dropped.
+- A field amendment is no longer refused because the stream's `complete` record carries a key the
+  contract does not define; that key is dropped before the amendment is judged, as processing drops
+  it. The finding went to salvage instead.
+- A faithful schema repair of a final synthesis whose resolutions copied a ref's classification and
+  severity into the ref is no longer refused as a changed decision: both sides now compare the refs
+  as the canonical sidecar keeps them, agent and source id.
+- `prune` compresses the partial outputs of a fallback synthesizer and of a salvage as well, and
+  refuses `--same-head` and `--reviewers`, which it took and ignored.
+- The example configuration, which the installer copies for a new install, no longer sets
+  `finalization.effort` to an empty string. An empty string turns the effort off, so the final
+  synthesis of a new install ran without reasoning; leaving the key out inherits the synthesizer's
+  own effort.
+
+### Documentation
+
+- The README, the installed reference and the finding contract were checked against the code of
+  1.28.0 and corrected: the Windows section (WSL2), output languages, `timezone`, the environment
+  variables, `--run last`, the quota command, the scratch directory, quorum and the fallback
+  synthesizer, `--same-head`, `findings`, `prune`, the recovery chain from mechanical repairs to
+  salvage, the runner contract, the report layout, and the contract's record rules, which now say
+  what the validators accept. The finding schema lets a resolution's refs carry the classification
+  and severity they are copied with.
+
 ## [1.28.0] - 2026-10-15
 
 ### Added
