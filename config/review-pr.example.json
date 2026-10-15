@@ -39,8 +39,7 @@
   "reviews_directory": "/absolute/path/to/review-pr-output",
   "language": "EN",
   "finalization": {
-    "model": "",
-    "effort": ""
+    "model": ""
   },
   "reporting": {
     "finding_contract": {

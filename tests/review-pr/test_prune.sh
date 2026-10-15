@@ -146,6 +146,9 @@ jq --arg stem "100-task-${run}" '.artifacts.primary["error-checker"] = ($stem + 
 write_review example-repository 101-second-branch Example/Repository
 # The incomplete answer of a Markdown-contract run that hit its output limit.
 printf 'partial answer\n' >"$work/100-task-${run}-primary-pi-error-truncated.md"
+# The partial outputs of a fallback synthesizer and of a salvage.
+printf 'partial\n' >"$work/100-task-${run}-final-error-fallback-beta-partial-raw.ndjson"
+printf 'partial\n' >"$work/100-task-${run}-final-error-salvage-partial-raw.ndjson"
 # A branch with a quote in it, which a manifest writes escaped, and a reviewer
 # whose artifacts look like a failed step's: the manifest still protects them.
 write_review example-repository '110-fix"parser' Example/Repository
@@ -200,7 +203,7 @@ work_of() {
 before=$(tree_listing)
 output=$(run_prune 2>&1) || fail "prune failed: ${output}"
 assert_eq "$before" "$(tree_listing)" 'a dry run changes nothing'
-assert_true 'and says what it would do' grep -q 'Would compress 20 files' <<<"$output"
+assert_true 'and says what it would do' grep -q 'Would compress 22 files' <<<"$output"
 assert_true 'counting the leftovers of every review, open or not' grep -q 'remove 14 leftover temporary files' <<<"$output"
 assert_true 'and the reviews whose state is not known' grep -q 'State unknown, kept the same way: 2' <<<"$output"
 assert_true 'each pull request counted once, whatever number of branches it was reviewed from' \
@@ -250,7 +253,7 @@ assert_true 'a repository GitHub did not answer for is named' \
 assert_true 'and nothing is compressed' grep -q 'Would compress 0 files' <<<"$output"
 
 output=$(run_prune --apply 2>&1) || fail "prune --apply failed: ${output}"
-assert_true 'the outcome is reported' grep -q 'Compressed 20 files' <<<"$output"
+assert_true 'the outcome is reported' grep -q 'Compressed 22 files' <<<"$output"
 for review in example-repository/100-task example-repository/102-task example-repository/104-fix-x-error \
     legacy-repository/106-task legacy-repository/108-task example-repository/109-task example-repository/105-task:flat; do
     layout=nested
@@ -278,6 +281,8 @@ done
 assert_file_exists "$work/100-task-${run}-cross-error-checker-error-attempt-1.log.gz" 'while its failed attempt is compressed'
 assert_file_exists "$work/100-task-${run}-final-error-anchor-validation.json" 'an artifact the manifest names stays'
 assert_file_exists "$work/100-task-${run}-primary-pi-error-truncated.md.gz" 'the incomplete answer of a failed attempt is compressed'
+assert_file_exists "$work/100-task-${run}-final-error-fallback-beta-partial-raw.ndjson.gz" "a fallback synthesizer's partial output is compressed"
+assert_file_exists "$work/100-task-${run}-final-error-salvage-partial-raw.ndjson.gz" "and so is a salvage's"
 assert_file_exists "$quoted_work/${quoted_stem}-cross-logic-error-invalid-json.md" \
     'a manifest protects its artifacts when the branch holds a quote'
 assert_file_exists "$quoted_work/${quoted_stem}-primary-pi-error-attempt-1.log.gz" "while that run's failed attempt goes"
@@ -317,6 +322,12 @@ assert_true 'with the reason' grep -q 'Only one subcommand at a time' <<<"$usage
 usage_status=0
 run_prune 123 >/dev/null 2>&1 || usage_status=$?
 assert_eq 1 "$usage_status" 'prune takes no pull request'
+usage_status=0
+run_prune --same-head >/dev/null 2>&1 || usage_status=$?
+assert_eq 1 "$usage_status" 'prune refuses --same-head'
+usage_status=0
+run_prune --reviewers alpha,beta >/dev/null 2>&1 || usage_status=$?
+assert_eq 1 "$usage_status" 'and --reviewers'
 usage_status=0
 "$repo_root/bin/review-pr" --config "$config" --version prune >/dev/null 2>&1 || usage_status=$?
 assert_eq 1 "$usage_status" '--version does not swallow a subcommand'

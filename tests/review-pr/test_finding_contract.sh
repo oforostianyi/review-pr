@@ -134,6 +134,17 @@ assert_eq 'true' "$(jq -r '[.findings[] | has("classification") and .classificat
     'each finding gets a null classification'
 assert_file_contains "$classification_log" 'Set classification to null for 1 primary finding from codex that left it out' \
     'and the log says so'
+# The repair baseline of a primary draft gets the reviewer's contributing_agents
+# as processing does: without it a draft that left them out and needed a repair
+# for anything else was refused the repair and went straight to salvage.
+baseline_input="$test_root/baseline-missing-contributors.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.contributing_agents)'
+    sed -n '2,3p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+} >"$baseline_input"
+baseline_status=0
+build_primary_repair_baseline "$baseline_input" "$test_root/baseline-missing-contributors.json" codex || baseline_status=$?
+assert_eq 0 "$baseline_status" 'a primary draft without contributing_agents still gets a repair baseline'
 # A cross-review or final finding owes exactly the agents its source_refs name;
 # the final synthesis on Tools 29269 (2026-10-12) added one more and was run
 # again. Any other value is set to them, a value already right in another order
@@ -1228,6 +1239,19 @@ cp -- "$pipeline_resolution_fixture" "$processed_final"
 process_final_ndjson_output "$processed_final"
 assert_true 'unchanged resolutions satisfy repair stability' \
     validate_final_repair_stability "$resolution_baseline" "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"
+# A resolution may copy a ref's classification and severity into it; the
+# canonical sidecar keeps agent and source_id alone, and a faithful repair of
+# such a draft is still stable.
+copied_refs_fixture="$test_root/resolution-copied-refs.ndjson"
+jq -c 'if .record == "resolution"
+    then .primary_ref += {classification: "CONFIRMED", severity: "P2"}
+        | .conflicting_refs |= map(. + {classification: "REJECTED", severity: null})
+    else . end' "$pipeline_resolution_fixture" >"$copied_refs_fixture"
+assert_true 'a resolution whose refs carry copied verdicts produces a repair baseline' \
+    build_final_repair_baseline "$copied_refs_fixture" "$test_root/resolution-copied-refs-baseline.json"
+assert_true 'and a faithful repair of it is stable' \
+    validate_final_repair_stability "$test_root/resolution-copied-refs-baseline.json" \
+    "$FINAL_PROCESSED_FINDINGS_FILE" "$FINAL_PROCESSED_RESOLUTIONS_FILE"
 changed_resolutions="$test_root/changed-resolutions.json"
 jq '.resolutions[0].resolution_status = "uncertain"' "$FINAL_PROCESSED_RESOLUTIONS_FILE" >"$changed_resolutions"
 assert_false 'repair stability rejects a changed resolution decision' \
@@ -1979,6 +2003,11 @@ assert_false 'a finding that also lost its title is not amended: a title is not 
     build_ndjson_amendment_request primary codex "$test_root/amend-title.ndjson" "$test_root/amend-title-records.ndjson" "$test_root/amend-title-request.json"
 assert_false 'nor is a stream that parses and validates' \
     build_ndjson_amendment_request primary codex "$amend_valid" "$test_root/amend-clean-records.ndjson" "$test_root/amend-clean-request.json"
+{ sed -n '1p' "$amend_valid" | jq -c 'del(.recommendation)'; sed -n '2p' "$amend_valid"
+  sed -n '3p' "$amend_valid" | jq -c '. + {summary_language: "EN"}'; } >"$test_root/amend-extra-key.ndjson"
+assert_true 'a complete record with a key the contract does not define does not keep a finding from its amendment' \
+    build_ndjson_amendment_request primary codex "$test_root/amend-extra-key.ndjson" \
+    "$test_root/amend-extra-key-records.ndjson" "$test_root/amend-extra-key-request.json"
 printf '%s\n' 'Here are the amendments:' \
     '{"record":"amendment","source_id":"F-001","recommendation":"Retry the payload once more.","claim":"Rewritten."}' \
     '{"record":"amendment","source_id":"F-002","recommendation":"Not asked for."}' >"$test_root/amend-reply.ndjson"

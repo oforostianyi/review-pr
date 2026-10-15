@@ -694,7 +694,7 @@ prune_review_outputs() {
                     # primary review named before reviewers were, and after
                     # "error" what review-pr writes there. A reviewer key may say
                     # error too: its own reports and findings do not go on so.
-                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(\.log|-attempt-|-schema-repair|-continuation|-amendment|-events\.jsonl|-partial|-truncated|-invalid|-anchor-) ]] \
+                    [[ "$PRUNE_SUFFIX" =~ ^((primary|cross)-[A-Za-z0-9_.-]+-|final-|comparison-)?error(\.log|-attempt-|-schema-repair|-continuation|-amendment|-fallback-|-salvage|-events\.jsonl|-partial|-truncated|-invalid|-anchor-) ]] \
                         || continue
                     ;;
             esac
@@ -5135,7 +5135,7 @@ fill_presentation_defaults() {
 # -- a reviewer wrote summary_language -- holds nothing the contract reads, and
 # failing the stream over it cost a repair pass. It is dropped, aloud.
 drop_unknown_complete_keys() {
-    local phase=$1 agent=$2 records_file=$3 extra filtered_file
+    local phase=$1 agent=$2 records_file=$3 quiet=${4:-false} extra filtered_file
 
     extra=$(jq -r --arg keys "$COMPLETE_RECORD_KEYS" '($keys | split(", ")) as $known
         | [.[] | select(.record == "complete") | keys[] | select(IN($known[]) | not)] | unique | join(", ")' \
@@ -5146,7 +5146,7 @@ drop_unknown_complete_keys() {
         | map(if .record == "complete" then with_entries(select(.key | IN($known[]))) else . end)' \
         "$records_file" >"$filtered_file" || return 0
     mv -- "$filtered_file" "$records_file"
-    log "Dropped ${extra}, which the contract does not define, from the complete record in the ${phase} stream${agent:+ from ${agent}}"
+    [[ "$quiet" == true ]] || log "Dropped ${extra}, which the contract does not define, from the complete record in the ${phase} stream${agent:+ from ${agent}}"
 }
 
 log_leading_prose() {
@@ -7418,11 +7418,15 @@ unparsed_records_repair_note() {
 # key made a faithful repair or continuation fail its check, or the baseline
 # refuse the draft. The file holds one record per line and is rewritten in place.
 normalize_records_as_processed() {
-    local phase=$1 parsed_file=$2 expected_refs_file=${3:-} array_file corrected_file
+    local phase=$1 parsed_file=$2 expected_refs_file=${3:-} agent=${4:-} array_file corrected_file
 
     new_temp_file "${phase}-baseline-array"; array_file=$NEW_TEMP_FILE
     jq -s '.' "$parsed_file" >"$array_file" 2>/dev/null || return 1
-    fill_presentation_defaults "$phase" "" "$array_file" true
+    # The reviewer, when known, gives a primary finding the contributing_agents
+    # its processing would: without it a draft that left them out was refused
+    # the repair and the amendment and went straight to salvage.
+    fill_presentation_defaults "$phase" "$agent" "$array_file" true
+    drop_unknown_complete_keys "$phase" "$agent" "$array_file" true
     if [[ -n "$expected_refs_file" && -s "$expected_refs_file" ]]; then
         new_temp_file "${phase}-baseline-source-ref-agents"; corrected_file=$NEW_TEMP_FILE
         if normalize_ndjson_source_ref_agents "$array_file" "$expected_refs_file" "$corrected_file" 2>/dev/null \
@@ -7483,8 +7487,14 @@ build_final_repair_baseline() {
             has("summary") and (.summary | type == "string") and
             has("verification_limitations") and (.verification_limitations | type == "array") and
             has("positive_evidence") and (.positive_evidence | type == "array");
+        # The refs as the canonical sidecar keeps them: a resolution may copy a
+        # classification and severity of the ref into it, and the sidecar drops them.
         def resolution_content:
-            {dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status,
+            {dispute_id,
+             primary_ref: (.primary_ref | if type == "object" then {agent, source_id} else . end),
+             conflicting_refs: (.conflicting_refs
+                | if type == "array" then map(if type == "object" then {agent, source_id} else . end) else . end),
+             final_source_id, dispute_kind, resolution_status,
              verification_method, command, observed, basis, basis_source, limitations};
         ([.[] | select(.record == "finding")]) as $findings |
         ([.[] | select(.record == "complete")]) as $completions |
@@ -7521,8 +7531,14 @@ validate_final_repair_stability() {
     ' "$canonical_file" >/dev/null || return 1
     [[ -n "$resolutions_file" ]] || return 0
     jq -e --slurpfile baseline "$baseline_file" "$REPAIR_RESTORATION_JQ_DEFS"'
+        # The refs as the canonical sidecar keeps them: a resolution may copy a
+        # classification and severity of the ref into it, and the sidecar drops them.
         def resolution_content:
-            {dispute_id, primary_ref, conflicting_refs, final_source_id, dispute_kind, resolution_status,
+            {dispute_id,
+             primary_ref: (.primary_ref | if type == "object" then {agent, source_id} else . end),
+             conflicting_refs: (.conflicting_refs
+                | if type == "array" then map(if type == "object" then {agent, source_id} else . end) else . end),
+             final_source_id, dispute_kind, resolution_status,
              verification_method, command, observed, basis, basis_source, limitations};
         $baseline[0] as $b |
         restores_unparsed($b.resolutions // []; [.resolutions[] | resolution_content];
@@ -7977,6 +7993,7 @@ attempt_cross_ndjson_repair() {
 build_primary_repair_baseline() {
     local input_file=$1
     local baseline_file=$2
+    local agent=${3:-}
     local parsed_file
     local line
     local trimmed
@@ -8019,7 +8036,7 @@ build_primary_repair_baseline() {
         fi
     done <"$input_file"
     (( object_count > 0 )) || return 1
-    normalize_records_as_processed primary "$parsed_file" || return 1
+    normalize_records_as_processed primary "$parsed_file" "" "$agent" || return 1
 
     jq -e -s --slurpfile unparsed "$unparsed_file" '
         def finding_content:
@@ -8161,7 +8178,7 @@ attempt_primary_ndjson_repair() {
     local usage_diagnostic="${diagnostic_base}-usage.json"
 
     new_temp_file "primary-${agent}-repair-baseline"; baseline_file=$NEW_TEMP_FILE
-    if ! build_primary_repair_baseline "$output_file" "$baseline_file"; then
+    if ! build_primary_repair_baseline "$output_file" "$baseline_file" "$agent"; then
         FINDING_CONTRACT_FAILURE_REASON="${original_failure_reason}; repair_ineligible_unparseable_or_incomplete_findings"
         return 1
     fi
@@ -8294,7 +8311,7 @@ build_ndjson_amendment_request() {
         append_json_line "$line" "$records_file" || append_repaired_json_line "$line" "$records_file" || return 1
     done <"$normalized_file"
     [[ -s "$records_file" ]] || return 1
-    normalize_records_as_processed "$phase" "$records_file" "$expected_refs_file" || return 1
+    normalize_records_as_processed "$phase" "$records_file" "$expected_refs_file" "$agent" || return 1
     jq -s '.' "$records_file" >"$array_file" || return 1
     detail=$(describe_ndjson_validation_failure "$phase" "$array_file" "$agent" "$expected_refs_file" 2>/dev/null) || return 1
     [[ -n "$detail" && "$detail" != diagnostics_unavailable ]] || return 1
@@ -14403,7 +14420,8 @@ fi
 
 load_config
 if [[ -n "$REVIEWERS_OVERRIDE" ]]; then
-    [[ "$RERUN_FINAL" == false && -z "$RUN_SELECTOR" && "$CONTRACT_TEST_MODE" == false && "$QUOTA_MODE" == false && "$FINDINGS_MODE" == false ]] \
+    [[ "$RERUN_FINAL" == false && -z "$RUN_SELECTOR" && "$CONTRACT_TEST_MODE" == false && "$QUOTA_MODE" == false && "$FINDINGS_MODE" == false \
+        && "$PRUNE_MODE" == false ]] \
         || die '--reviewers applies to a new review or --show-config; a rerun or resume keeps the reviewers of the run it continues'
     apply_reviewer_selection "$REVIEWERS_OVERRIDE"
 fi
@@ -14424,7 +14442,8 @@ fi
 [[ "$QUOTA_JSON" == false ]] || die '--json is only valid for the quota subcommand'
 if [[ "$PRUNE_MODE" == true ]]; then
     (( $# == 0 )) || die 'prune does not accept a pull-request target'
-    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] \
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" \
+        && "$SAME_HEAD_ALLOWED" == false ]] \
         || die 'prune cannot be combined with PR workflow options'
     [[ -n "$REVIEWS_ROOT" ]] || REVIEWS_ROOT="${HOME}/review-pr"
     [[ "$REVIEWS_ROOT" == /* ]] || die "Reviews directory must be an absolute path: ${REVIEWS_ROOT}"
