@@ -1,8 +1,10 @@
 # Portable atomic-finding contract
 
-Status: accepted on 2026-09-10; implementation is proceeding as an opt-in staged rollout.
-The primary, cross-review, and final parsers, canonical sidecars, deterministic renderers, and
-bounded field-stable schema-repair passes are implemented behind independent opt-in settings.
+Status: accepted on 2026-09-10 and implemented. The primary, cross-review, and final parsers,
+canonical sidecars, deterministic renderers, and every recovery pass described below are in place,
+each stage behind its own `reporting.finding_contract` setting. A configuration that names no
+contract keeps `markdown`; the distributed example configuration has run `ndjson-v1` in all three
+stages since 1.20.0, so a fresh installation uses it.
 
 ## Problem
 
@@ -26,8 +28,11 @@ diagnostically, and keep old Markdown-only runs usable for final reruns.
 ## Recommended v1 protocol
 
 In orchestrated mode, an agent returns only newline-delimited JSON records. It does not need native
-JSON-schema support: every CLI can return plain text. Each physical line is one complete JSON
-object. The final record is mandatory and proves that generation completed.
+JSON-schema support: every CLI can return plain text. The model is asked to write each record as
+one complete JSON object on its own physical line. The reader is more lenient: a line that holds two
+complete JSON objects is read as two records, and a JSON value that is not an object -- a number, a
+string or an array -- is ignored when the line also holds an object. A line holding only such a
+value, or text that is not JSON, fails the line. The final record is mandatory and proves that generation completed.
 
 Example:
 
@@ -44,27 +49,59 @@ Required finding fields:
   finished the phase, in reviewer order -- `r01`, `r02`, … for primary findings, `x01`, … for
   cross-review records -- so each handle names exactly one record and the agent-key correction
   below keeps working. The handle is shown as the record's `source_id` and in its `record_ref`,
-  never with the author's id beside it. Handles are derived, not stored: a resumed run leaves its
-  preserved sidecars byte for byte as they were, and the same reviewers and records give the same
-  handles every time. The final numbers its own records `s01`, … as a stored `ref_id`, which the
-  fix-list shows a fixing agent. A run records `reporting.source_handles` when it is created; one
-  recorded before handles existed keeps its reviewers' own ids throughout, so resuming it cannot
-  mix the two styles across cross-reviews of one finding. A
+  never with the author's id beside it. A record's own `source_id` is never rewritten: a resumed
+  run leaves its preserved sidecars byte for byte as they were, and the same reviewers and records
+  give the same handles every time. What a later phase writes does carry the handles, because that
+  is what it was shown: a cross-review sidecar names primary records as `r..` in its `source_refs`,
+  a final sidecar names cross-review records as `x..` in its `source_refs` and `input_refs` and
+  primary records as `r..` in its derived `primary_refs`, and a `dispute_id` is built from the
+  primary handle (`dispute:codex:r04`). The final numbers its own records `s01`, … as a stored
+  `ref_id`, which the fix-list shows a fixing agent. A run records `reporting.source_handles` when
+  it is created; one recorded before handles existed keeps its reviewers' own ids throughout, so
+  resuming it cannot mix the two styles across cross-reviews of one finding. A
   reviewer handed a 66-character descriptive id rewrote it into a shorter one and so answered
   findings under names nobody had sent it; a record with two ids invites copying either. The
   letters stay clear of the `P0`–`P3` severity scale;
-- `title` and one atomic `claim`;
+- `title` and one atomic `claim`, both non-empty strings;
 - `anchor.kind`: `changed-line` or `pr-level`;
-- `anchor.file`, `anchor.start`, and `anchor.end`, nullable only for `pr-level`;
-- `evidence` and `failure_scenario`; a classified `REJECTED` or `UNCERTAIN` record may set
-  `failure_scenario` to `null` or `""` because no failure scenario applies to a refuted or unproven claim;
-- `recommendation`;
-- `classification`: `CONFIRMED`, `REJECTED`, `UNCERTAIN`, or `null` when the phase does not classify;
-- `severity`: `P0`, `P1`, `P2`, `P3`, or `null` when it does not apply;
-- `category` or pattern;
-- `contributing_agents` and source provenance;
-- `verification_limitations`;
-- `existing_feedback.state`: `new`, `confirmed-existing`, `historical`, or `unknown`, with thread IDs when known.
+- `anchor.file`, `anchor.start`, and `anchor.end`: for `pr-level` all three are `null`; for
+  `changed-line` the file is an inline-anchorable path of the changed-line map and `start <= end`.
+  The anchor's end must be a changed RIGHT-side line, or the range must overlap changed lines and
+  end inside the same diff hunk (`right_side_hunks` in the map), because git often prints the
+  closing brace of a new block as an unchanged context line;
+- `evidence`, a non-empty array of non-empty strings;
+- `failure_scenario` and `recommendation`, non-empty strings for an unclassified primary finding
+  and for a `CONFIRMED` record; a `REJECTED` or `UNCERTAIN` cross-review or final record may set
+  either to `null` or `""` because no failure scenario or fix applies to a refuted or unproven claim;
+- `classification`: `null` in a primary finding; `CONFIRMED`, `REJECTED`, or `UNCERTAIN` in a
+  cross-review or final record;
+- `severity`: in a primary finding `P0`, `P1`, `P2`, `P3`, or `null`; in a cross-review or final
+  record `P0`–`P3` when `CONFIRMED` and `null` when `REJECTED` or `UNCERTAIN`;
+- `category`, a non-empty string;
+- `contributing_agents`: exactly `[<reviewer>]` in a primary finding; in a cross-review or final
+  record, exactly the agents its `source_refs` name, each once;
+- `verification_limitations`, an array of strings;
+- `existing_feedback`: `{"state", "thread_ids"}`, where `state` is `new`, `confirmed-existing`,
+  `historical`, or `unknown`; `new` has no thread ids, `confirmed-existing` and `historical` name at
+  least one, and `unknown` may name any.
+
+Each record kind has an exact key set, and a record with a key missing or a key of its own fails:
+
+- primary finding: `record`, `schema_version`, `source_id`, `title`, `claim`, `anchor`, `evidence`,
+  `failure_scenario`, `recommendation`, `classification`, `severity`, `category`,
+  `contributing_agents`, `verification_limitations`, `existing_feedback`;
+- cross-review finding: the primary keys plus `source_refs`;
+- final finding: the cross-review keys plus `include_in_rejected_summary`;
+- resolution (final only, with `reporting.dispute_resolution`): `record`, `schema_version`,
+  `dispute_id`, `primary_ref`, `conflicting_refs`, `final_source_id`, `dispute_kind`,
+  `resolution_status`, `verification_method`, `command`, `observed`, `basis`, `basis_source`,
+  `limitations`;
+- complete: `record`, `schema_version`, `finding_count`, `summary`, `verification_limitations`,
+  `positive_evidence`.
+
+`record` names the kind and `schema_version` is `1`. Some missing keys are filled in before
+validation, and a key a `complete` record carries beyond its set is dropped, as the validation and
+repair policy below describes; the key sets are what a record must hold after that.
 
 Anchor policy: a finding is anchored to the changed line that causes it. An existing consumer,
 caller, or flow that the change breaks or exposes is anchored to the changed line that creates the
@@ -76,7 +113,7 @@ that consumer tracing, flow replay, and plausible-but-unverified findings surviv
 contract instead of being dropped for lack of a place to report them. Configured Markdown-oriented
 `prompts.cross_review` and `prompts.final` instructions are not forwarded under `ndjson-v1`.
 
-Cross-review and final prompts end with a `REQUIRED SOURCE REFS` block: the orchestrator lists every
+Cross-review and final prompts carry a `REQUIRED SOURCE REFS` block: the orchestrator lists every
 `{agent, source_id}` pair the response must cover, copied from the canonical inputs, and the final
 prompt presents the upstream primary refs of each cross-review record under `primary_provenance` so
 they cannot be mistaken for the refs to cover.
@@ -104,18 +141,22 @@ for it.
 Final records use the same `source_refs` shape for canonical cross-review records and add
 `include_in_rejected_summary`. That boolean is valid only as `true` on a `REJECTED` record and
 controls presentation, not classification. Canonical final sidecars additionally contain derived
-`primary_refs`; this field is produced by the orchestrator and is never accepted from model output.
+`primary_refs` and the `ref_id` (`s01`, …) of each record; both are produced by the orchestrator,
+and a model record that carries either key fails the key-set check.
 
 ## Accepted structured final-synthesis design
 
-The final phase will use the same NDJSON transport and finding vocabulary, but its `source_refs`
+The final phase uses the same NDJSON transport and finding vocabulary, but its `source_refs`
 point to cross-review records rather than directly to primary records. The phase is therefore
 unambiguous without globally unique model-generated IDs: `{agent, source_id}` is interpreted against
 the canonical sidecars supplied for that phase.
 
-The final runtime must enforce these rules:
+The final runtime enforces these rules:
 
-- `final: "ndjson-v1"` is opt-in and requires structured primary and cross-review inputs;
+- `final: "ndjson-v1"` requires structured primary and cross-review inputs and
+  `reporting.comparison_sections.final` set to `none` or `standalone`; structured cross-review in
+  turn requires `reporting.comparison_sections.cross_review` set to `none`. Configuration
+  validation refuses anything else;
 - the finalizer receives canonical cross-review JSON, never localized cross-review Markdown as its
   machine input, and never receives report text as executable instructions;
 - every cross-review `{agent, source_id}` must be referenced by at least one final record, while an
@@ -127,30 +168,35 @@ The final runtime must enforce these rules:
   model does not restate or invent primary provenance;
 - source code and concrete evidence remain authoritative: coverage proves that a claim was
   considered, not that majority voting decided it;
-- one additional final-only boolean will state whether an important rejected decision belongs in
-  the human `Rejected findings` section. It does not affect classification;
-- the terminal `complete` record remains mandatory and no records may follow it.
+- one additional final-only boolean, `include_in_rejected_summary`, states whether an important
+  rejected decision belongs in the human `Rejected findings` section. It does not affect
+  classification;
+- the terminal `complete` record remains mandatory and no finding record may follow it (resolution
+  records are read apart, as the dispute-resolution section says).
 
-The deterministic final renderer will own the PR heading and two-column metadata table, the full
+The deterministic final renderer owns the PR heading and two-column metadata table, the full
 classification table, detailed actionable sections for confirmed findings, and the optional
-important-rejections section. It will generate the existing language-independent anchor markers so
-the current exact RIGHT-side anchor validator remains authoritative. Reader-facing strings are
-localized; enums, IDs, provenance, and validation controls are not.
+important-rejections section. It generates the existing language-independent anchor markers so
+the exact RIGHT-side anchor validator remains authoritative. Under `ndjson-v1` that validator is a
+last check on the renderer's own output: an anchor it rejects fails the attempt, and no anchor
+repair pass runs, because the records were already validated against the changed-line map.
+Reader-facing strings are localized; enums, IDs, provenance, and validation controls are not.
 
 Final schema repair is bounded separately from semantic synthesis. It may repair transport or
-record metadata only after all decision records are safely parseable, and keeps classification,
-severity, cross-review refs, derived primary provenance, anchors, and substantive fields stable.
+record metadata, and may restore a record that was written whole but did not parse, as the
+validation and repair policy below describes. It keeps classification, severity, cross-review refs,
+derived primary provenance, anchors, `include_in_rejected_summary`, and substantive fields stable.
 Failure preserves the original and repair responses; a final report is published only from records
 that pass the contract, whether whole or salvaged.
 
 ## Accepted dispute-resolution design (opt-in `resolution` records)
 
 Cross-reviewers regularly disagree about the same primary finding: one classifies it `CONFIRMED`,
-another `REJECTED` or `UNCERTAIN`, or both confirm it with different severities. Today the
-finalizer resolves such disputes in prose inside `evidence`; nothing records what kind of dispute it
-was, how it was settled, or which measurement settled it. The accepted design makes that decision
-machine-readable without breaking `ndjson-v1`: no new required field is added to existing records,
-and a run without the feature validates exactly as before.
+another `REJECTED` or `UNCERTAIN`, or both confirm it with different severities. Without this
+feature the finalizer resolves such disputes in prose inside `evidence`; nothing records what kind
+of dispute it was, how it was settled, or which measurement settled it. The feature makes that
+decision machine-readable without breaking `ndjson-v1`: no new required field is added to existing
+records, and a run without the feature validates exactly as before.
 
 ### Configuration and scope
 
@@ -159,19 +205,25 @@ and a run without the feature validates exactly as before.
 - The orchestrator, not the model, detects disputes deterministically from the canonical
   cross-review sidecars. A **dispute** exists for a primary `{agent, source_id}` when the
   cross-review records that reference it disagree in classification, or agree on `CONFIRMED` with
-  different severities. Each dispute gets a stable `dispute_id` derived from the primary ref, for
-  example `dispute:codex:codex.p1.hidden-address-notes`.
+  different severities. Each dispute gets a stable `dispute_id` derived from the primary ref as the
+  cross-reviews named it: `dispute:codex:r04` in a run with source handles, or
+  `dispute:codex:codex.p1.hidden-address-notes` in one recorded before them.
 - The final prompt lists every dispute in a `REQUIRED RESOLUTIONS` block: `dispute_id`, the primary
-  ref, and each contributing cross-review `{agent, source_id, classification, severity}`. The
+  ref, a `kind_hint` (`factual` when the classifications differ, `severity` when only the severities
+  of a confirmation do), and each contributing cross-review `{agent, source_id, classification,
+  severity}`. The `kind_hint` is a hint; the finalizer decides `dispute_kind` itself. The
   finalizer must emit exactly one `resolution` record per listed dispute and no other resolution
   records. Historical manifests without the block stay valid.
 
 ### The `resolution` record
 
-One additional record type in the same final NDJSON stream, before the terminal `complete`:
+One additional record type in the same final NDJSON stream. The model is asked to write resolutions
+before the terminal `complete`; the validator reads them apart from the findings and does not check
+where they stand, so one written after `complete` is accepted. The example is from a run with source
+handles:
 
 ```jsonl
-{"record":"resolution","schema_version":1,"dispute_id":"dispute:codex:codex.p1.hidden-address-notes","primary_ref":{"agent":"codex","source_id":"codex.p1.hidden-address-notes"},"conflicting_refs":[{"agent":"claude","source_id":"claude.x1.hidden-address-divergence-note"},{"agent":"pi","source_id":"xrev-hidden-address-notes-leak"}],"final_source_id":"syn-1-hidden-address-notes-leak","dispute_kind":"factual","resolution_status":"resolved","verification_method":"command","command":["rg","-n","address","src/Modules/Sysadmin/CB/Application/Service/Export/Transformers/FoursquareIngestion/LocationTransformer.php"],"observed":"Lines 143-151 append street and postcode to the notes cell for hidden-address rows.","basis":"general_engineering","basis_source":null,"limitations":[]}
+{"record":"resolution","schema_version":1,"dispute_id":"dispute:codex:r04","primary_ref":{"agent":"codex","source_id":"r04"},"conflicting_refs":[{"agent":"claude","source_id":"x02"},{"agent":"pi","source_id":"x07"}],"final_source_id":"syn-1-hidden-address-notes-leak","dispute_kind":"factual","resolution_status":"resolved","verification_method":"command","command":["rg","-n","address","src/Modules/Sysadmin/CB/Application/Service/Export/Transformers/FoursquareIngestion/LocationTransformer.php"],"observed":"Lines 143-151 append street and postcode to the notes cell for hidden-address rows.","basis":"general_engineering","basis_source":null,"limitations":[]}
 ```
 
 Fields and their rules:
@@ -191,15 +243,17 @@ Fields and their rules:
 - `verification_method`: `source`, `command`, `test`, `repository_rule`, `runtime`, or `manual`.
   A `factual` or `mixed` dispute may be `resolved` only with a method other than `manual`, and the
   covering final record may be `CONFIRMED` only when the dispute is `resolved`. When the fact could
-  not be measured the status is `uncertain` and the covering final record must be `UNCERTAIN`:
-  agent count never settles a factual dispute.
+  not be measured the status is `uncertain`, and the covering final record must not be `CONFIRMED`;
+  the prompt asks for `UNCERTAIN`, but the validator also accepts `REJECTED`. Agent count never
+  settles a factual dispute.
 - `command`: `null`, or the measurement as an argv array of non-empty strings (no shell string, no
-  evaluation). In this iteration the orchestrator records but does not execute it; a later
-  iteration may execute an allow-listed subset in the detached checkout and replace `observed` with
-  the captured result. `command` is required when `verification_method` is `command` or `test`.
+  evaluation). The orchestrator records it; with `reporting.execute_measurements` it also runs an
+  allow-listed subset and attaches the result beside `observed`, as described below. `command` is
+  required when `verification_method` is `command` or `test`.
 - `observed`: what the measurement or source read showed, in the final language, bounded in length.
-  Required non-empty when `resolution_status` is `resolved`; `null` or empty otherwise, when nothing
-  was observed.
+  Required non-empty when `resolution_status` is `resolved`. Otherwise it may be `null` or any
+  string: the prompt asks for `null` or empty when nothing was observed, but the validator accepts
+  text as well.
 - `basis`: `explicit_repository_rule`, `skill_rule`, `inferred_convention`, or `general_engineering`.
   `basis_source` is required for `explicit_repository_rule` (a repository path, optionally
   `path:line`) and for `skill_rule` (the configured skill name, never an absolute private path);
@@ -213,37 +267,44 @@ Fields and their rules:
   unknown `dispute_id`, exact `conflicting_refs`, `final_source_id` linkage, the method/status/
   classification rules above, and the severity rule for inferred conventions. Failures use the
   existing granular reason format, for example
-  `dispute_resolution_validation_failed: resolution[dispute:codex:codex.p1.hidden-address-notes].verification_method`.
+  `dispute_resolution_validation_failed: resolution[dispute:codex:r04].verification_method`.
 - Schema repair may fix transport and record metadata of resolution records but freezes
-  `dispute_kind`, `resolution_status`, `verification_method`, `command`, `observed`, `basis`,
-  `basis_source`, and the refs, exactly as it freezes finding decisions.
+  `dispute_id`, `primary_ref`, `conflicting_refs`, `final_source_id`, `dispute_kind`,
+  `resolution_status`, `verification_method`, `command`, `observed`, `basis`, `basis_source`, and
+  `limitations`, exactly as it freezes finding decisions.
 - The orchestrator publishes `*-final-resolutions.json` (the validated resolution array plus the
   detected dispute list) beside `*-final-findings.json`, records it in the manifest, and the
   deterministic final renderer adds a compact localized `Dispute resolutions` table (dispute kind,
   status, method, observed excerpt, basis) with a language-independent marker. Merged duplicates
   reference the same resolution once.
 - The standalone comparison, the cross-review phase, and historical Markdown or `ndjson-v1` runs
-  without the flag are unchanged.
+  without the flag are unchanged. Without the flag a final stream that holds resolution records
+  fails with `unexpected_resolution_records`.
 
 ### Orchestrator-executed measurements (iteration 2)
 
 `reporting.execute_measurements: true` (requires `dispute_resolution`) lets the orchestrator run the
 `command` of a `command` or `test` resolution after the final stream validated, inside the review
-checkout at the exact PR head, and attach the result as a separate `measurement` object:
-`executed`, `skipped_reason`, `exit_status`, bounded and credential-redacted `stdout_excerpt` and
-`stderr_excerpt`, `duration_ms`, and `commit`. The model's `observed` text is never rewritten and the
-resolution decision is never changed automatically; a disagreement between the two is for the reader.
+checkout at the exact PR head, and attach the result as a separate `measurement` object: `executed`,
+`skipped_reason`, `exit_status`, bounded and credential-redacted `stdout_excerpt` and
+`stderr_excerpt`, `stdout_truncated` and `stderr_truncated`, `duration_ms`, and `commit`. A
+resolution whose method is neither `command` nor `test` gets `measurement: null`. The model's
+`observed` text is never rewritten and the resolution decision is never changed automatically; a
+disagreement between the two is for the reader.
 
 Policy, fixed in this iteration: argv only, no shell; allow-listed read-only tools (`rg`, `grep`,
 `ls`, `cat`, `head`, `wc`, `test`, `git` restricted to `show`, `log`, `diff`, `ls-tree`, `cat-file`,
-`grep`, `rev-parse`, `blame`); no absolute or parent-directory paths; no `rg --pre` or
-`--hostname-bin`, which run a program of the caller's choosing; no `git grep -O` /
+`grep`, `rev-parse`, `blame`); no absolute, home-relative (`~`) or parent-directory paths, checked
+on a whole argument and on the value after the `=` of an option; no `--output` in any form, because
+a measurement never writes a file; no `rg --pre` or `--hostname-bin`, which run a program of the
+caller's choosing; no `git` option starting with `-O`, which covers `git grep -O`, and no
 `--open-files-in-pager`, which does the same; no `git -c`, `-C`, `--exec-path`, `--git-dir`,
-`--work-tree`, `--config-env`, `--namespace`; a ten-second timeout
-per command; excerpts capped at 2000 characters after redaction. Everything else is recorded as
-`skipped: not_allowlisted` and never executed. Artifact-only final reruns record
-`skipped: checkout_unavailable`. Schema repair does not compare measurements: they are attached after
-validation and are orchestrator output, not model content.
+`--work-tree`, `--config-env`, `--namespace`; a ten-second timeout per command; excerpts capped at
+2000 bytes, taken before redaction, which is also what the `*_truncated` flags measure. A command the policy refuses is never executed and is recorded with
+the reason: `not_allowlisted` for a program outside the list, `git_subcommand_not_allowlisted` for
+another `git` subcommand, `unsafe_argument` for a refused path or option, and `empty_command` for an
+empty argv. Artifact-only final reruns record `checkout_unavailable`. Schema repair does not compare
+measurements: they are attached after validation and are orchestrator output, not model content.
 
 ### Rollout for this feature
 
@@ -257,21 +318,23 @@ validation and are orchestrator output, not model content.
 4. Orchestrator-executed allow-listed measurements behind `reporting.execute_measurements`
    (done as iteration 2).
 
+All four steps are implemented; the feature stays opt-in.
+
 ## Accepted diagnostics and positive-evidence design (Milestone 6)
 
 Every phase already reports `verification_limitations` (per finding and per completion record) and
-`positive_evidence` (per completion record) as free text. Free text means one plain string per entry:
-an entry that names a file and a symbol carries both inside that string, never as an object. The three
-phase contracts state this explicitly, because a reviewer told only to name "the file and the symbol"
-will otherwise encode them as fields, which the validator rejects and the bounded repair may not
-rewrite. As free text, and the orchestrator itself knows a set of
-states that limit verification: GitHub review-thread state, check-run conclusions, changed-line map
-availability, repository-facts measurement failures, failed agent attempts, Pi guard outcomes, and
-skipped measurements. Today none of this reaches the final report: the deterministic final renderer
-drops both arrays, and orchestrator states live only in logs. The design below makes limitations
-and positive evidence a normalized, deduplicated part of the final artifacts without changing any
-`ndjson-v1` record: model records stay as they are; the orchestrator adds a typed sidecar and renders
-both sources deterministically.
+`positive_evidence` (per completion record) as free text. Free text means one plain string per
+entry: an entry that names a file and a symbol carries both inside that string, never as an object.
+The three phase contracts state this explicitly, because a reviewer told only to name "the file and
+the symbol" will otherwise encode them as fields, which the validator rejects and the bounded repair
+may not rewrite. Beyond that free text, the orchestrator itself knows a set of states that limit
+verification: GitHub review-thread state, check-run conclusions, changed-line map availability,
+repository-facts measurement failures, failed agent attempts, Pi guard outcomes, and skipped
+measurements. Before this design none of it reached the final report: the deterministic final
+renderer dropped both arrays, and orchestrator states lived only in logs. The design makes
+limitations and positive evidence a normalized, deduplicated part of the final artifacts without
+changing any `ndjson-v1` record: model records stay as they are; the orchestrator adds a typed
+sidecar and renders both sources deterministically.
 
 ### Two sources, one artifact
 
@@ -285,42 +348,45 @@ both sources deterministically.
    `github_check_cancelled`, `github_check_pending`, `github_check_skipped`,
    `changed_line_map_unavailable`, `repository_facts_measurement_failed`, `agent_attempt_timeout`,
    `agent_attempt_output_limit`, `agent_attempt_invalid_output`, `agent_attempt_failed`,
-   `pi_guard_budget_exhausted`, `pi_guard_duplicates_blocked`, `measurement_skipped`,
-   `checkout_unavailable`; `scope` is `run`, `phase`, `agent`, or `finding`; `detail` is a short
-   English string with the exact value (check name and conclusion, attempt number, reason);
-   `refs` lists affected `{agent, source_id}` or dispute ids when known. Types are the dedup key.
+   `pi_guard_budget_exhausted`, `pi_guard_duplicates_blocked`, `context_compacted`,
+   `measurement_skipped`, `checkout_unavailable`, `reviewer_dropped`, `salvage_dropped_records`,
+   `final_synthesis_fallback`, `final_synthesis_fallback_failed`; `scope` is `run`, `phase`,
+   `agent`, or `finding`; `detail` is a short English string with the exact value (check name and
+   conclusion, attempt number, reason); `refs` lists what the record concerns when known: dispute
+   ids for a skipped measurement, the dropped `source_id`s for a salvage. Records are deduplicated
+   on `type` and `detail` together.
 2. `reviewers`: model-reported limitations aggregated from every canonical sidecar of the run
    (primary, cross-review, final; per-finding and completion-level). Each entry is
    `{"text", "phases", "agents", "finding_refs"}`; entries are merged when their normalized text
-   (lower-cased, whitespace-collapsed, trailing punctuation removed) is equal, keeping every
-   contributing phase and agent. All phases of a run share the configured language, so text-level
-   merging is deterministic within a run; it is not claimed across languages.
+   (lower-cased, backticks removed, whitespace-collapsed, trailing punctuation removed) is equal,
+   keeping every contributing phase and agent. All phases of a run share the configured language, so
+   text-level merging is deterministic within a run; it is not claimed across languages.
 3. `positive_evidence`: completion-level positive evidence aggregated the same way, with an
    explicit `kind`: `verified_safe` when the text names a file or symbol that was checked, or
    `no_issue_found` otherwise (a heuristic label, marked as such). Positive evidence never changes
-   a finding's classification or severity; it is presentation only, and the renderer caps the list
-   at twelve items, keeping the ones with the most contributing agents first.
+   a finding's classification or severity; it is presentation only. The sidecar itself keeps at
+   most twelve items, the ones with the most contributing agents first, and the renderer shows them.
 
 ### Prompts
 
-- Primary, cross-review, and final contracts gain one rule: a failed, pending, or skipped CI check,
+- Primary, cross-review, and final contracts carry one rule: a failed, pending, or skipped CI check,
   a denied or failing tool, or an unavailable file is a verification limitation, never a finding by
   itself; a finding needs source or runtime evidence of engineering impact.
-- The final prompt gains a `KNOWN LIMITATIONS` block listing the orchestrator records collected so
+- The final prompt carries a `KNOWN LIMITATIONS` block listing the orchestrator records collected so
   far (one compact JSON line each), so the finalizer references them instead of rediscovering or
   contradicting them, and lists what remains unverified in its own `verification_limitations`.
 
 ### Validation
 
-- A final finding whose evidence consists only of a CI check outcome or a tool failure is rejected
-  with `diagnostic_only_finding` (deterministic check: every evidence string matches the
-  check-outcome or tool-failure patterns and no evidence names a repository path or symbol). This
-  is a post-check on the canonical final, reported through the existing granular reason format.
+- A `CONFIRMED` final finding whose evidence consists only of a CI check outcome or a tool failure
+  is rejected with `diagnostic_only_finding` (deterministic check: every evidence string matches the
+  check-outcome or tool-failure patterns and no evidence names a repository path or symbol). This is
+  a post-check on the canonical final, reported through the existing granular reason format.
 - The diagnostics sidecar itself is orchestrator output and is not validated against the model.
 
 ### Rendering
 
-The final Markdown gains two sections after the rejected findings and the dispute table, each under
+The final Markdown carries two sections after the rejected findings and the dispute table, each under
 a language-independent marker: `<!-- review-pr:verification-limitations -->` with
 `## Verification limitations` / `## Обмеження перевірки` (orchestrator records first with a
 localized label per type and the exact detail, then reviewer limitations with the contributing
@@ -350,13 +416,13 @@ failed, pending, skipped, denied, or unavailable state, and no item names a path
 
 ## Artifact flow
 
-For each phase, the orchestrator should preserve three distinct artifacts:
+For each phase, the orchestrator preserves three distinct artifacts:
 
 1. `*-raw.ndjson` — the exact agent response, never silently rewritten;
 2. `*-findings.json` — a validated canonical array plus protocol/completeness metadata;
 3. the existing `*.md` report — rendered deterministically in the configured language.
 
-The Markdown renderer, not localized headings, becomes the source of table and section structure.
+The Markdown renderer, not localized headings, is the source of table and section structure.
 Free-form evidence remains in the configured report language, while enums, markers, IDs, and schema
 keys remain language-independent.
 
@@ -365,26 +431,32 @@ keys remain language-independent.
 - Strip only known transport wrappers such as a single outer code fence before parsing; preserve the
   original bytes separately.
 - Parse each line independently and require exactly one terminal `complete` record whose
-  `finding_count` matches the number of finding records.
+  `finding_count` matches the number of finding records. A line is read with `jq`, so two complete
+  objects on one line count as two records, and a value that is not an object is ignored beside an
+   object; on its own it fails the line.
 - Validate enums, unique IDs, phase-specific classification rules, and changed-line anchors before
   publishing canonical JSON or Markdown.
 - A schema, provenance, or completeness failure records a stable reason token followed by
   machine-readable details, for example
   `schema_provenance_or_completeness_validation_failed: finding[xr-3].failure_scenario` or
-  `source_refs.missing[pi:pi-2]`. Details name the record by `source_id`, the failing field or
-  stream-level check, and missing or unknown source refs, so a failed attempt can be diagnosed from
-  its log without re-running the validator.
+  `source_refs.missing[pi:pi-2]`; a primary review uses the token
+  `schema_or_completeness_validation_failed`, since it has no provenance. Details name the record by
+  `source_id` (or `record[<index>]` when it has none), the failing field or stream-level check
+  (`stream.no_complete`, `stream.multiple_complete`, `stream.complete_not_last`,
+  `stream.duplicate_source_id[...]`, `complete.finding_count_mismatch[...]`), and missing or unknown
+  source refs, so a failed attempt can be diagnosed from its log without re-running the validator.
 - A truncated stream without `complete` is a failed report even if earlier records parse. Preserve
   those records as diagnostics; never publish them as a successful review. They may still seed one
   continuation pass, described below, which republishes them only as part of a merged stream that
   passes the full contract.
-- Every structured phase prompt ends with a `BEFORE YOU SEND` block that restates the keys of each
-  record the phase may emit and every closed value set -- classification, severity, anchor kind,
-  feedback state and, for resolutions, dispute kind, status, verification method and basis, with
-  basis told apart from how a dispute was checked. The lists appear earlier in the contract too, but
-  that is mid-prompt, under the skill and the repository facts, and a model that answers after
-  dozens of tool calls may rebuild a record from memory, drop a key or coin a value. Valid fixtures
-  are tested against the key lists, and the value sets against the validators' own.
+- Every structured phase prompt ends with a `BEFORE YOU SEND` block, after every other block, that
+  restates the keys of each record the phase may emit and every closed value set -- classification,
+  severity, anchor kind, feedback state and, for resolutions, dispute kind, status, verification
+  method and basis, with basis told apart from how a dispute was checked. The lists appear earlier
+  in the contract too, but that is mid-prompt, under the skill and the repository facts, and a model
+  that answers after dozens of tool calls may rebuild a record from memory, drop a key or coin a
+  value. Valid fixtures are tested against the key lists, and the value sets against the validators'
+  own.
 - Prose ahead of the first record is dropped before validation, without a model: an announcement
   such as "Here is the review:", or the progress notes Codex sends before tool calls, which arrive
   as agent messages of their own and are joined with the answer. The console counts the lines; the
@@ -393,6 +465,12 @@ keys remain language-independent.
 - A stream written as one JSON array -- a `[` line, one record per line closed by a comma, a `]`
   line -- or as a single-line array of records is unwrapped the same way: each record keeps its
   text, only the separating comma goes, and the console counts the records taken out.
+- The recovery passes run in a fixed order. A stream that fails validation is first offered a
+  field amendment (below). When no amendment can be asked for, a cross-review or final stream that
+  qualifies for a continuation gets one, and every other stream gets the bounded schema repair. When
+  an amendment was tried and failed, the schema repair is skipped, and a cross-review or final
+  stream may still be continued. Salvage comes last; in a final synthesis only after every attempt
+  and the fallback. Each pass is described below.
 - Before an ordinary whole-review retry, allow one bounded repair attempt only when every finding is
   already a parseable object with a unique `source_id` and every substantive field present. Trailing
   transport prose, fences, record/schema metadata, and a missing or malformed terminal completion
@@ -401,78 +479,94 @@ keys remain language-independent.
   honestly that the model did not report thread coverage -- and so does one whose `existing_feedback`
   the contract does not define, a state of the model's own or a confirmed thread without a thread
   id, with what the model wrote kept among the finding's verification limitations in the language
-  of the report -- and a final finding without
-  `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections list.
-  A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
+  of the report, and any thread ids it gave kept on the `unknown` state -- and a final finding
+  without `include_in_rejected_summary` gets `false`, which keeps it out of the important-rejections
+  list. A REJECTED or UNCERTAIN cross-review or final record that leaves out `failure_scenario` or
   `recommendation` gets `null` for it, since for such a verdict the contract allows that value; a
   CONFIRMED finding owes both and still fails without them. A primary finding without
   `contributing_agents` gets `[<reviewer>]`, the only value a primary finding can have; one that
   names another agent still fails. A primary finding without `classification` gets `null`, the
-  only value a primary finding can have. A cross-review or final finding whose `contributing_agents` is
-  missing or names other agents than its `source_refs` gets the agents of those refs, the only
+  only value a primary finding can have. A cross-review or final finding whose `contributing_agents`
+  is missing or names other agents than its `source_refs` gets the agents of those refs, the only
   value it can have; one whose refs are themselves unusable still fails.
   All of these are filled in before validation, without a model, and the console says so; a key a
   `complete` record carries that the contract does not define is dropped the same way. A repair
-  baseline and the findings a continuation keeps get the same values, and the same correction of a
-  mislabelled `source_refs` agent key, so a repair or continuation that keeps a draft as it was
-  still matches them. The note about an undefined `existing_feedback` is written once, even for a
-  finding that already carries it in either language. A character the model escaped twice, the six
+  baseline, an amendment request and the findings a continuation keeps get the same values, the
+  primary `contributing_agents` included, and the same correction of a mislabelled `source_refs`
+  agent key, so a repair, amendment or continuation that keeps a draft as it was still matches
+  them. The note about an undefined `existing_feedback` is written once, even for a finding that
+  already carries it in either language. A character the model escaped twice, the six
   characters `\u2192` where it meant the arrow, is decoded in a title, claim, failure scenario,
   recommendation or summary; evidence, and a `code span` anywhere, keep it as written, since a quote
-  of code may hold a real escape. A `pr-level` anchor that names a file with no lines drops the file, which the evidence
-  names instead. A `changed-line` anchor whose file is not in the changed-line map moves to the
-  one changed file of the same name whose changed lines hold the anchor, and the log names both
+  of code may hold a real escape. Only a character from U+00A0 up is decoded, whether it prints or
+  not; an escaped ASCII or control character, or half of a surrogate pair, stays as written. A `pr-level` anchor
+  that names a file with no lines drops the file from the anchor; unless the evidence already names
+  that path, a localized note (``File: `<path>`.``) is added to the evidence, so the file stays
+  named. A `changed-line` anchor whose file is not in the changed-line map moves to the one changed
+  file of the same name whose changed lines hold the anchor, and the log names both
   paths; with no such file, or two, or when the written path is a real file in the checkout that
   the pull request did not change, it is left as written and fails as before. Any other missing
-  key still fails its record, because it would have to be made up. A record whose brackets alone
-  are wrong -- closed early so that the rest reads as junk, a closing brace doubled or left out at
-  the end, an array opened without its bracket, an array closed inside the closing quote of its
-  last string (`...)]","failure_scenario":`) -- is mended without a model when exactly one
-  reading of it parses as one object: brackets outside strings are counted, one too many is tried
-  away closer by closer and one or two too few closing braces are tried on the end; with one too
-  few, a bracket written just before a closing quote is also tried just after it, and the reading that keeps the
-  most keys on the record, with its lists as lists, wins. A line that reads two ways, or is broken
-  otherwise, is not mended, and neither is one that ends inside an array: that record was cut off.
-  A string value split in two -- `"recommendation":"Do this.","+ and that.",` -- leaves its second
-  half without a key; that half is joined to the string value before it in the same object with a
-  space, every character kept, and only when the line then parses. A keyless string after a number,
-  an array or an object is not guessed at. A double quote left unescaped inside a string -- one
-  that is not followed by a comma, a colon, a closing bracket or the end of the line -- is escaped
-  as the model's own text, and a stray quote right after a number or a literal and before a comma
-  or a closing bracket is taken out; again only when the line then parses.
-  A record broken across physical lines is joined first: a line that opens a record but does not
-  parse takes the next lines, up to three and none of them opening a record, and the join stands
-  only when it parses as one object. A record closed early and continued on a line that begins
-  with a comma and a key is joined the same way, with the closing brace of the first line taken
-  off. A JSON-looking record the model finished writing but mis-punctuated in
-  a way that cannot be mended so, of which nothing is kept, is left out of the baseline and handed
-  back to the repair pass, which sees the broken record in
+  key still fails its record, because it would have to be made up. A backslash before a character
+  that starts no JSON escape -- `GuzzleHttp\Handler` written with single backslashes -- can only
+  have meant a literal backslash, so it is doubled and the line parsed again. This runs first; the
+  repairs below then run in a fixed order -- quotes, split strings, brackets -- on the line with its
+  backslashes doubled, and only the first one that makes the line parse is used. A line with two
+  different faults, a stray quote and a missing brace, is therefore not mended. A record whose
+  brackets alone are wrong -- closed early so that the rest reads as junk, a closing brace doubled
+  or left out at the end, an array opened without its bracket, an array closed inside the closing
+  quote of its last string (`...)]","failure_scenario":`) -- is mended without a model when exactly
+  one reading of it parses as one object: brackets outside strings are counted, one too many is
+  tried away closer by closer and one or two too few closing braces are tried on the end; with one
+  too few, a bracket written just before a closing quote is also tried just after it, and the
+  reading that keeps the most keys on the record, with its lists as lists, wins. A line that reads
+  two ways, or is broken otherwise, is not mended, and neither is one that ends inside an array:
+  that record was cut off. A string value split in two --
+  `"recommendation":"Do this.","+ and that.",` -- leaves its second half without a key; that half is
+  joined to the string value before it in the same object with a space, every character kept, and
+  only when the line then parses. A keyless string after a number, an array or an object is not
+  guessed at. A double quote left unescaped inside a string -- one that is not followed by a comma,
+  a colon, a closing bracket or the end of the line -- is escaped as the model's own text, and a
+  stray quote right after a number or a literal and before a comma or a closing bracket is taken
+  out; again only when the line then parses. A record broken across physical lines is joined first:
+  a line that opens a record but does not parse takes the next lines, up to three and none of them
+  opening a record, and the join stands only when it parses as one object. A record closed early and
+  continued on a line that begins with a comma and a key is joined the same way, with the closing
+  brace of the first line taken off. A JSON-looking record the model finished writing but
+  mis-punctuated in a way that cannot be mended so, of which nothing is kept, is left out of the
+  baseline and handed back to the repair pass, which sees the broken record in
   the rejected draft and writes it again. The baseline's `unparsed` list names each such line: its
   position, its record kind, and the ids it names. The repair prompt lists them, and a repair must
   bring back every one -- the preserved records unchanged and in order, plus exactly one restored
   record per unparsed line, carrying an id that line named wherever it named one. A repair that
   leaves one out is rejected like one that rewrites a preserved record, and salvage then counts the
-  line as lost. A `complete` record restored this way keeps the summary the draft wrote. A record
+  line as lost. The repair prompt asks a `complete` record restored this way to keep the summary
+  the draft wrote, but this is not checked: when the draft's `complete` did not parse, any
+  well-formed completion is accepted. A record
   torn off mid-token, unknown record types, duplicate completion records, and other missing
   substantive finding fields remain ineligible because recovery would require guessing what was cut.
 - A finding written whole but for a field its author can still supply -- a missing or empty
   `recommendation` or `failure_scenario`, or an anchor on lines the pull request did not change --
   is amended before any repair, because a repair may not write content. This holds for primary
   findings, cross-review verdicts and final findings alike, except that a final finding is never
-  asked for an anchor: the final anchor repair owns that. The gate is the validation
-  diagnostic: every problem it names must be such a field of a finding, and a finding may miss no
-  other key. The agent gets one pass with the repository open and a prompt that lists each finding
-  with the fields to write (and the changed-line map when an anchor is asked for); it answers one
+  asked for an anchor. Under `ndjson-v1` no anchor repair runs on the final either: a final finding
+  anchored off the changed-line map fails validation, and the stream goes to a continuation when
+  every problem is such content (that finding is set aside and its refs asked for again) or, failing
+  that, to the next attempt and finally to salvage, which drops the finding. The gate is the
+  validation diagnostic: every problem it names must be such a field of a finding, and a finding may
+  miss no other key and carry no key of its own. Every line of the draft must also parse, with the
+  line repairs above; a draft with a line that does not is not amended. The agent gets one pass with
+  the repository open and a prompt that lists each finding with the fields to write (and the
+  changed-line map when an anchor is asked for); it answers one
   `{"record":"amendment","source_id":...}` line per finding. The orchestrator sets only the fields
   asked for, and only in the shape the contract expects, so every other field stays as the draft
-  wrote it, then validates the merged stream as an ordinary primary review. When an amendment was
-  tried the schema repair is skipped. In a cross-review or final synthesis, a failed amendment is
-  followed by a continuation when what the stream still lacks qualifies for one -- refs left
+  wrote it, then validates the merged stream as an ordinary review of its phase. When an amendment
+  was tried the schema repair is skipped. In a cross-review or final synthesis, a failed amendment
+  is followed by a continuation when what the stream still lacks qualifies for one -- refs left
   unanswered, or findings still missing only such content (a key left out counts when the same
   finding reports the field). It is judged on the stream with whatever the amendment did set, so
   only the findings still incomplete are set aside and their refs asked for again with the
-  repository open; on Tools 29285 Pi cut its amendment off mid-string and the verdict was dropped.
-  A final draft that already holds resolution records is not continued, as with any final
+  repository open; on Tools 29285 Pi cut its amendment off mid-string and the verdict was dropped. A
+  final draft that already holds resolution records is not continued, as with any final
   continuation, and goes to the ordinary retry. Otherwise, and when the continuation fails, the
   stream goes on to salvage with whatever the amendment did set, so only a finding that is still
   incomplete is dropped.
@@ -487,15 +581,27 @@ keys remain language-independent.
   changed the finding. If stability cannot be established, fail closed instead of publishing
   repair.
 - Cross-review repair applies the same rule and additionally freezes `source_refs`, classification,
-  severity, and contributing agents. The repaired stream must still cover every canonical primary
+  severity, and contributing agents; final repair freezes `include_in_rejected_summary` and the
+  resolution records as well. The repaired stream must still cover every canonical primary
   `{agent, source_id}` input and may not introduce an unknown source ref.
 - A stream that stopped before answering every required source ref is continued rather than
   repaired, because a bounded repair runs without tools and may not add findings, while the absent
-  records need their own repository evidence. The continuation is gated on the failure diagnostic
-  naming nothing but `stream.no_complete` and `source_refs.missing[...]`: any per-record problem,
-  unknown ref, duplicate `source_id`, or extra completion record keeps the bounded repair. A stream
+  records need their own repository evidence. The continuation is chosen from the failure
+  diagnostic, in this order:
+  - it names nothing but `stream.no_complete` and `source_refs.missing[...]`: the stream is
+    continued as it is;
+  - it names `source_refs.missing[...]` and otherwise only `stream.no_complete` and problems of
+    single findings (`finding[<id>].<field>`), whatever the field: those findings are set aside, and
+    their refs are asked for again with the unanswered ones; the log names them;
+  - no ref is missing, and every problem (a missing `complete` aside) is a `failure_scenario`,
+    `recommendation` or `anchor` of a finding: those findings are set aside and their refs asked for again, because the schema repair
+    may not write content.
+
+  Any other problem -- an unknown ref, a duplicate `source_id`, an extra or misplaced completion
+  record, or a stream-level problem besides the ones above -- keeps the bounded repair. A stream
   that answered every ref and only omitted `complete` also stays with the repair, which can supply
-  that record without inventing content.
+  that record without inventing content. A continuation needs at least one ref left to ask for: when
+  the set-aside findings' refs are all still answered by kept findings, it is not run.
 - The continuation is a real review pass with repository access. It repeats the original phase
   prompt and adds only bookkeeping: the ids of the records already produced, and a
   `PENDING SOURCE REFS` block that replaces `REQUIRED SOURCE REFS` for that pass. The produced
@@ -505,12 +611,15 @@ keys remain language-independent.
   each line with the same JSON repairs the phase uses and leaving out a line none of them makes
   parse, whose ref is then asked for again. It drops the interrupted pass's own `complete`
   record, concatenates the kept records with the continuation reply, and validates the merged
-  stream as one ordinary cross-review. It then compares the leading findings against the kept
-  records, which have had the same presentation defaults and agent-key correction as the merged
-  stream, field by field, in order. A continuation that rewrites, reorders, or drops a kept
-  finding, repeats a kept `source_id`, or answers an unlisted ref is rejected, and the run falls
-  back to the ordinary whole-review retry. At most one continuation runs per attempt, and it
-  replaces the repair pass for that attempt rather than adding to it.
+  stream as one ordinary review of its phase, against every required ref. It then compares the
+  leading findings against the kept records, which have had the same presentation defaults and
+  agent-key correction as the merged stream, field by field, in order. A continuation that rewrites,
+  reorders, or drops a kept finding, repeats a kept `source_id`, or cites a ref the phase was never
+  given is rejected; a cross-review then goes on to salvage, and a final synthesis to its next
+  attempt. A new record that
+  answers a required ref the kept findings already answer, rather than a pending one, is accepted:
+  the merged stream still covers exactly the required refs. At most one continuation runs per
+  attempt, and it replaces the repair pass for that attempt rather than adding to it.
 - When every recovery above has failed, a salvage pass runs before the phase is abandoned. Each
   record is put to the same contract on its own; the ones that pass are published and the ones that
   do not are dropped. The terminal `complete` record is rebuilt around what survived, and the
@@ -518,9 +627,11 @@ keys remain language-independent.
   source refs than it was given but never an unknown one. A phase fails only when no record survives.
 - In a final synthesis salvage comes last: after every attempt by the synthesizer and by its
   fallback, because another attempt usually gets the whole synthesis through where salvage keeps
-  only what stands on its own. The newest draft is salvaged first. When the fallback left no draft
-  of its own, the synthesizer's is taken up, the manifest marks `final_fallback.outcome` as
-  `failed`, and the report says the fallback failed as well rather than crediting it.
+  only what stands on its own. Every draft that failed the contract is kept for it, and they are
+  tried newest first until one is salvaged; its author is credited. When the draft
+  salvaged is the synthesizer's -- the fallback left none, or its own kept nothing -- the manifest
+  marks `final_fallback.outcome` as `failed`, and the report says the fallback failed as well rather
+  than crediting it.
 - Salvage is a loss, and it is recorded as one rather than absorbed. The console names the phase, the
   reason the recovery failed, and what was dropped; the manifest gains a `salvage_losses` entry with
   the unreadable line count, the dropped `source_id`s, the number of unanswered refs, and the number
@@ -535,10 +646,12 @@ keys remain language-independent.
   resolution names, leaves every resolution in place. A resolution table that is wrong on its own
   account is not salvaged.
 - A reviewer whose stream no recovery can rescue -- every record malformed, or a failed process --
-  fails its phase, but the phase does not fail with it while `execution.quorum` reviewers finish
-  (default and minimum 2). Every finding is cross-reviewed by everyone but its author, so two is
-  the smallest number at which each survivor's own findings are still checked by someone; with one
-  left they would drop out of the final unseen, and the run stops. A reviewer that failed its
+  fails its phase, and so does a Codex reviewer that is not started because its quota is below
+  `quota.codex.minimum_remaining_percent` when the phase begins. The phase does not fail with
+  such a reviewer while `execution.quorum` reviewers finish (default and minimum 2). Every finding
+  is cross-reviewed by everyone but its author, so two is the smallest number at which each
+  survivor's own findings are still checked by someone; with one left they would drop out of the
+  final unseen, and the run stops. A reviewer that failed its
   primary review takes no part in cross-review and its missing report is handed to nobody; one that
   failed only its cross-review stays a primary source, since the others checked its findings. The
   loss is recorded as an `agent_losses` entry and among the review's verification limitations, and
@@ -575,8 +688,13 @@ keys remain language-independent.
 5. Make v1 the default only after all configured runners pass the same contract suite; retain an
    explicit legacy mode for existing reports.
 
+Steps 1 to 4 are done. Step 5 is done in part: since 1.20.0 the distributed example configuration
+runs `ndjson-v1` in all three stages, so a fresh installation uses it, while a configuration that
+names no contract still gets `markdown`. `markdown` remains a supported mode for every stage.
+
 ## Accepted decision
 
-NDJSON is the machine source of truth for new opt-in orchestrated phases. Human Markdown is rendered
-deterministically. Markdown remains the default during migration, there is no silent fallback, and
-historical Markdown artifacts remain supported.
+NDJSON is the machine source of truth for orchestrated phases that select `ndjson-v1`. Human
+Markdown is rendered deterministically. `markdown` remains the built-in default for a configuration
+that names no contract, there is no silent fallback from one contract to the other, and historical
+Markdown artifacts remain supported.

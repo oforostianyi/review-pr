@@ -2,28 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://review-pr.dev/schema/findings-record-v1.json",
   "title": "review-pr ndjson-v1 record",
+  "description": "One record of an ndjson-v1 stream, as it stands after review-pr has filled in the presentation defaults and dropped undefined keys of a complete record. The phase decides the exact key set: a primary finding has no source_refs and no include_in_rejected_summary, a cross-review finding adds source_refs, a final finding adds both. Rules that need the phase or the run -- the per-phase key sets, contributing_agents matching the reviewer or the agents of source_refs, anchors on the changed-line map with start <= end, source-ref coverage, final_source_id linkage, finding_count -- are not encoded here. review-pr's own validators are authoritative; docs/review-pr-finding-contract.md describes them.",
   "oneOf": [
-    {
-      "$ref": "#/$defs/finding"
-    },
-    {
-      "$ref": "#/$defs/resolution"
-    },
-    {
-      "$ref": "#/$defs/complete"
-    }
+    {"$ref": "#/$defs/finding"},
+    {"$ref": "#/$defs/resolution"},
+    {"$ref": "#/$defs/complete"}
   ],
   "$defs": {
     "stringArray": {
       "type": "array",
-      "items": {
-        "type": "string"
-      }
+      "items": {"type": "string"}
     },
     "anchor": {
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "file", "start", "end"],
+      "description": "A changed-line anchor names a file of the changed-line map and lines with start <= end; its end is a changed RIGHT-side line, or the range overlaps changed lines and ends in the same diff hunk. review-pr checks that against the map. A pr-level anchor has null file, start, and end.",
       "properties": {
         "kind": {
           "enum": ["changed-line", "pr-level"]
@@ -44,38 +38,21 @@
         {
           "if": {
             "properties": {
-              "kind": {
-                "const": "changed-line"
-              }
+              "kind": {"const": "changed-line"}
             }
           },
           "then": {
             "properties": {
-              "file": {
-                "type": "string",
-                "minLength": 1
-              },
-              "start": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "end": {
-                "type": "integer",
-                "minimum": 1
-              }
+              "file": {"type": "string", "minLength": 1},
+              "start": {"type": "integer", "minimum": 1},
+              "end": {"type": "integer", "minimum": 1}
             }
           },
           "else": {
             "properties": {
-              "file": {
-                "const": null
-              },
-              "start": {
-                "const": null
-              },
-              "end": {
-                "const": null
-              }
+              "file": {"const": null},
+              "start": {"const": null},
+              "end": {"const": null}
             }
           }
         }
@@ -85,6 +62,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["state", "thread_ids"],
+      "description": "Whether existing review threads already cover the finding. new names no thread; confirmed-existing and historical name at least one; unknown may name any.",
       "properties": {
         "state": {
           "enum": ["new", "confirmed-existing", "historical", "unknown"]
@@ -92,10 +70,7 @@
         "thread_ids": {
           "type": "array",
           "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+          "items": {"type": "string", "minLength": 1}
         }
       },
       "allOf": [
@@ -114,7 +89,9 @@
         {
           "if": {
             "properties": {
-              "state": {"enum": ["confirmed-existing", "historical"]}
+              "state": {
+                "enum": ["confirmed-existing", "historical"]
+              }
             }
           },
           "then": {
@@ -129,20 +106,30 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["agent", "source_id"],
+      "description": "A reference to a record of the previous phase, copied verbatim from its record_ref. In a run with source handles the source_id is the handle the record was shown under (r01 for a primary finding, x01 for a cross-review record).",
       "properties": {
-        "agent": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        "agent": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "source_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"}
+      }
+    },
+    "resolutionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "source_id"],
+      "description": "A ref copied from the REQUIRED RESOLUTIONS block. The listed classification and severity may be copied along; review-pr compares only agent and source_id, and the canonical sidecar keeps only those two.",
+      "properties": {
+        "agent": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "source_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "classification": {
+          "description": "Copied from the block; review-pr does not check the value."
         },
-        "source_id": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        }
+        "severity": {"description": "Copied from the block; review-pr does not check the value."}
       }
     },
     "finding": {
       "type": "object",
       "additionalProperties": false,
+      "description": "A finding of any phase. A primary finding has classification null; a cross-review or final finding classifies a supplied record and cites it in source_refs.",
       "required": [
         "record",
         "schema_version",
@@ -161,34 +148,20 @@
         "existing_feedback"
       ],
       "properties": {
-        "record": {
-          "const": "finding"
-        },
-        "schema_version": {
-          "const": 1
-        },
+        "record": {"const": "finding"},
+        "schema_version": {"const": 1},
         "source_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "description": "The author's own id, unique within its stream."
         },
-        "title": {
-          "type": "string",
-          "minLength": 1
-        },
-        "claim": {
-          "type": "string",
-          "minLength": 1
-        },
-        "anchor": {
-          "$ref": "#/$defs/anchor"
-        },
+        "title": {"type": "string", "minLength": 1},
+        "claim": {"type": "string", "minLength": 1},
+        "anchor": {"$ref": "#/$defs/anchor"},
         "evidence": {
           "type": "array",
           "minItems": 1,
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+          "items": {"type": "string", "minLength": 1}
         },
         "failure_scenario": {
           "type": ["string", "null"],
@@ -200,57 +173,116 @@
         },
         "classification": {
           "type": ["string", "null"],
-          "enum": ["CONFIRMED", "REJECTED", "UNCERTAIN", null]
+          "enum": ["CONFIRMED", "REJECTED", "UNCERTAIN", null],
+          "description": "null in a primary finding; CONFIRMED, REJECTED, or UNCERTAIN in a cross-review or final finding."
         },
         "severity": {
           "type": ["string", "null"],
-          "enum": ["P0", "P1", "P2", "P3", null]
+          "enum": ["P0", "P1", "P2", "P3", null],
+          "description": "P0-P3 or null in a primary finding; P0-P3 for CONFIRMED and null for REJECTED and UNCERTAIN."
         },
-        "category": {
-          "type": "string",
-          "minLength": 1
-        },
+        "category": {"type": "string", "minLength": 1},
         "contributing_agents": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+          "items": {"type": "string", "minLength": 1},
+          "description": "Exactly [<reviewer>] in a primary finding; exactly the agents its source_refs name in a cross-review or final finding."
         },
-        "verification_limitations": {
-          "$ref": "#/$defs/stringArray"
-        },
-        "existing_feedback": {
-          "$ref": "#/$defs/existingFeedback"
-        },
+        "verification_limitations": {"$ref": "#/$defs/stringArray"},
+        "existing_feedback": {"$ref": "#/$defs/existingFeedback"},
         "source_refs": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/sourceRef"
-          }
+          "items": {"$ref": "#/$defs/sourceRef"},
+          "description": "Required in cross-review and final findings, absent from primary findings."
         },
         "include_in_rejected_summary": {
           "type": "boolean",
-          "description": "Final-synthesis-only decision to surface an important rejected claim in the human report."
+          "description": "Final-synthesis-only decision to surface an important rejected claim in the human report; true only on a REJECTED record. Required in final findings, absent elsewhere."
         }
       },
       "allOf": [
         {
           "if": {
+            "required": ["classification"],
             "properties": {
-              "classification": {"enum": ["CONFIRMED", null]}
+              "classification": {
+                "enum": ["CONFIRMED", null]
+              }
             }
           },
           "then": {
             "properties": {
-              "failure_scenario": {
-                "type": "string",
-                "minLength": 1
+              "failure_scenario": {"type": "string", "minLength": 1},
+              "recommendation": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["classification"],
+            "properties": {
+              "classification": {"const": "CONFIRMED"}
+            }
+          },
+          "then": {
+            "properties": {
+              "severity": {
+                "enum": ["P0", "P1", "P2", "P3"]
               }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["classification"],
+            "properties": {
+              "classification": {
+                "enum": ["REJECTED", "UNCERTAIN"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "severity": {"const": null}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["classification"],
+            "properties": {
+              "classification": {"const": null}
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["source_refs"]
+                },
+                {
+                  "required": ["include_in_rejected_summary"]
+                }
+              ]
+            }
+          },
+          "else": {
+            "required": ["source_refs"]
+          }
+        },
+        {
+          "if": {
+            "required": ["include_in_rejected_summary"],
+            "properties": {
+              "include_in_rejected_summary": {"const": true}
+            }
+          },
+          "then": {
+            "properties": {
+              "classification": {"const": "REJECTED"}
             }
           }
         }
@@ -259,7 +291,7 @@
     "resolution": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Opt-in final-synthesis record (reporting.dispute_resolution) that settles one cross-review dispute detected by the orchestrator.",
+      "description": "Opt-in final-synthesis record (reporting.dispute_resolution) that settles one cross-review dispute detected by the orchestrator. review-pr also checks that the dispute was listed, that conflicting_refs are exactly the listed ones, that final_source_id names a final finding citing one of them, that the covering finding is not CONFIRMED over an unresolved factual or mixed dispute, and that it carries no P0 or P1 on an inferred_convention basis.",
       "required": [
         "record",
         "schema_version",
@@ -277,66 +309,143 @@
         "limitations"
       ],
       "properties": {
-        "record": {
-          "const": "resolution"
-        },
-        "schema_version": {
-          "const": 1
-        },
+        "record": {"const": "resolution"},
+        "schema_version": {"const": 1},
         "dispute_id": {
           "type": "string",
-          "pattern": "^dispute:[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          "pattern": "^dispute:[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "description": "dispute:<primary agent>:<primary source_id>, such as dispute:codex:r04 in a run with source handles."
         },
-        "primary_ref": {
-          "$ref": "#/$defs/sourceRef"
-        },
+        "primary_ref": {"$ref": "#/$defs/resolutionRef"},
         "conflicting_refs": {
           "type": "array",
           "minItems": 2,
           "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/sourceRef"
-          }
+          "items": {"$ref": "#/$defs/resolutionRef"}
         },
-        "final_source_id": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-        },
+        "final_source_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
         "dispute_kind": {
           "enum": ["factual", "severity", "mixed"]
         },
         "resolution_status": {
-          "enum": ["resolved", "uncertain", "not_applicable"]
+          "enum": ["resolved", "uncertain", "not_applicable"],
+          "description": "not_applicable only for a severity dispute."
         },
         "verification_method": {
-          "enum": ["source", "command", "test", "repository_rule", "runtime", "manual"]
+          "enum": ["source", "command", "test", "repository_rule", "runtime", "manual"],
+          "description": "How the dispute was checked. manual cannot resolve a factual or mixed dispute."
         },
         "command": {
           "type": ["array", "null"],
           "minItems": 1,
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
-          "description": "Declarative argv array of the measurement. Recorded, never evaluated as a shell string."
+          "items": {"type": "string", "minLength": 1},
+          "description": "Declarative argv array of the measurement, required for the command and test methods. Never evaluated as a shell string; with reporting.execute_measurements an allow-listed subset is run and its result attached separately."
         },
         "observed": {
-          "type": ["string", "null"]
+          "type": ["string", "null"],
+          "description": "Non-empty when resolved; otherwise null or any string."
         },
         "basis": {
-          "enum": ["explicit_repository_rule", "skill_rule", "inferred_convention", "general_engineering"]
+          "enum": [
+            "explicit_repository_rule",
+            "skill_rule",
+            "inferred_convention",
+            "general_engineering"
+          ],
+          "description": "The kind of rule the decision rests on, not how it was checked."
         },
         "basis_source": {
-          "type": ["string", "null"]
+          "type": ["string", "null"],
+          "description": "A repository path (optionally path:line) for explicit_repository_rule, the configured skill name for skill_rule, null otherwise."
         },
-        "limitations": {
-          "$ref": "#/$defs/stringArray"
+        "limitations": {"$ref": "#/$defs/stringArray"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["resolution_status"],
+            "properties": {
+              "resolution_status": {"const": "not_applicable"}
+            }
+          },
+          "then": {
+            "properties": {
+              "dispute_kind": {"const": "severity"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["resolution_status"],
+            "properties": {
+              "resolution_status": {"const": "resolved"}
+            }
+          },
+          "then": {
+            "properties": {
+              "observed": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["resolution_status", "dispute_kind"],
+            "properties": {
+              "resolution_status": {"const": "resolved"},
+              "dispute_kind": {
+                "enum": ["factual", "mixed"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verification_method": {
+                "not": {"const": "manual"}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["verification_method"],
+            "properties": {
+              "verification_method": {
+                "enum": ["command", "test"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "command": {"type": "array"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["basis"],
+            "properties": {
+              "basis": {
+                "enum": ["explicit_repository_rule", "skill_rule"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "basis_source": {"type": "string", "minLength": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "basis_source": {"const": null}
+            }
+          }
         }
-      }
+      ]
     },
     "complete": {
       "type": "object",
       "additionalProperties": false,
+      "description": "The mandatory terminal record. finding_count equals the number of finding records before it; resolution records are not counted.",
       "required": [
         "record",
         "schema_version",
@@ -346,25 +455,12 @@
         "positive_evidence"
       ],
       "properties": {
-        "record": {
-          "const": "complete"
-        },
-        "schema_version": {
-          "const": 1
-        },
-        "finding_count": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "summary": {
-          "type": "string"
-        },
-        "verification_limitations": {
-          "$ref": "#/$defs/stringArray"
-        },
-        "positive_evidence": {
-          "$ref": "#/$defs/stringArray"
-        }
+        "record": {"const": "complete"},
+        "schema_version": {"const": 1},
+        "finding_count": {"type": "integer", "minimum": 0},
+        "summary": {"type": "string"},
+        "verification_limitations": {"$ref": "#/$defs/stringArray"},
+        "positive_evidence": {"$ref": "#/$defs/stringArray"}
       }
     }
   }

@@ -106,7 +106,7 @@
             "UA"
           ],
           "deprecated": true,
-          "description": "Legacy final-synthesis language. Prefer the global language field or languages.final. Classification values and P0–P3 severity values remain fixed."
+          "description": "Legacy spelling of the global language: without the top-level language field it sets the language of every stage, not only the final synthesis. Prefer language and languages.final. Classification values and P0–P3 severity values remain fixed."
         }
       }
     },
@@ -129,7 +129,7 @@
     "quota": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Subscription limits checked before a run starts. Each provider is off until it is configured here.",
+      "description": "Subscription limits checked before a run starts and again before every phase. Each provider is off until it is configured here.",
       "properties": {
         "codex": {
           "type": "object",
@@ -142,7 +142,7 @@
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "A run that would start a Codex agent is refused when any Codex rate-limit window reports less than this share left. The quota is read through `codex app-server` with Codex's own login; when it cannot be read, the run goes on with a warning.",
+              "description": "A run that would start a Codex agent is refused when any Codex rate-limit window reports less than this share left. It is read again before every phase: a Codex reviewer short of quota is set aside under the reviewer quorum, and a Codex synthesizer short of quota fails its phase. The quota is read through `codex app-server` with Codex's own login; when it cannot be read, the run goes on with a warning.",
               "examples": [
                 15
               ]

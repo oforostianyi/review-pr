@@ -32,16 +32,17 @@ absence of symlinks or development files, and installs from the extracted archiv
 To run the static syntax check separately:
 
 ```bash
-bash -n bin/review-pr tests/review-pr/*.sh tests/review-pr/lib/*.sh
+bash -n bin/review-pr runners/review-pr-agy install.sh uninstall.sh packaging/*.sh \
+    tests/review-pr/*.sh tests/review-pr/lib/*.sh
 ```
 
-Run `shellcheck` over the same shell sources when it is installed.
+Run `shellcheck -S warning` over the same shell sources when it is installed.
 
 The same checks run in GitHub Actions (`.github/workflows/ci.yml`) on every push and pull request:
 syntax check, `shellcheck -S warning`, the private-data audit, and the full suite on `ubuntu-latest`,
 plus a second Linux leg pinned to jq 1.6 (the documented minimum), followed by a package build
-whose checksum and contents are verified and uploaded as a workflow artifact. `macos-latest` (Homebrew Bash 5, jq, shellcheck) joins the matrix for pushes to `main`
-and manual runs, because macOS minutes are billed at a multiple of Linux minutes on private
+whose checksum and contents are verified and uploaded as a workflow artifact. `macos-latest` (Homebrew Bash 5, jq, shellcheck) joins the matrix for pushes to `main`,
+`v*` release tags, and manual runs, because macOS minutes are billed at a multiple of Linux minutes on private
 repositories. Superseded runs of the same branch are cancelled. No agent CLI or credential is
 required: the suite uses the fake GitHub CLI and mock runners.
 
@@ -72,10 +73,11 @@ The default configuration is `${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/config
 }
 ```
 
-`reviews_directory` is intentionally separate from every configured checkout: reports are user-generated artifacts and should not be accidentally picked up by `git add .`. When omitted, it defaults to `$HOME/review-pr`; it must be outside the selected review checkout. `REVIEW_PR_OUTPUT_DIR` temporarily overrides the artifact root, while `REVIEW_PR_REPO` overrides the selected checkout for an invocation. Use another configuration file with:
+`reviews_directory` is intentionally separate from every configured checkout: reports are user-generated artifacts and should not be accidentally picked up by `git add .`. When omitted, it defaults to `$HOME/review-pr`; it must be outside the selected review checkout. `REVIEW_PR_OUTPUT_DIR` temporarily overrides the artifact root, while `REVIEW_PR_REPO` overrides the selected checkout for an invocation. `REVIEW_PR_SCRATCH_DIR` chooses where a run keeps its intermediate files (see [Maintenance and storage](#maintenance-and-storage)). Use another configuration file with `--config`, or with `REVIEW_PR_CONFIG`; `--config` wins when both are given:
 
 ```bash
 review-pr --config /path/to/config.json 123
+REVIEW_PR_CONFIG=/path/to/config.json review-pr 123
 ```
 
 ## Repository targets, aliases, and profiles
@@ -113,7 +115,9 @@ Add repositories later without creating another utility. Each entry needs a sepa
 
 `profiles.<name>.skills` is an optional reusable agent-to-skill-name map. `repositories.<alias>.skills` is optional and overrides the profile entry for that repository. A value such as `"php-code-review"` is a name, not a required filesystem path. Use `""` to explicitly disable a skill inherited from a profile. Pi is never given a hardcoded or configured `--skill` path.
 
-The installer puts portable skill copies under `<config-dir>/skills/<agent>/<skill-name>/SKILL.md`. When that file exists and the matching skill name is configured, its content is appended to the agent prompt as review methodology; it is not executed, and it cannot override orchestrated-mode safety or persistence rules, the output format, or the scope of a phase. How much a cross-review or a final synthesis checks again is the prompt's decision, even where the skill says that every one of its steps runs. This lets a team share reviewed methodology without requiring each agent to have separately installed skills. A config file kept outside the default configuration directory (an experiment beside the main config, say) has no skills directory of its own, so the copies installed in `${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/skills` are looked up next, and the log says which agents took theirs from there. If no copy is found in either place, the log warns that the agent gets the skill name only, and the agent tries to discover the named skill in its own installation; the review still starts either way.
+`agents.<agent>.instructions` is free text that replaces the built-in "use any applicable code-review skill" sentence for that agent. It is used only when neither the profile nor the repository has a skill entry for the agent, including an empty one; a skill entry always wins.
+
+The installer puts portable skill copies under `<config-dir>/skills/<agent>/<skill-name>/SKILL.md`. When that file exists and the matching skill name is configured, its content is appended to the agent prompt as review methodology, followed by every `checklists/*.md` file beside it; it is not executed, and it cannot override orchestrated-mode safety or persistence rules, the output format, or the scope of a phase. How much a cross-review or a final synthesis checks again is the prompt's decision, even where the skill says that every one of its steps runs. This lets a team share reviewed methodology without requiring each agent to have separately installed skills. A config file kept outside the default configuration directory (an experiment beside the main config, say) has no skills directory of its own, so the copies installed in `${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/skills` are looked up next, and the log says which agents took theirs from there. If no copy is found in either place, the log warns that the agent gets the skill name only, and the agent tries to discover the named skill in its own installation; the review still starts either way. The embedded skill and checklist texts are part of the methodology hash that decides whether a head may be reviewed again (see [Refused runs](#refused-runs)).
 
 On a repeat installation, the installer preserves `config.json` and writes a timestamped pre-upgrade copy to `<config-dir>/backups/config-YYYYMMDD-HHMMSS.json` before applying any explicit `--repo` or `--reviews-dir` migration. It never prunes these backups. Existing portable `SKILL.md` files are preserved as well; only missing bundled copies are added.
 
@@ -177,6 +181,7 @@ Primary reviews and cross-reviews run concurrently by default. Limit the number 
 {
   "execution": {
     "max_concurrency": 1,
+    "quorum": 2,
     "retry": {
       "max_attempts": 2,
       "delay_seconds": 5
@@ -187,9 +192,15 @@ Primary reviews and cross-reviews run concurrently by default. Limit the number 
 
 `1` makes both reviewer phases sequential in the order listed in `reviewers`; `2` allows at most two reviewer processes at once. The final synthesis is always a single process. Omit `execution.max_concurrency` to retain unlimited concurrency within each phase.
 
-`retry.max_attempts` includes the initial attempt, so `2` means one initial run plus one retry. The default is `1`, which disables retry. A failed or empty-output agent goes back on the queue and starts its next attempt as soon as a slot is free, while its peers are still running; completed agents keep their published artifacts and are never launched again. `retry.delay_seconds` is the pause before that retry starts; the retry spends it in its own process, so the phase goes on starting and finishing its other reviewers meanwhile. This applies independently to primary and cross-review. Final synthesis uses the same setting, with one extra condition: an attempt is repeated only when the synthesizer actually produced something. The orchestrator reads that from the attempt's own artifacts rather than from each CLI's error text, so an attempt that wrote no output and recorded no output tokens, which is what a usage limit, an authentication failure, or a timeout leaves behind, ends the run instead of being repeated. An attempt stopped by the output token limit is not repeated either, because an identical request meets the same ceiling. A Codex attempt that the provider cut short -- its event stream ends in `turn.failed` or an `error` event, such as "Selected model is at capacity" -- is not started over: the retry runs `codex exec resume` on the same session, which keeps the commands it ran and what they returned, with the read-only sandbox pinned again through `-c sandbox_mode="read-only"`, and asks it to finish and deliver the whole output. For that, Codex records its sessions under `~/.codex/sessions` whenever a retry is configured (`--ephemeral` is passed only with `max_attempts` 1). An attempt that ran to its end and wrote an invalid stream is retried from the start, and a session Codex cannot open is followed by a fresh attempt in the same retry. Failed final attempts keep attempt-scoped diagnostics (`*-final-error-attempt-N-*`) when more than one attempt is configured. A draft that fails the contract is retried and then handed to the fallback synthesizer before any of it is salvaged. The dedicated `--rerun-final` workflow is unchanged and still available for reruns from preserved artifacts.
+`retry.max_attempts` includes the initial attempt, so `2` means one initial run plus one retry. It accepts 1–10; the default is `1`, which disables retry. A failed or empty-output agent goes back on the queue and starts its next attempt as soon as a slot is free, while its peers are still running; completed agents keep their published artifacts and are never launched again. `retry.delay_seconds` (0–3600, default `0`) is the pause before that retry starts; the retry spends it in its own process, so the phase goes on starting and finishing its other reviewers meanwhile. This applies independently to primary and cross-review. Final synthesis uses the same setting, with one extra condition: an attempt is repeated only when the synthesizer actually produced something. The orchestrator reads that from the attempt's own artifacts rather than from each CLI's error text, so an attempt that wrote no output and recorded no output tokens, which is what a usage limit, an authentication failure, or a timeout leaves behind, ends the synthesizer's attempts instead of being repeated; the [fallback synthesizer](#fallback-synthesizer), when one is configured, then takes over. An attempt stopped by the output token limit is not repeated either, because an identical request meets the same ceiling. A Codex attempt that the provider cut short -- its event stream ends in `turn.failed` or an `error` event, such as "Selected model is at capacity" -- is not started over: the retry runs `codex exec resume` on the same session, which keeps the commands it ran and what they returned, with the read-only sandbox pinned again through `-c sandbox_mode="read-only"`, and asks it to finish and deliver the whole output. For that, Codex records its sessions under `~/.codex/sessions` whenever a retry is configured (`--ephemeral` is passed only with `max_attempts` 1). An attempt that ran to its end and wrote an invalid stream is retried from the start, and a session Codex cannot open is followed by a fresh attempt in the same retry. Failed final attempts keep attempt-scoped diagnostics (`*-final-error-attempt-N-*`) when more than one attempt is configured. A draft that fails the contract is retried and then handed to the fallback synthesizer before any of it is salvaged. The dedicated `--rerun-final` workflow is unchanged and still available for reruns from preserved artifacts.
 
-Every attempt starts with a truncated temporary output and log. A report becomes the canonical Markdown artifact only after a successful non-empty result. Failed-attempt diagnostics use distinct `*-attempt-N.log` filenames. The full-run manifest records per-agent attempt counts, final agent statuses, and all failed attempts. If an agent exhausts its attempts, the current phase fails only after all other active or queued agents have settled; subsequent phases are not started.
+Every attempt starts with a truncated temporary output and log. A report becomes the canonical Markdown artifact only after a successful non-empty result. Failed-attempt diagnostics use distinct `*-attempt-N.log` filenames. The full-run manifest records per-agent attempt counts, final agent statuses, and all failed attempts. When an agent exhausts its attempts, the phase first lets all other active or queued agents settle, then applies the reviewer quorum.
+
+### Reviewer quorum
+
+`execution.quorum` decides whether a primary or cross-review phase may go on without the reviewers that failed it. The phase goes on while at least that many reviewers finished it; otherwise the run stops after the phase and later phases are not started. The value is a whole number of at least `2`, or `"all"`; the default is `2`. `1` is refused: with one reviewer left, its findings would have nobody to check them. `"all"`, or a number larger than the reviewers in the phase, stops the run on any failure. With the usual two reviewers, the default therefore stops on any failure too.
+
+The cross-review phase counts against the reviewers that finished primary review. A reviewer that failed its primary review takes no part in cross-review, and its report is not handed to anyone. One that failed only its cross-review stays a primary source. Each loss is logged, appended to `agent_losses` in the manifest, and, with a structured final, listed in the final report's verification limitations as `reviewer_dropped`. A resumed run does not retry a reviewer the quorum set aside. A Codex reviewer that is not started because of the [Codex quota](#codex-quota) counts as a lost reviewer as well. `review-pr --show-config` prints the resolved quorum.
 
 Each agent may also have an independent wall-clock limit:
 
@@ -203,8 +214,9 @@ Each agent may also have an independent wall-clock limit:
 }
 ```
 
-The default value is `0`, meaning no timeout. A positive value applies to each individual primary,
-cross-review, final, comparison, or bounded-repair attempt run by that agent. When the limit is
+The default value is `0`, meaning no timeout; the maximum is 604800 (seven days). A positive value
+applies to each individual primary, cross-review, final, comparison, repair, amendment, or
+continuation invocation run by that agent. When the limit is
 reached, the orchestrator sends `TERM`, allows a short shutdown grace period, then uses `KILL` if
 needed. The attempt fails with status `124`; its partial output, usage data, and diagnostics follow
 the normal failure-preservation and failed-only retry flow. Completed peer reports are retained.
@@ -233,12 +245,39 @@ identical to one already executed in that attempt and tells the model that the r
 its context. After the configured number of executed calls it blocks every further call and asks
 for the final output; if the model keeps calling tools regardless, the guard terminates the agent
 after a short allowance so the attempt fails within minutes rather than at the wall-clock timeout.
-`0` keeps the duplicate guard without a budget. Omitting the key runs Pi without the extension. The
-attempt log receives one summary line, for example
+The same allowance ends a model that loops on one call: more than ten blocked duplicates in a row
+terminate the agent, while an occasional repeat between new calls resets the count. The budget
+accepts 0–1000000; `0` keeps the duplicate guard, and its termination, without a budget. Omitting
+the key runs Pi without the extension. The attempt log receives one summary line, for example
 `Pi tool guard: 118 tool calls executed, 41 duplicate calls blocked, budget of 400 not reached, not terminated.`
 Only `pi` accepts this key; other agents cannot enforce it and configuration validation rejects it
 for them. The guard does not apply to bounded repair, comparison, or contract-test runs because those
 already run with tools disabled.
+
+## Codex quota
+
+`review-pr quota` reads the Codex subscription limits as Codex itself reports them, through `codex app-server` with Codex's own login. Each window is named by its length; a value Codex did not send is printed as `?` and kept as `null` in `--json` output. A reading is cached for a minute under `${XDG_CACHE_HOME:-$HOME/.cache}/review-pr/`. The command exits 0 when the quota was read, 1 when it is unavailable, and 2 when Codex answered in a shape review-pr does not know.
+
+```bash
+review-pr quota
+review-pr quota codex --json
+```
+
+To keep runs from spending the last of a window, set a threshold:
+
+```json
+{
+  "quota": {"codex": {"minimum_remaining_percent": 15}}
+}
+```
+
+The value is a number from 0 to 100, and `quota.codex` requires it. Every window counts:
+
+- A run that would start a Codex agent -- new, resumed, or `--rerun-final` -- is refused while any window has less left, naming the window and its reset time. The reviewers, the synthesizer, and the fallback synthesizer count; for a `--rerun-final`, only the two synthesizers.
+- The quota is read again before every phase. A Codex reviewer short of quota is not started for that phase and counts as a reviewer the phase lost, so the [quorum](#reviewer-quorum) decides whether the run goes on. A Codex synthesizer short of quota fails the final or the standalone comparison before it starts, without handing it to the fallback; the inputs stay for `--run` to resume.
+- A quota that cannot be read is not treated as exhausted: the run goes on and the log says the check could not be made.
+
+An agent counts as Codex when its `type`, or its key when it has no `type`, is `codex`. Without `quota.codex`, nothing is checked.
 
 ## Built-in agents, models, and reasoning effort
 
@@ -250,14 +289,14 @@ already run with tools disabled.
 {
   "agents": {
     "pi-local": {"label": "Pi local", "type": "pi", "model": "dirk-qwen3.8-27b@iq3_s", "max_tool_calls": 300},
-    "pi-cloud": {"label": "Pi cloud", "type": "pi", "model": "qwen-token-plan/qwen3.8-flash", "max_tool_calls": 120},
+    "pi-coder": {"label": "Pi coder", "type": "pi", "model": "qwen3.8-27b-coder", "max_tool_calls": 120},
     "opus": {"label": "Opus", "type": "claude", "model": "claude-opus-5", "effort": "high"}
   },
-  "reviewers": ["pi-local", "pi-cloud", "opus"]
+  "reviewers": ["pi-local", "pi-coder", "opus"]
 }
 ```
 
-The adapter decides which executable is required, how reasoning effort is spelled, whether `max_tool_calls` is accepted, and whether an event stream is preserved for diagnosis. The key keeps owning everything else: artifacts are named after it, so agents sharing an adapter never collide. A review skill is looked up by key first and by type second, so a new agent inherits its adapter's skill until it is given its own — an explicit empty entry still means "no skill". `runner` and `command` take precedence over `type`. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
+The adapter decides which executable is required, how reasoning effort is spelled, whether `max_tool_calls` is accepted, and whether an event stream is preserved for diagnosis. The key keeps owning everything else: artifacts are named after it, so agents sharing an adapter never collide. A review skill is looked up by key first and by type second, so a new agent inherits its adapter's skill until it is given its own — an explicit empty entry still means "no skill". `runner` and `command` take precedence over `type`. An empty or omitted `model` uses that CLI's current default. In particular, Pi receives neither `--model` nor `--provider` unless a model is explicitly configured. A Pi model may include its provider prefix, such as `<provider>/<model>`; it is passed to `--model` as written. When two providers Pi knows serve a model of the same name, the model is written with its provider prefix, as in `qwen-token-plan/qwen3.8-flash`. Other agents can use a declarative `command` configuration without a custom script, or a `runner` for non-standard CLI protocols.
 
 For Pi review phases, the orchestration control prompt also prohibits repeating identical tool
 calls or restarting the same inspection after context compaction. It tells the model to stop tool
@@ -273,7 +312,7 @@ rule mechanically, and the configured timeout remains the final wall-clock bound
 
 The exact model still decides whether an effort is available. For example, Claude Haiku 4.5 rejects effort, and older Claude models may support only a subset. Leave the field empty for the CLI default, or set `finalization.effort` to `""` to explicitly disable inherited agent effort for final synthesis.
 
-JSON does not support comments. The JSON Schema descriptions and this section are the authoritative list of options; the example config keeps the fields visible as empty strings.
+JSON does not support comments. The JSON Schema descriptions and this reference are the authoritative list of options. The example config pins a model and `high` effort for both of its agents and keeps `finalization.model` visible as an empty string, which means "the synthesizer's own model". It leaves `finalization.effort` out on purpose: an empty `finalization.effort` is not neutral, it disables the synthesizer's effort for the final phases.
 
 Keep an agent's configuration while temporarily excluding it from primary and cross-review with `enabled: false`. It can remain in `reviewers`; the command filters disabled reviewers before checking the minimum of two active agents. The configured synthesizer must be enabled.
 
@@ -345,12 +384,12 @@ Troubleshooting:
 - `headless mode cannot prompt` / `permission check failed`: add the exact missing **read-only** command or read-file scope through `/permissions`; do not use a global wildcard as a workaround.
 - `read_file` denied for the logical `Repository:` path: verify that the AGY runner is current. It appends the disposable runtime workspace path to the prompt; the logical repository path must not be used for file tools.
 - `connecting to sandbox server ... connection reset by peer`: this is a terminal-sandbox failure, not evidence that the command should receive a broader permission. Retry after confirming the narrow allowlist and retain the orchestrator error log for diagnosis.
-- `Antigravity returned an empty final response`: the runner preserves stream-event diagnostics in the matching `work/*-error-*.log` (`.log.gz` once `review-pr prune` has compressed it; read it with `gzip -dc`). Resolve the earliest denied tool call, then resume the same run with `review-pr <repository>#<pr> --run <timestamp>`.
+- `Antigravity returned an empty final response`: the runner preserves stream-event diagnostics in the agent's error log under `work/<timestamp>/`: `<review-id>-<timestamp>-primary-agy-error.log`, `-cross-agy-error.log`, or `-final-error.log` when AGY is the synthesizer, or an `-attempt-N.log` sibling (`.log.gz` once `review-pr prune` has compressed it; read it with `gzip -dc`). Resolve the earliest denied tool call, then resume the same run with `review-pr <repository>#<pr> --run <timestamp>`.
 - `Antigravity CLI failed` immediately after worktree preparation: inspect the CLI log under `~/.gemini/antigravity-cli/log/`. A frequent model-selection cause is `--effort is not supported for model "claude-sonnet-4-6"`; set `agents.agy.effort` to `""`, then resume the same run.
 
 ## Finalization model and reasoning effort
 
-`agents.<agent>.model` and `agents.<agent>.effort` apply when that agent runs primary and cross-review. Override either value only for final synthesis with `finalization.model` and `finalization.effort`:
+`agents.<agent>.model` and `agents.<agent>.effort` apply when that agent runs primary and cross-review. Override either value for the synthesizer's final phases with `finalization.model` and `finalization.effort`. The final phases are the final synthesis itself, its field amendment, continuation, schema repair and anchor repair, and the standalone comparison with its format repair:
 
 ```json
 {
@@ -368,7 +407,30 @@ Troubleshooting:
 }
 ```
 
-When `finalization.model` is empty or omitted, the synthesizer uses its normal agent model; if that is empty too, it uses the CLI default. Omit `finalization.effort` to inherit the synthesizer agent's effort. Include `"effort": ""` to disable an inherited effort, as in the Haiku example above, or set a supported non-empty value to override it. For Pi, an empty model continues to omit `--model` and uses its configured current default, and a non-empty effort is passed as `--thinking`.
+When `finalization.model` is empty or omitted, the synthesizer uses its normal agent model; if that is empty too, it uses the CLI default. Omitted and empty mean different things for `finalization.effort`:
+
+- left out, the final phases inherit the synthesizer agent's effort;
+- `""` disables that effort, so no effort flag is sent, as in the Haiku example above;
+- a supported non-empty value overrides it; it is validated against the synthesizer's adapter.
+
+`review-pr --show-config` prints `Final effort: (disabled) (finalization)` for the empty string. For Pi, an empty model continues to omit `--model` and uses its configured current default, and a non-empty effort is passed as `--thinking`.
+
+### Fallback synthesizer
+
+Final synthesis is the one phase no other reviewer can stand in for. `finalization.fallback_synthesizer` names an agent that takes the same inputs when the configured synthesizer has used up its attempts, whatever the reason:
+
+```json
+{
+  "synthesizer": "sonnet",
+  "finalization": {
+    "fallback_synthesizer": "opus",
+    "fallback_model": "",
+    "fallback_effort": "high"
+  }
+}
+```
+
+The fallback must have an entry under `agents` and be enabled. It must be a different agent, or the same agent on a different `fallback_model`; the same agent on the same model is refused. `fallback_model` and `fallback_effort` replace `finalization.model` and `finalization.effort` once the fallback takes over; an omitted one inherits the fallback agent's own setting in the same way, so an omitted `fallback_effort` inherits the fallback agent's own effort and `""` disables it. The fallback gets `execution.retry.max_attempts` attempts of its own, writes the standalone comparison as well, and runs at most once per run. Unlike `finalization.effort`, `fallback_effort` is not checked against the fallback's adapter when the configuration loads, and the fallback's Codex quota is read only when the run starts, not again at the handover. The handover is logged, recorded as `final_fallback` in the manifest, and, with a structured final, named in the final report's verification limitations. A Codex synthesizer that is short of [Codex quota](#codex-quota) fails the final before it starts and is not handed to the fallback.
 
 ## Review language
 
@@ -393,11 +455,11 @@ Override only a stage when needed with `languages.primary`, `languages.cross_rev
 
 The values are `EN` (English) and `UK` (Ukrainian, its ISO 639-1 code). `UA`, the country code that configurations used before, is still read as `UK`; the log warns and names each field to change.
 
-The legacy `finalization.language` remains readable for existing configurations, but new configurations should use `language` and optional stage overrides. The orchestrator tells every stage its resolved output language; this takes precedence over a conflicting skill or custom formatting instruction. It also localizes built-in cross-review headings and table columns. `CONFIRMED`, `REJECTED`, `UNCERTAIN`, and `P0`–`P3` deliberately remain fixed in both languages.
+The legacy `finalization.language` remains readable for existing configurations, but new configurations should use `language` and optional stage overrides. Despite its name, it is a global fallback: when `language` is absent it sets the language of every stage, not only the final one, and `languages.*` still override it. The orchestrator tells every stage its resolved output language; this takes precedence over a conflicting skill or custom formatting instruction. It also localizes built-in cross-review headings and table columns. `CONFIRMED`, `REJECTED`, `UNCERTAIN`, and `P0`–`P3` deliberately remain fixed in both languages.
 
 ## Structured finding contracts (opt-in)
 
-Markdown remains the default primary-agent output contract. To evaluate the versioned machine contract for new runs, enable it explicitly:
+A configuration that names no contract keeps `markdown` in every stage. The distributed example config opts into the versioned machine contract in all three stages, so a fresh installation runs it:
 
 ```json
 {
@@ -406,10 +468,16 @@ Markdown remains the default primary-agent output contract. To evaluate the vers
       "primary": "ndjson-v1",
       "cross_review": "ndjson-v1",
       "final": "ndjson-v1"
+    },
+    "comparison_sections": {
+      "cross_review": "none",
+      "final": "standalone"
     }
   }
 }
 ```
+
+The `comparison_sections` block is required here, not decoration. Without it the legacy `include_comparison_sections` default applies, both stages resolve to `inline`, and the configuration is refused at startup because structured stages cannot embed comparison material (see [Optional comparison reports](#optional-comparison-reports)).
 
 In `ndjson-v1` mode each agent returns one complete JSON object per physical line, followed by exactly one terminal `complete` record. The orchestrator validates required fields, enums, unique source IDs, completeness, producer identity, and changed-line anchors before anything is published. It then preserves the exact response as `work/*-raw.ndjson`, writes normalized `work/*-findings.json`, and deterministically renders localized `work/*.md` for humans and the next stage.
 
@@ -435,9 +503,28 @@ The orchestrator detects a dispute whenever the cross-review records that refere
 
 Validation enforces the principle that reviewer count never settles a fact: a factual or mixed dispute is `resolved` only with a method other than `manual`; a finding that covers an unresolved factual dispute cannot stay `CONFIRMED`; `not_applicable` is allowed only for severity-only disputes; and a finding whose only basis is an inferred convention cannot carry `P0` or `P1`. Failures use the granular reason format, for example `dispute_resolution_validation_failed: resolution[dispute:codex:codex.p1.notes].verification_method`, and the bounded schema repair freezes every resolution decision. Validated records are published as `work/*-final-resolutions.json` (with the detected dispute list), recorded in the manifest as `artifacts.final_resolutions`, and rendered as a localized `Dispute resolutions` table under a language-independent marker in the final report. Runs without the flag are unchanged; a resolution record they receive fails with `unexpected_resolution_records`. `--show-config` prints `Dispute resolution: enabled|disabled`.
 
-`reporting.execute_measurements: true` (default `false`, requires `dispute_resolution: true`) makes the orchestrator run the `command` a resolution proposes when its `verification_method` is `command` or `test`. Execution is deliberately narrow: the argv array runs without a shell in the review checkout at the exact PR head; only read-only tools are allow-listed (`rg`, `grep`, `ls`, `cat`, `head`, `wc`, `test`, and `git` with `show`, `log`, `diff`, `ls-tree`, `cat-file`, `grep`, `rev-parse`, `blame`); absolute or parent-directory paths, `rg --pre` and `--hostname-bin`, `git grep --open-files-in-pager` (`-O`), and `git` configuration or directory overrides are refused; each command gets a ten-second portable timeout; stdout and stderr excerpts are bounded to 2000 characters and credential-like values are redacted. The result is attached to the resolution as a separate `measurement` object (`executed`, `skipped_reason`, `exit_status`, excerpts, `duration_ms`, `commit`) in `*-final-resolutions.json`, so the model's `observed` claim and the orchestrator's measurement never mix, and the final report gains a `Measured` column. Refused commands are recorded as `skipped: not_allowlisted` and never run; artifact-only `--rerun-final` skips execution with `checkout_unavailable` because it has no checkout.
+`reporting.execute_measurements: true` (default `false`, requires `dispute_resolution: true`) makes the orchestrator run the `command` a resolution proposes when its `verification_method` is `command` or `test`. Execution is deliberately narrow: the argv array runs without a shell in the review checkout at the exact PR head; only read-only tools are allow-listed (`rg`, `grep`, `ls`, `cat`, `head`, `wc`, `test`, and `git` with `show`, `log`, `diff`, `ls-tree`, `cat-file`, `grep`, `rev-parse`, `blame`); absolute, home-relative (`~`), or parent-directory paths, including a path given after `=` in an option such as `--file=/etc/x`, any `--output` option, `rg --pre` and `--hostname-bin`, `git grep --open-files-in-pager` (`-O`), and `git` configuration or directory overrides are refused; each command gets a ten-second portable timeout; stdout and stderr excerpts are bounded to 2000 characters and credential-like values are redacted. The result is attached to the resolution as a separate `measurement` object (`executed`, `skipped_reason`, `exit_status`, excerpts, `duration_ms`, `commit`) in `*-final-resolutions.json`, so the model's `observed` claim and the orchestrator's measurement never mix, and the final report gains a `Measured` column. A refused command never runs; its `skipped_reason` is `not_allowlisted` (a program outside the list), `git_subcommand_not_allowlisted`, `unsafe_argument`, or `empty_command`; artifact-only `--rerun-final` skips execution with `checkout_unavailable` because it has no checkout.
 
-There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. Each structured prompt closes with a `BEFORE YOU SEND` checklist naming every key of each record it may emit, since a record that misses one key is rejected whole. Prose ahead of the first record is dropped before validation, without a model call, and the console says how many lines went; so is a key a `complete` record carries beyond its own six. A structurally recoverable response first receives one dedicated field-stable repair pass. A record the model finished writing but mis-punctuated is named in the repair prompt, and the repair must write every such record again: one that leaves a record out is rejected like one that rewrites a preserved finding, and salvage then counts the line as lost. A cross-review that stopped before answering every required source ref receives a continuation pass instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with the kept findings unchanged. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
+There is no automatic fallback to Markdown. Invalid or truncated structured output fails closed and preserves attempt-scoped raw output and diagnostics. Each structured prompt closes with a `BEFORE YOU SEND` checklist naming every key of each record it may emit, since a record that misses one key is rejected whole. Primary repair freezes substantive finding content. Cross-review and final repair additionally cannot change classification, severity, `source_refs`, contributing agents, anchors, or any substantive content; final repair also freezes `include_in_rejected_summary`. Every repaired, amended, or continued stream repeats complete schema, input-coverage, and anchor validation before publication. Resume uses all contracts recorded in the run manifest, so changing the current config cannot reinterpret an existing run. Manifest-backed final reruns reuse canonical cross-review sidecars. Historical manifests without these fields continue as Markdown.
+
+### Recovering an invalid structured stream
+
+A stream that fails validation goes through these steps in order. Each step runs only when the earlier ones did not produce a valid stream, and the console names what each step did.
+
+1. **Deterministic repairs**, without a model call. They change how a record is written, never what it says:
+   - Prose ahead of the first record is dropped, and so is one Markdown fence around the stream. A stream written as a JSON array -- a `[` line, records closed by commas, a `]` line, or the whole array on one line -- is unwrapped into one record per line.
+   - A record broken across physical lines is joined back, and so is one closed early and continued on a line that starts with a comma; the join stands only when the whole parses as one object.
+   - A line that does not parse is mended when a repair makes it parse: a lone backslash is doubled (a PHP class name such as `Doctrine\DBAL`), a double quote left unescaped inside a string or stray after a number is fixed, and a string value split in two is joined with a space. A stray, doubled, missing, or misplaced bracket is corrected only when exactly one reading of the line parses, and a line that ends inside an array was cut off and is left alone.
+   - Keys that only shape presentation get their only valid value: a primary finding without `classification` gets `null` and one without `contributing_agents` gets `[<reviewer>]`; a cross-review or final finding whose `contributing_agents` disagrees with its `source_refs` gets the agents of those refs; a missing or undefined `existing_feedback` becomes `unknown` (an undefined value is noted among the finding's verification limitations); a final finding without `include_in_rejected_summary` gets `false`; a `REJECTED` or `UNCERTAIN` verdict without `failure_scenario` or `recommendation` gets `null`; a key a `complete` record does not define is dropped; a `source_refs` entry whose `source_id` belongs to exactly one expected agent gets that agent's key.
+   - A character the model escaped twice, which would print as `\u2192`, is decoded in titles, claims, failure scenarios, recommendations and summaries. A `pr-level` anchor that names a file but no lines has the file moved into the evidence.
+   - A changed-line anchor on a file the pull request did not change moves to the one changed file of the same name whose changed lines hold it. With no such file, with two, or when the written path is a real file in the checkout, the anchor stays as written.
+2. **Field amendment.** A finding that lacks only its `recommendation` or `failure_scenario`, or whose anchor is not on lines the pull request changed, is sent back to the same agent for those fields alone, with its tools and the repository available. Its phase is `<stage> findings amendment`. The orchestrator sets only the fields it asked for, so the rest of each finding stays as written. A final finding is asked only for its `recommendation` or `failure_scenario`, never for an anchor. A schema repair never follows a tried amendment, because the repair may not write content either.
+3. **Schema repair or continuation**, whichever fits the failure:
+   - A schema repair is one bounded pass of the same agent without tools. It may fix structure only, under the freezes above. A record the model finished writing but mis-punctuated is named in the repair prompt, and the repair must write every such record again: one that leaves a record out is rejected like one that rewrites a preserved finding. The draft a repair, an amendment, or a continuation is compared against gets the same deterministic defaults first -- a primary finding's `contributing_agents` among them -- so a faithful pass over a draft that left such a key out is not refused for it.
+   - A cross-review or final stream gets a continuation instead when it stopped before answering every required source ref, when it also broke some records, or when the only broken fields are content the agent must write (a failure scenario, a recommendation, an anchor). The records it produced are kept, broken ones are set aside, and the same agent, with its tools, is asked for the unanswered and set-aside refs alone. A failed amendment can still be followed by a continuation, judged on the stream as the amendment left it. A final draft that already holds resolution records is not continued.
+4. **Salvage.** When nothing above produced a valid stream, each record is validated on its own, and the records that pass are published with a `complete` record that counts them. A primary or cross-review attempt is salvaged at once, which settles it without a retry; a final synthesis is salvaged only after every attempt and the fallback synthesizer have failed. Salvage needs at least one record that passes on its own. What it dropped -- unreadable lines, findings that broke the contract, source refs left unanswered, dispute resolutions that went with their findings -- is logged, appended to `salvage_losses` in the manifest, and, with a structured final, listed in the final report's verification limitations as `salvage_dropped_records`. If salvage keeps nothing, a primary or cross-review attempt fails and the ordinary retry applies, and a final synthesis fails.
+
+A cross-review or final attempt therefore costs at most three invocations of its agent -- the attempt, an amendment, and a continuation -- and a primary attempt at most two.
 
 ### Verification limitations and positive evidence
 
@@ -452,7 +539,10 @@ record:
   `changed_line_map_unavailable`, `repository_facts_measurement_failed`, failed agent attempts
   (`agent_attempt_timeout`/`_output_limit`/`_invalid_output`/`_failed` with the attempt text), Pi
   guard outcomes (`pi_guard_budget_exhausted`, `pi_guard_duplicates_blocked`), `context_compacted`, `measurement_skipped`
-  with its reason, and `checkout_unavailable` for artifact-only reruns. `type` plus `detail` is the
+  with its reason, reviewers the quorum went on without (`reviewer_dropped`), records salvage
+  dropped (`salvage_dropped_records`), a final written by the fallback synthesizer
+  (`final_synthesis_fallback`, or `final_synthesis_fallback_failed` when the fallback failed too and
+  the report is a salvaged draft), and `checkout_unavailable` for artifact-only reruns. `type` plus `detail` is the
   deduplication key.
 - `reviewers`: model-reported `verification_limitations` from every canonical sidecar of the run,
   merged when their normalized text (lower-cased, whitespace collapsed, trailing punctuation
@@ -507,7 +597,9 @@ context limits, permissions, and inference time still apply. Contract-test artif
 provider diagnostics and should be treated according to the same retention policy as review output.
 
 This command deliberately checks the first response and does not hide incompatibility behind the
-pipeline's bounded repair/retry behavior. Passing proves wire-format compatibility with the fixed
+pipeline's recovery steps. Only the stream normalization is applied: prose before the first record,
+one Markdown fence, a JSON-array wrapping, and a record broken across lines are tolerated. No line is
+mended, no key is defaulted, and there is no amendment, repair, continuation, salvage, or retry. Passing proves wire-format compatibility with the fixed
 fixture; it does not prove review quality, large-context reliability, or correctness on real code.
 
 ## Optional comparison reports
@@ -530,11 +622,11 @@ Comparison material can be controlled independently for cross-review and final s
 }
 ```
 
-`cross_review` accepts `none` or `inline`. `final` accepts `none`, `inline`, or `standalone`. The distributed default is `none` / `standalone`: cross-review outputs stay focused on classification, while a second synthesizer pass writes the extended Sources, reviewer matrix, agreements/disagreements, review-depth, conclusion, and agreed-actions material to `<review-stem>-comparison.md`. The core `<review-stem>-final.md` remains complete and actionable on its own. Splitting the output reduces the chance that a verbose local model exhausts its output-token limit before completing the required final review.
+`cross_review` accepts `none` or `inline`. `final` accepts `none`, `inline`, or `standalone`. The distributed example config uses `none` / `standalone`, which are also the values a `comparison_sections` object gets for a key it leaves out. A configuration without `comparison_sections` falls back to the legacy `include_comparison_sections` switch described below, whose default `true` means `inline` / `inline`. With `none` / `standalone`, cross-review outputs stay focused on classification, while a second synthesizer pass writes the extended Sources, reviewer matrix, agreements/disagreements, review-depth, conclusion, and agreed-actions material to `<review-stem>-comparison.md`. The core `<review-stem>-final.md` remains complete and actionable on its own. Splitting the output reduces the chance that a verbose local model exhausts its output-token limit before completing the required final review.
 
 Each section of the standalone comparison starts with a fixed `<!-- review-pr:comparison:* -->` marker that the orchestrator validates. A model now and then writes a section in full but leaves its marker out; when the section's heading is on a line of its own exactly once, the orchestrator puts the marker back above it without a model call. Any other structural problem gets one format-repair pass by the synthesizer; the log then names what failed validation, and the draft it repaired is kept as `work/<review-stem>-comparison-draft.md`.
 
-`inline` preserves the original embedded layout; `none` suppresses the extended block. The old `reporting.include_comparison_sections` boolean remains supported: `true` maps to `inline` / `inline`, and `false` maps to `none` / `none`. Explicit `comparison_sections` takes precedence. Resolved modes and standalone artifact state are recorded in full-run and final-rerun manifests and shown by `review-pr --show-config`. If standalone comparison generation fails, the valid core final report is preserved, the pipeline is marked failed at the comparison stage, and `--run <timestamp>` can resume only that missing stage.
+`inline` preserves the original embedded layout; `none` suppresses the extended block. The old `reporting.include_comparison_sections` boolean remains supported: `true` maps to `inline` / `inline`, and `false` maps to `none` / `none`. Explicit `comparison_sections` takes precedence. Because the boolean defaults to `true`, a configuration whose cross-review or final contract is `ndjson-v1` must also set `comparison_sections`, or set `include_comparison_sections` to `false`: structured cross-review requires `cross_review: "none"` and structured final synthesis refuses `final: "inline"`, and the configuration is refused at startup otherwise. Resolved modes and standalone artifact state are recorded in full-run and final-rerun manifests and shown by `review-pr --show-config`. If standalone comparison generation fails, the valid core final report is preserved, the pipeline is marked failed at the comparison stage, and `--run <timestamp>` can resume only that missing stage.
 
 ## Terminal status interface
 
@@ -549,7 +641,7 @@ In an interactive terminal the default `auto` mode renders one live dashboard di
 
 The compact dashboard cell intentionally remains a single total so the fixed 79-column layout does not wrap. Every successful agent run also writes a normalized `work/*-usage.json` file. It contains `reported_total_tokens`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`, and `cache_write_tokens` when the runner supplied them, plus `agent`, `phase`, `model`, `effort`, `reasoning_effort`, `source`, `available`, `stop_reason`, `raw_stop_reason`, `error_message`, and `output_limit_reached`. `error_message` carries the provider or CLI error text when a turn ends with `stop_reason` `error`; the orchestrator logs it instead of a generic extraction failure. `reasoning_effort` is configuration; `reasoning_tokens` is measured telemetry when exposed. `reported_total_tokens` is the native total when one is supplied; otherwise it is the sum of non-overlapping input/output/cache components. A runner that reports usage per request rather than once for the conversation is summed over its requests, since a provider bills every one of them, context resent and all; `requests` then says how many there were and `final_context_tokens` gives the last request's context, which is what the model's window has to hold. `context_compactions` counts the times the conversation was compacted to fit that window, and is `null` for a runner that does not report it rather than a guessed zero; a compaction means the agent continued from a summary of what it had read, so a run with one is also flagged in the run diagnostics. It is telemetry, not an invoice amount. A custom runner receives a summary with `available: false` unless it is extended to emit a supported structured usage response.
 
-For Pi, the orchestrator reads the authoritative final assistant `message_end` event rather than relying on streamed `text_end` fragments. A `stopReason` of `length` is reported explicitly as an output-token-limit failure. The failed attempt preserves `*-usage.json`, raw `*-events.jsonl`, and any extractable `*-truncated.md` beside its error log. This makes the provider limit and incomplete response inspectable instead of presenting the result as a generic empty-output failure. Raw event files can contain the supplied report context and should be treated as review artifacts with the same confidentiality as the reports.
+For Pi, the orchestrator reads the authoritative final assistant `message_end` event rather than relying on streamed `text_end` fragments. A `stopReason` of `length` is reported explicitly as an output-token-limit failure. The failed attempt preserves `*-usage.json`, raw `*-events.jsonl`, and any extractable output beside its error log: `*-truncated.md` after the output token limit, `*-partial.md` after any other failure, or `*-truncated-raw.ndjson` and `*-partial-raw.ndjson` in an `ndjson-v1` phase. Codex attempts keep their `*-events.jsonl` the same way. This makes the provider limit and incomplete response inspectable instead of presenting the result as a generic empty-output failure. Raw event files can contain the supplied report context and should be treated as review artifacts with the same confidentiality as the reports.
 
 The table refreshes in place by moving the cursor up by the exact fixed frame height, so it does not depend on optional DEC cursor save/restore support and does not append heartbeat lines. That only works while nothing else writes into the frame, so while the table is up the run's stderr goes to a message file and the renderer prints it above the next frame: a log line, a warning from `gh` or `git`, or a `jq` complaint cannot push the frame out of place and leave a copy of its section title behind. A final-only rerun shows `CROSS-REVIEW INPUTS`, `FINAL SYNTHESIS`, and—when enabled—`COMPARISON REPORT`, because no primary agents run. If the terminal is narrower than the table, PID is hidden before the table falls back to logs; if it is too short for the complete dashboard, it also falls back to logs.
 
@@ -620,11 +712,12 @@ For Pi, the leading orchestrator phase/output contract is also supplied through
 `--append-system-prompt`. This is intentional: Pi treats `@prompt-file` as a file attachment and may
 truncate the beginning of a large attachment before sending it to the model. Primary/cross/final
 reports and GitHub context remain untrusted user payload; only review-pr's leading control block is
-duplicated at system priority.
+duplicated at system priority. Phases that run Pi without tools -- schema repair, the standalone
+comparison, and contract tests -- pass the control block with `--system-prompt` instead.
 
 ## GitHub PR context
 
-For each Git-backed run, the orchestrator fetches and saves a timestamped `*-github-context.md` artifact in the run's `work/` directory. It contains the PR description, discussion comments, submitted reviews, inline review comments and replies, review-thread resolution/outdated state, plus check-run and commit-status results for the exact fetched PR head. REST collections and GraphQL review threads are paginated. More than 100 nested comments in one thread are reported as `partial`, because GitHub does not paginate that nested connection through the outer request.
+For each Git-backed run, the orchestrator fetches and saves a timestamped `*-github-context.md` artifact in the run's `work/` directory. It contains the PR description, discussion comments, submitted reviews, inline review comments and replies, review-thread resolution/outdated state, plus check-run and commit-status results for the exact fetched PR head. A check run that produced annotations carries them too -- level, path, start line, and message -- at most 20 per check and 60 per run, each message cut to 200 characters; failing to read them never fails the review. Check runs are read again just before final synthesis, since checks still running when the reviewers started have often settled by then; the refreshed state feeds a structured final's `KNOWN LIMITATIONS` block and diagnostics, while the context snapshot keeps what was fetched first. REST collections and GraphQL review threads are paginated. More than 100 nested comments in one thread are reported as `partial`, because GitHub does not paginate that nested connection through the outer request.
 
 The snapshot is supplied to primary, cross-review, and final agents. Its human-authored content is explicitly untrusted context, not instructions; reviewers must verify it against the checked-out code and exact diff. Mandatory REST-context failure stops the run before agents start. Review-thread GraphQL failure is different: the run continues with thread state explicitly marked `unavailable`, and prompts require conservative handling rather than interpreting it as zero unresolved threads. Reviewers identify an issue already covered by an unresolved thread as confirmation of existing feedback. Resolved or outdated feedback remains historical context and does not automatically suppress a new occurrence in the current diff.
 
@@ -715,7 +808,7 @@ inspection.
 
 ## Report layout
 
-The root of `reviews_directory` holds `run-history.jsonl`, an append-only log of every run across every configured repository, so "what ran last night" is one file rather than a walk through review directories. Each run appends two lines: one when it starts and one when it ends. Both are written, because a run that was interrupted or refused would otherwise leave no trace at all, and the end record is appended from the exit path so it survives a failure, a `die`, or Ctrl+C. A record carries the time, pull request, repository, mode (`full`, `resume`, `rerun-final`), review id, run timestamp, exit status, duration, the `review-pr` version, the configuration file, and the process id. Read commands such as `findings` and `--show-config` are not runs and are not logged.
+The root of `reviews_directory` holds `run-history.jsonl`, an append-only log of every run across every configured repository, so "what ran last night" is one file rather than a walk through review directories. Each run appends two lines: one when it starts and one when it ends. Both are written, because a run that was interrupted, or refused once it had started (nothing to review, the same head again), would otherwise leave no trace at all; a run refused before it starts, for its configuration, its arguments or the Codex quota, is not recorded, and the end record is appended from the exit path so it survives a failure, a `die`, or Ctrl+C. A record carries the time, pull request, repository, mode (`full`, `resume`, `rerun-final`), review id, run timestamp, exit status, duration, the `review-pr` version, the configuration file, and the process id. `findings`, `quota`, `prune`, `contract-test`, and `--show-config` are not runs and are not logged. The first run creates the file, and the reviews directory if needed, and `prune` reads it to tell whether a review is still running.
 
 ```bash
 jq -r 'select(.event=="finished") | "\(.at) \(.repository)#\(.pr) \(.mode) exit=\(.exit_status) \(.duration_seconds)s"' \
@@ -727,15 +820,17 @@ Each repository gets its own stable directory under the configured external `rev
 ```text
 $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
 ├── <review-id>-<timestamp>-final.md
-├── <review-id>-<timestamp>-fix-list.json        # unless reporting.findings_export = off
-├── <review-id>-<timestamp>-comparison.md
+├── <review-id>-<timestamp>-fix-list.json        # final ndjson-v1, unless findings_export = off
+├── <review-id>-<timestamp>-comparison.md        # comparison_sections.final = standalone
 ├── <review-id>-<source-timestamp>-final-rerun-<timestamp>.md
 └── work/
     └── <timestamp>/
         ├── <review-id>-<timestamp>-claude.md
-        ├── <review-id>-<timestamp>-claude-raw.ndjson       # only with ndjson-v1
-        ├── <review-id>-<timestamp>-claude-findings.json    # only with ndjson-v1
+        ├── <review-id>-<timestamp>-claude-raw.ndjson       # only with primary ndjson-v1
+        ├── <review-id>-<timestamp>-claude-findings.json    # only with primary ndjson-v1
         ├── <review-id>-<timestamp>-cross-codex.md
+        ├── <review-id>-<timestamp>-cross-codex-raw.ndjson      # only with cross-review ndjson-v1
+        ├── <review-id>-<timestamp>-cross-codex-findings.json   # only with cross-review ndjson-v1
         ├── <review-id>-<timestamp>-github-context.md
         ├── <review-id>-<timestamp>-repo-facts.json
         ├── <review-id>-<timestamp>-repo-facts.md
@@ -743,13 +838,29 @@ $HOME/review-pr/owner-repository/<pr>-<normalized-head-branch>/
         ├── <review-id>-<timestamp>-claude-usage.json
         ├── <review-id>-<timestamp>-cross-codex-usage.json
         ├── <review-id>-<timestamp>-final-usage.json
-        ├── <review-id>-<timestamp>-final-raw.ndjson       # only with final ndjson-v1
-        ├── <review-id>-<timestamp>-final-findings.json    # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-raw.ndjson         # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-findings.json      # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-diagnostics.json   # only with final ndjson-v1
+        ├── <review-id>-<timestamp>-final-resolutions.json   # only with dispute_resolution
         ├── <review-id>-<timestamp>-final-anchor-validation.json
         ├── <review-id>-<timestamp>-comparison-usage.json
         ├── <review-id>-<timestamp>-manifest.json
-        └── diagnostics and invalid-output artifacts, if any
+        └── diagnostics of failed steps, if any
 ```
+
+Diagnostics are named after the step that failed: `<stem>-primary-<agent>-error.log`,
+`<stem>-cross-<agent>-error.log`, `<stem>-final-error.log`, and `<stem>-comparison-error.log`, with
+`-resume-<timestamp>` before `-error` when a resumed run wrote them. Files of one attempt or recovery
+step extend that name: `-attempt-N`, `-fallback-<agent>` (the fallback synthesizer's attempts),
+`-schema-repair*`, `-continuation*`, `-amendment-attempt-N*`, `-anchor-*`, `-salvage*`,
+`-events.jsonl`, `-usage.json`, `-partial*` or `-truncated*` output, and `-invalid*`. `review-pr prune` may later have compressed them to `.gz`.
+
+The fix-list holds the actionable part of a structured final synthesis for an agent that will do
+the fixing. `reporting.findings_export` chooses its scope: `confirmed` (the default), `uncertain`
+(confirmed and uncertain), `all` (refuted claims too), or `off` to publish none. A run whose final
+contract is `markdown` publishes no fix-list. The same JSON is printed on demand by
+[`review-pr findings`](#exporting-findings), and the manifest names the file as
+`artifacts.final_findings_export`.
 
 The orchestration prompt deliberately gives agents no report directory or output path. In orchestrated mode, any reviewer-skill instruction about creating, naming, or storing files is manual-mode-only; agents must return Markdown and the orchestrator persists it atomically. Existing historical runs stored directly under `<reviews_directory>/<review-id>/` or the old checkout-local `docs/reviews/` remain readable by `--rerun-final`. Runs made before the per-run work directory kept their files directly in `work/`; resume and artifact-only reruns recognise that layout from the manifest's own location and keep working on them unchanged.
 
@@ -820,7 +931,34 @@ Resume a failed full run by supplying its timestamp without `--rerun-final`:
 review-pr repository#123 --run 20260901-154503-CEST
 ```
 
-The command verifies the manifest and exact PR head, then resumes from the first incomplete phase. It runs only agents whose canonical report is missing, empty, or unsafe; completed reports are reused unchanged. A resumed cross-review therefore reruns only its failed reviewer and then continues to final synthesis. A complete run is refused; use `--rerun-final` to create another final report.
+The command verifies the manifest and exact PR head, then resumes from the first incomplete phase. It runs only agents whose canonical report is missing, empty, or unsafe; completed reports are reused unchanged. A reviewer the run went on without under its [quorum](#reviewer-quorum) is not run again, because that would cost another review and change the inputs of the synthesis. A resumed cross-review therefore reruns only its failed reviewer and then continues to final synthesis. A complete run is refused; use `--rerun-final` to create another final report. `--run last` resumes the newest full run of the pull request and logs which one it chose.
+
+The reviewers come from the run's manifest, and each of them must still have an enabled entry under `agents` in the current configuration; otherwise the resume stops with `Reviewer <agent> from the selected run is disabled or missing in the current configuration`. `--run` does not accept `--reviewers`, so a run started with `--reviewers` that named an agent with `enabled: false` can be resumed only after that agent is enabled in the configuration.
+
+## Refused runs
+
+Two checks run before a new full run starts any reviewer. Neither applies to `--run` or `--rerun-final`.
+
+- **Nothing to review.** When `git diff BASE...HEAD` is empty, the run is refused. The message says whether the head is already contained in the base -- typically a pull request stacked on a branch that has merged it through another pull request -- or whether its commits cancel out.
+- **Same head, same methodology.** The run is refused when a complete full run of the pull request already reviewed the same head SHA and base SHA, and the newest such run recorded the same methodology hash. The hash covers the review-pr version, the configured `prompts`, and the skill and checklist texts embedded for every reviewer, the synthesizer, and the fallback synthesizer. A changed head, base, or methodology lets the run go ahead and the log says why; so does a matching run that recorded no methodology. Pass `--same-head` to repeat the review on purpose:
+
+```bash
+review-pr --same-head repository#123
+```
+
+The fix-list and the manifest record what produced them: head and base SHAs and refs, the review-pr version, the methodology hash, the kind of run, and the seconds each phase took.
+
+## Exporting findings
+
+`review-pr findings` prints the actionable part of the newest structured final synthesis of a pull request as JSON on standard output, in the same shape as the fix-list:
+
+```bash
+review-pr findings repository#123
+review-pr findings --include uncertain repository#123
+review-pr findings --run last repository#123
+```
+
+`--include` takes `confirmed` (the default), `uncertain`, or `all`; it does not read `reporting.findings_export`. Without `--run`, or with `--run last`, the newest structured final synthesis is used, a `--rerun-final` included, judged by the time its manifest recorded; runs whose final contract is `markdown` have nothing to export and are skipped. The command is refused when no structured final synthesis exists, or when `--run <timestamp>` names a run without one. The command only reads published artifacts: it starts no agent, writes nothing, and is not recorded in the run history. Each entry carries the id, classification, severity, category, anchor, title, claim, failure scenario, recommendation, and verification limitations; findings without a changed-line anchor are listed last. A `review` object names the head, base, version, methodology hash, run kind (`full` or `final-rerun`), and phase durations; a field the run's manifest did not record is `null`. `--run <timestamp>` selects that run, or the newest `--rerun-final` made from it.
 
 ## Add an agent without writing code
 
@@ -843,7 +981,7 @@ For the common CLI contract, no adapter script is needed. Configure `agents.<nam
 }
 ```
 
-This is the recommended path for a new CLI that can accept a prompt via stdin and write its final Markdown answer to stdout. Each invocation runs in a disposable detached worktree at the exact checked-out PR head; the worktree is removed when it settles, so accidental source edits cannot change the dedicated review checkout. Configure the agent's own read-only/non-interactive mode as well when it offers one.
+This is the recommended path for a new CLI that can accept a prompt via stdin and write its final Markdown answer to stdout. Each invocation that works on the checkout runs in a disposable detached worktree at the exact checked-out PR head; the worktree is removed when it settles, so accidental source edits cannot change the dedicated review checkout. The final phases of an artifact-only `--rerun-final` run in the report directory instead, and a contract test in its output directory, without a worktree. In a review the command receives the same environment variables as a runner (see [Custom agent adapters](#custom-agent-adapters)), with `REVIEW_PR_REPO` naming the worktree; in a contract test it receives only the agent, phase, contract, model, effort, attempt and usage-file variables, `REVIEW_PR_REPO`, `REVIEW_PR_NUMBER=0` and `REVIEW_PR_CONTRACT_TEST`, and no other pull-request fields. Configure the agent's own read-only/non-interactive mode as well when it offers one.
 
 Arguments are never interpreted by a shell. Exact placeholder arguments can be used when a CLI needs a prompt-file path or PR context rather than stdin:
 
@@ -851,7 +989,7 @@ Arguments are never interpreted by a shell. Exact placeholder arguments can be u
 "command": ["other-agent", "--prompt-file", "{{prompt_file}}", "--model", "{{model}}"]
 ```
 
-Supported placeholders are `{{prompt_file}}`, `{{repository}}`, `{{model}}`, `{{effort}}`, `{{phase}}`, `{{pr_number}}`, `{{base_ref}}`, `{{head_ref}}`, `{{base_sha}}`, and `{{head_sha}}`. Placeholders must occupy a complete array item. If the CLI requires a model flag, configure a non-empty `agents.<name>.model`; the command array deliberately does not invent or remove CLI-specific flags. A generic command does not have structured token telemetry, so its dashboard `Tokens` value is `-` unless the command itself writes the normalized usage files documented below.
+Supported placeholders are `{{prompt_file}}`, `{{repository}}`, `{{model}}`, `{{effort}}`, `{{phase}}`, `{{pr_number}}`, `{{base_ref}}`, `{{head_ref}}`, `{{base_sha}}`, and `{{head_sha}}`. Placeholders must occupy a complete array item. If the CLI requires a model flag, configure a non-empty `agents.<name>.model`; the command array deliberately does not invent or remove CLI-specific flags. A generic command does not have structured token telemetry, so its dashboard `Tokens` value is `-` unless the command itself writes the usage files described under [Custom agent adapters](#custom-agent-adapters).
 
 ## Custom agent adapters
 
@@ -876,46 +1014,62 @@ Use an executable `runner` only when the CLI cannot use the standard input/Markd
 
 `runner` and `command` are mutually exclusive. A runner:
 
-- runs with the review repository as its working directory;
+- runs in the review checkout; the final phases of an artifact-only `--rerun-final` run it in the report directory, and a contract test in its output directory (`REVIEW_PR_REPO` names the directory in each case);
 - reads the complete orchestration prompt from stdin;
-- writes only the phase payload to stdout: Markdown by default, or NDJSON when the current primary, cross-review, or final phase selects `ndjson-v1`;
-- writes diagnostics to stderr;
-- exits non-zero on failure;
-- must not switch branches or modify repository files.
-
-Custom adapters retain the same stdout contract selected by the orchestrator; they do not gain structured token telemetry from the finding contract. Their `Tokens` cell therefore remains `-` unless the adapter writes the normalized usage files; this is intentional rather than an estimate.
+- writes only the phase payload to stdout: Markdown by default, or NDJSON when `REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1`;
+- writes diagnostics to stderr, which become the attempt's error log on failure;
+- exits non-zero on failure; an exit status of 0 with empty stdout fails the attempt as well, and an attempt the orchestrator stopped at `timeout_seconds` fails with status 124;
+- must not switch branches or modify repository files. Unlike a `command`, a runner gets no disposable worktree from the orchestrator; the bundled `review-pr-agy` creates its own.
 
 The orchestrator exports these variables to it:
 
 ```text
-REVIEW_PR_AGENT
-REVIEW_PR_PHASE
-REVIEW_PR_OUTPUT_CONTRACT
-REVIEW_PR_MODEL
-REVIEW_PR_EFFORT
-REVIEW_PR_ATTEMPT
-REVIEW_PR_MAX_ATTEMPTS
-REVIEW_PR_REPO
-REVIEW_PR_NUMBER
+REVIEW_PR_AGENT            agent key
+REVIEW_PR_PHASE            phase name, listed below
+REVIEW_PR_OUTPUT_CONTRACT  markdown or ndjson-v1
+REVIEW_PR_MODEL            resolved model, empty for the CLI default
+REVIEW_PR_EFFORT           resolved effort, empty for none
+REVIEW_PR_ATTEMPT          attempt number, from 1
+REVIEW_PR_MAX_ATTEMPTS     execution.retry.max_attempts (1 in a contract test)
+REVIEW_PR_REPO             working directory, as above
+REVIEW_PR_NUMBER           PR number (0 in a contract test)
 REVIEW_PR_BASE_SHA
 REVIEW_PR_HEAD_SHA
+REVIEW_PR_BASE_REF
+REVIEW_PR_HEAD_REF
 REVIEW_PR_TITLE
 REVIEW_PR_TASK
 REVIEW_PR_AUTHOR
 REVIEW_PR_CHANGED_FILES
 REVIEW_PR_ADDITIONS
 REVIEW_PR_DELETIONS
-REVIEW_PR_BASE_REF
-REVIEW_PR_HEAD_REF
+REVIEW_PR_ARTIFACT_ONLY    true when there is no checkout to read: artifact-only rerun, contract test
+REVIEW_PR_CONTRACT_TEST    true in a contract test
+REVIEW_PR_USAGE_FILE       file for the total token count
+REVIEW_PR_USAGE_JSON       file for the normalized usage summary
 ```
 
-`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` for an opted-in primary, cross-review, or final-synthesis phase and `markdown` for legacy phases and comparison synthesis. A runner should still treat the prompt as authoritative for the complete phase-specific schema and rules.
+In a contract test a runner's PR fields describe a fixture; a `command` agent gets none of them but `REVIEW_PR_NUMBER=0`. A `command` agent receives `REVIEW_PR_ARTIFACT_ONLY` only when it is `true`, and `REVIEW_PR_CONTRACT_TEST` only in a contract test.
 
-When an opted-in primary response is structurally repairable, the same agent may receive one
-additional `REVIEW_PR_PHASE=primary findings repair` invocation with
-`REVIEW_PR_OUTPUT_CONTRACT=ndjson-v1`. This pass is formatting/schema repair only: it must not inspect
-source or change, add, remove, split, merge, translate, or reorder findings. The orchestrator compares
-all substantive fields against a parsed baseline and rejects the repair on any difference.
+Token usage is the adapter's to report. Before it starts, `REVIEW_PR_USAGE_JSON` holds a summary with `available: false`. An adapter that knows its usage overwrites that file with the normalized summary described under [Terminal status interface](#terminal-status-interface) and writes the total as one integer on the first line of `REVIEW_PR_USAGE_FILE`, which the dashboard shows as `Tokens`. A `stop_reason` of `length` in the summary marks the attempt as stopped by the output token limit. The bundled `review-pr-agy` does both. An adapter that writes neither keeps `-`; this is intentional rather than an estimate.
+
+`REVIEW_PR_OUTPUT_CONTRACT` is `ndjson-v1` for an opted-in primary, cross-review, or final-synthesis phase and its recovery passes, and `markdown` for legacy phases and comparison synthesis. A runner should still treat the prompt as authoritative for the complete phase-specific schema and rules. `REVIEW_PR_PHASE` is one of:
+
+| Phase | When |
+| --- | --- |
+| `primary review`, `cross-review`, `final synthesis` | the three stages; the final anchor repair of a `markdown` final also runs as `final synthesis` |
+| `comparison synthesis` | the standalone comparison and its format repair |
+| `primary findings amendment`, `cross-review findings amendment`, `final findings amendment` | the field amendment |
+| `primary findings repair`, `cross-review findings repair`, `final findings repair` | the schema repair |
+| `cross-review findings continuation`, `final findings continuation` | the continuation |
+
+The recovery passes follow the order in [Recovering an invalid structured stream](#recovering-an-invalid-structured-stream). What an adapter needs to know about each:
+
+- A **field amendment** asks for named fields of named findings. The reply is one JSON object per listed finding, and the orchestrator copies only the requested fields into the draft.
+- A **schema repair** is formatting and schema work only: it must not inspect source or change, add, remove, split, merge, translate, or reorder findings. The orchestrator compares all substantive fields against a parsed baseline and rejects the repair on any difference. Cross-review and final repair also freeze classification, severity, source provenance, and contributing agents, and final repair freezes `include_in_rejected_summary`. Primary provenance is still derived by the orchestrator and must not be emitted by the model.
+- A **continuation** is not a repair. The agent keeps its tools and receives the original prompt again, followed by a continuation block that names the records it already produced and a `PENDING SOURCE REFS` block that replaces `REQUIRED SOURCE REFS` for that pass. The model answers only the listed refs and ends with one `complete` record counting the kept and the new findings together; a final continuation also emits the complete set of resolution records when the prompt requires them. The orchestrator appends the reply to the kept records, validates the merged stream as an ordinary stage, and compares the leading findings against the kept ones field by field. Rewriting, reordering, or dropping a kept finding rejects the continuation.
+
+Each pass repeats the complete schema, input-coverage, and changed-line validation. A failed or content-changing final pass publishes no canonical final NDJSON, sidecar, or Markdown report.
 
 Every canonical record supplied to a reviewer carries `record_ref`, the exact
 `{"agent":…,"source_id":…}` object to copy when citing it: the primary records handed to a
@@ -924,29 +1078,36 @@ pair an id from the record with an agent key from the block header, and a mis-pa
 validation as a missing plus unknown source ref. The finalizer's copy also keeps `primary_provenance`,
 the upstream primary refs, which is never the pair to cite.
 
-Structured cross-review has an equivalent `REVIEW_PR_PHASE=cross-review findings repair` pass. It
-also freezes classification, severity, source provenance, and contributing agents, then reruns the
-complete schema, input-coverage, and changed-line validation before publishing any artifact.
+Every reviewer runs primary review and then cross-review, each up to `execution.retry.max_attempts` times; a reviewer that still fails is left out under the [quorum](#reviewer-quorum). A cross-reviewer receives every other surviving primary report but never its own. The configured synthesizer then receives the surviving cross-reviews: under the `markdown` final contract it also receives the primary reports, while under `ndjson-v1` it receives only the canonical cross-review findings, which carry their primary provenance. This is the core `N -> N -> 1` pipeline. When final comparison mode is `standalone`, one additional, bounded synthesis pass produces the optional companion comparison report without changing the core final verdict.
 
-A cross-review stream that stops before it answers every required source ref gets a different
-pass instead: `REVIEW_PR_PHASE=cross-review findings continuation`. It is not a repair. The agent
-keeps its tools and receives the original cross-review prompt again, followed by a continuation
-block that names the records it already produced and a `PENDING SOURCE REFS` block that replaces
-`REQUIRED SOURCE REFS` for that pass. The model answers only the listed refs and ends with one
-`complete` record counting the kept and the new findings together. The orchestrator appends the
-reply to the kept records, validates the merged stream as an ordinary cross-review, and compares
-the leading findings against the kept ones field by field. Rewriting, reordering, or dropping a
-kept finding rejects the continuation and the run falls back to the ordinary retry. The
-continuation replaces the repair pass for that attempt, so an attempt still costs at most two
-invocations, and it runs only when the failure diagnostic names nothing but `stream.no_complete`
-and `source_refs.missing[...]`.
+## Maintenance and storage
 
-Structured final synthesis uses `REVIEW_PR_PHASE=final findings repair` for the equivalent bounded
-pass. It also freezes `include_in_rejected_summary`; primary provenance is still derived by the
-orchestrator and must not be emitted by the model. A failed or content-changing repair publishes no
-canonical final NDJSON, sidecar, or Markdown report.
+### Scratch directory
 
-Every configured reviewer runs once successfully during primary review and once successfully during cross-review, subject to the configured attempt limit. A cross-reviewer receives every other primary report but never its own. The configured synthesizer then receives all primary and cross-review reports, producing the core `N -> N -> 1` pipeline. When final comparison mode is `standalone`, one additional, bounded synthesis pass produces the optional companion comparison report without changing the core final verdict.
+A run keeps its intermediate files -- prompts, agent streams and logs while they are written, the steps between a stream and its records, the dashboard state -- in a private scratch directory, and moves only finished artifacts into the work directory. Endpoint scanners that check every file write often leave `/dev/shm` alone, so this spares them thousands of checks.
+
+- By default the directory is `/dev/shm/review-pr-<uid>/run-<pid>-<n>` (mode 700), used when `/dev/shm` is writable and has at least 256 MiB free. Otherwise, on macOS for one, the work directory is used as before, without a message.
+- `REVIEW_PR_SCRATCH_DIR=<path>` names another root; a relative path is taken from the directory `review-pr` was started in. A root that cannot be created, is not a directory owned by the user, or cannot be made private is reported in the log, and the work directory is used.
+- `REVIEW_PR_SCRATCH_DIR=work` keeps every intermediate file in the run's work directory.
+
+The directory is removed when the run ends. One left by a killed run is removed by the next run that uses the same root, once its process is gone. A file published from the scratch directory to another file system is copied next to its target under a hidden name and renamed into place, so an artifact is never seen half-written.
+
+### Pruning the reviews directory
+
+Most of a reviews directory is what agents streamed and logged, kept only to look into a run that went wrong. `prune` compresses those files for pull requests that are finished and removes temporary files killed runs left behind:
+
+```bash
+review-pr prune           # says what it would do, changes nothing
+review-pr prune --apply   # does it
+```
+
+- **Compressed with gzip:** agent event streams (`*-events.jsonl`), logs (`*.log`), and the files of failed attempts and recovery steps (amendments, schema repairs, continuations, the fallback synthesizer and salvage) in the work directories of pull requests GitHub reports as merged or closed.
+- **Removed:** hidden temporary files (`.*.tmp.*`, staged `.*.publish.*` and `.*.update.*` files, measurement scratch files) left in any review, open or not.
+- **Never touched:** reports, fix-lists, manifests, findings, usage files, prompts, and every file a manifest names; the streams and logs of an open pull request, or of one whose state or repository is not certain; any file changed in the last day; and agent worktrees a killed run left, which are counted and can be removed with `git worktree remove --force <path>` in the review checkout.
+
+Only reviews under `<reviews_directory>/<owner>-<repository>/` are considered, and a review counts only when the folder it sits in matches exactly one repository known from its manifests, the run history, or the configuration. PR states are read from GitHub in batches, so `prune` needs `gh`. Without `--apply` it prints, per pull request, its state and how many files it would compress and remove, then the total size of each. `--apply` refuses to start while the run history shows a review still running, and checks again just before it changes anything. A file gzip could not compress is left as it was and counted; run `prune` again to retry. A resume, `--rerun-final`, `findings`, and `--same-head` keep working on a pruned review. Read a compressed log with `gzip -dc`.
+
+`prune` takes no pull-request target and cannot be combined with another subcommand or with `--show-config`, `--run`, `--rerun-final`, `--force`, `--same-head` or `--reviewers`; `--apply` is accepted only with `prune`.
 
 ## Parallel pull requests and Git worktrees
 
