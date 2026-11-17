@@ -1,0 +1,911 @@
+# review-pr
+
+`review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.29.0`.
+
+The public core is repository- and language-agnostic. Repository-specific profiles, prompts, and
+review skills belong in user configuration or separately distributed team overlays.
+
+## Requirements
+
+Required on every platform:
+
+- Bash 5.1 or newer (the macOS system Bash 3.2 is not sufficient);
+- Git 2.23 or newer, including `git switch`;
+- GitHub CLI (`gh`), authenticated for the repository;
+- `jq` 1.6 or newer;
+- a dedicated clone used only for PR reviews, with an `origin` remote;
+- at least two configured review-agent commands and one configured final synthesizer.
+
+Built-in agent commands are `claude`, `codex`, and `pi`. Only commands referenced by the active configuration are required. A team member without a local LLM may omit Pi and use two hosted agents, or add another CLI declaratively through `agents.<name>.command` without writing code.
+
+The orchestrator itself has no PHP, Composer, Docker, Node.js, or Python dependency.
+
+## Source test suite
+
+Contributors working from the source repository can run the deterministic orchestration suite with:
+
+```bash
+./tests/review-pr/run.sh
+```
+
+It uses disposable local Git repositories, a fake `gh`, and mock agent runners. It exercises the
+complete `N → N → 1` flow, failure/resume/rerun behavior, and installer configuration preservation
+without contacting GitHub, invoking a real model, or touching the user's configuration. It also
+tests default-branch and stacked-PR facts, reference ancestry, explicit unknowns, and atomic failure
+before agents start. It also covers RIGHT-side line maps, renames, deleted/binary/context lines,
+PR-level findings, and bounded final-anchor repair. The suite is a source-development asset and is
+not included in the current end-user archive.
+
+`packaging/private-data-audit.sh` scans every Git-tracked text file for personal home paths,
+private network addresses, and credential-like values. It runs as part of the test suite and again
+before `packaging/build-package.sh` stages a release, so a private path cannot reach the public
+repository or package unnoticed. Generic placeholder paths used in documentation are declared in
+`packaging/private-data-allowlist.txt`. Patterns that would themselves name something private, such
+as a company, internal repositories, ticket keys or colleagues, belong in
+`packaging/private-data-patterns.local`, which Git ignores, or in a file passed with `--patterns`;
+they are checked only where that file exists.
+
+## Test real agent contract compatibility
+
+A fresh installation runs `ndjson-v1` in every stage. Before relying on it with a new CLI or
+model, test that CLI/model without fetching or reviewing a pull request:
+
+```bash
+review-pr contract-test --agent codex --phase all
+review-pr contract-test --agent pi --phase final --output "$HOME/review-pr-contract-pi"
+```
+
+The command sends a small fixed fixture through the selected `primary`, `cross`, and/or `final`
+contract, then runs the production validators and deterministic Markdown renderers. It runs agents
+sequentially and preserves the prompt, raw output, stderr, normalized usage, canonical findings,
+rendered Markdown, and `summary.json`. No configured review checkout, Git operation, GitHub request,
+or real PR is involved. The selected CLI/model is still invoked, so hosted API usage, subscription
+limits, and local inference time still apply. An explicitly named configured agent may be tested
+while disabled; with no `--agent`, enabled reviewers plus the enabled synthesizer are selected.
+Without `--output`, the artifacts go to `<reviews directory>/contract-tests/<timestamp>/`. An
+`--output` directory must be an absolute path that does not exist yet; an existing one is refused.
+
+## Windows
+
+`review-pr` runs on Linux and macOS. On Windows, install and run it inside WSL2, which is a Linux
+system: the agent CLIs, the review checkout and the reviews directory all belong inside WSL2 then,
+and `/dev/shm` there is the tmpfs a run keeps its intermediate files in. Git Bash, MSYS2 and Cygwin
+are not supported: their `/dev/shm` is an ordinary folder on the Windows disk, and every process
+they start is slow, which a run starting thousands of them would feel.
+
+## macOS prerequisites
+
+Install Homebrew if it is not already present, then:
+
+```bash
+brew install bash git gh jq
+gh auth login
+```
+
+Both Apple Silicon (`/opt/homebrew`) and Intel Homebrew (`/usr/local`) are detected. The installed launcher executes Homebrew Bash directly, so changing the login shell is unnecessary.
+
+Install and authenticate the chosen agent CLIs separately. Confirm that each configured command is available:
+
+```bash
+command -v claude
+command -v codex
+command -v pi
+```
+
+## Linux prerequisites
+
+Use the distribution package manager for Bash, Git, and jq. For Debian/Ubuntu-based systems:
+
+```bash
+sudo apt-get update
+sudo apt-get install bash git jq
+```
+
+For Fedora-based systems:
+
+```bash
+sudo dnf install bash git jq
+```
+
+Install GitHub CLI using the package or official repository appropriate for the distribution, then authenticate:
+
+```bash
+gh auth login
+```
+
+Check that Bash is new enough:
+
+```bash
+bash --version
+```
+
+## Install optional agent CLIs
+
+Install only the agents enabled in your `config.json`. `review-pr` needs at least two enabled reviewers and an enabled synthesizer, but they do not have to be all of the built-in agents. The commands below are the vendors' current macOS/Linux instructions; use the linked official documentation as the source of truth if a vendor changes its installer or authentication flow.
+
+### Claude Code
+
+If `claude` is absent, install the native CLI and then start it once to authenticate:
+
+```bash
+command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash
+claude --version
+claude
+```
+
+See the [official Claude Code quickstart](https://code.claude.com/docs/en/quickstart) for Homebrew, Windows, account, and update options.
+
+### Codex CLI
+
+If `codex` is absent, install it and run it once to choose a sign-in method:
+
+```bash
+command -v codex >/dev/null 2>&1 || curl -fsSL https://chatgpt.com/codex/install.sh | sh
+codex --version
+codex
+```
+
+See the [official Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli) for supported installation methods, authentication, and updates.
+
+### Pi
+
+Pi is optional. If you enable it, leave its model/provider empty in `review-pr` when you want Pi to use its own configured default. `agents.pi.effort` (and `finalization.effort` when Pi synthesizes) maps to Pi's `--thinking` level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; leave it empty to keep the model default. Install the current Pi CLI only when `pi` is absent:
+
+```bash
+command -v pi >/dev/null 2>&1 || curl -fsSL https://pi.dev/install.sh | sh
+pi --version
+pi
+```
+
+On its first interactive run, use `/login` or configure the desired provider as documented by the [official Pi documentation](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/docs). Leave Pi's `model` empty in `review-pr` to use the provider/model configured as Pi's current default.
+
+### Google Antigravity CLI
+
+Google Antigravity's terminal agent is named `agy`. Install and authenticate it once before enabling it in `review-pr`:
+
+```bash
+command -v agy >/dev/null 2>&1 || curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy --version
+agy
+```
+
+The first interactive run uses the local secure keyring or opens Google sign-in. See the [official Antigravity installation and authentication guide](https://antigravity.google/docs/cli/install/) for API-key and enterprise setup.
+
+The package installs a safe custom runner at `<prefix>/libexec/review-pr/review-pr-agy`. It gives every AGY call a disposable private copy of the checkout at the PR head, so Antigravity can inspect the exact PR but any accidental source edits are discarded. The copy has its own objects, so it needs room in `$TMPDIR` for the checkout's `.git`. Add it as a reviewer with an absolute path matching the selected prefix:
+
+```json
+{
+    "agents": {
+      "agy": {
+        "label": "Antigravity",
+        "enabled": true,
+        "model": "gemini-3.8-flash-high",
+        "effort": "",
+        "runner": "/Users/example/.local/libexec/review-pr/review-pr-agy"
+      }
+    },
+    "profiles": {
+      "php": {"skills": {"agy": "php-code-review"}}
+    },
+    "reviewers": ["claude", "codex", "pi", "agy"]
+}
+```
+
+Leave `model` empty to use Antigravity's current default. Its CLI accepts `low`, `medium`, and `high` as an optional `effort` value, but support is model-specific. Do not set a separate effort when selecting a model slug that already encodes it, such as `gemini-3.8-flash-high`; set `"effort": ""`. In particular, current AGY rejects `--effort` for `claude-sonnet-4-6`, so use `"model": "claude-sonnet-4-6", "effort": ""`; its `Thinking` capability is part of the selected model. It also forwards Antigravity's native JSON token usage into `work/*-usage.json` and the dashboard's `Tokens` column. The public core does not bundle an Antigravity review skill; configure an optional native or team-provided skill name when needed.
+
+Before enabling AGY in a headless pipeline, configure a read-only allowlist in its `/permissions` at **Global** scope: rules saved for a project tied to the review checkout do not reach the new workspace directory of each call. `review-pr` uses AGY's preview terminal sandbox and a disposable copy of the checkout; it does **not** use `--dangerously-skip-permissions` and must not receive a broad `unsandboxed(*)` or write permission. The installed `reference.md` documents the minimal read-only allowlist, failure messages, and recovery steps.
+
+### Cursor Agent CLI
+
+Cursor provides the `cursor-agent` CLI. It can be configured directly with `agents.<name>.command` when its selected non-interactive mode accepts stdin and returns final Markdown on stdout; a wrapper is needed only for a non-standard JSON/event protocol.
+
+```bash
+command -v cursor-agent >/dev/null 2>&1 || curl https://cursor.com/install -fsS | bash
+cursor-agent --version
+```
+
+See the [official Cursor CLI installation guide](https://docs.cursor.com/en/cli/installation) and [headless/automation guide](https://docs.cursor.com/en/cli/headless) for authentication and non-interactive use.
+
+## Current model reference
+
+This table is a convenience snapshot checked on 2026-09-23. Providers can change model availability, names, and account entitlements without a `review-pr` release; use each vendor's linked documentation and the CLI's own selector as the source of truth before pinning a model.
+
+| CLI | Model IDs / slugs in the current reference | How to verify current availability |
+| --- | --- | --- |
+| Claude Code | `claude-opus-5-5`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` | [Anthropic model status](https://docs.anthropic.com/en/docs/about-claude/model-deprecations) and `claude --model <id>`; a subscription or organization may expose only a subset. |
+| Codex | `gpt-6.1-sol` (the default), `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`; refreshed on 2026-09-30 from the `model/list` call of `codex app-server` in codex-cli 0.159.0 | [OpenAI Docs model selector](https://learn.chatgpt.com/docs/models) or Codex's `/model`; the visible selection depends on the account and plan. |
+| Google Antigravity (`agy`) | `gemini-3.8-flash-high`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`; refreshed on 2026-10-19 from `agy models` in Antigravity CLI 1.4.2 | Run `agy models`. The official [headless CLI documentation](https://antigravity.google/docs/cli/headless/) lists supported flags and examples; results vary by account and configured provider. |
+| Pi | `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.6-flash` from a hosted provider; any local build the runtime serves, for example `dirk-qwen3.8-27b@iq3_s` | Run `pi --list-models [search]`. It prints the provider, context window, maximum output, and whether the model supports a thinking level, for exactly the providers that account has configured. |
+
+Pi is the one CLI whose catalogue is machine-readable per account, so `pi --list-models` is authoritative where the other rows are a snapshot. It also answers the question the table cannot: a model is only worth an `effort` if its `thinking` column says `yes`. `dirk-qwen3.8-27b@iq3_s` supports one and `@iq3_xxs` does not, though both are the same model at different quantisations.
+
+Claude's efforts are `low`, `medium`, `high`, `xhigh`, and `max`. Codex's efforts are `none`, `low`, `medium`, `high`, `xhigh`, `max` and, on the models that list it, `ultra` (the GPT-6 and GPT-5.6 Sol and Terra models on that date; the Luna models and `gpt-5.5` stop at `max` or `xhigh`). Pi's thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Every adapter also accepts `auto`, which sends no level at all.
+
+[Artificial Analysis](https://artificialanalysis.ai) compares these models on independent benchmarks, price and speed, which is the missing half of the picture: this table says what a CLI will accept, not which of them is worth the tokens for a review.
+
+The Antigravity list above is from `agy models` on the maintainer's Antigravity CLI 1.4.2 account on 2026-10-19, not a guarantee that every account receives every model: another account on CLI 1.3.5 was not offered every model the documentation had named. The bundled runner was checked with CLI 1.4.2 on Linux and 1.3.5 on macOS.
+
+## Prepare the dedicated repository
+
+Create a separate clone for each repository you want to review. Never point a configured repository checkout at a development checkout containing unrelated work:
+
+```bash
+git clone git@github.com:YOUR-ORG/YOUR-REPOSITORY.git "$HOME/Review"
+```
+
+The configured path must be absolute.
+
+## Get the package
+
+`review-pr` is distributed as a source checkout, not as a binary. There are three
+ways to reach an installable tree, and the first one is enough for most people.
+
+### From a checkout
+
+Clone the repository and check out the release you want. `main` is the current
+development line; a tag is a released version:
+
+```bash
+git clone git@github.com:oforostianyi/review-pr.git "$HOME/src/review-pr"
+cd "$HOME/src/review-pr"
+git checkout v1.29.0        # or stay on main for the development version
+```
+
+The checkout is directly installable — skip to **Install** and run `./install.sh`
+from this directory. Nothing has to be packaged first.
+
+### As an archive
+
+Build the distributable archive when you need to hand `review-pr` to a machine
+that will not clone the repository, or to pin exactly what was installed:
+
+```bash
+packaging/build-package.sh
+```
+
+It writes two files into `dist/` and refuses to build when `VERSION` and
+`bin/review-pr` disagree or when the private-data audit finds anything:
+
+```text
+dist/review-pr-1.29.0.tar.gz
+dist/review-pr-1.29.0.tar.gz.sha256
+```
+
+Copy both to the target machine. `REVIEW_PR_DIST_DIR=<path>` writes them
+somewhere else.
+
+### From a release
+
+Tagged releases carry the same two files, built and checked by CI from the tagged
+commit, so a target machine needs neither a clone nor a build:
+
+```bash
+gh release download v1.29.0 --repo oforostianyi/review-pr --pattern 'review-pr-*'
+```
+
+## Install
+
+From a checkout, run the installer in place:
+
+```bash
+./install.sh --repo "$HOME/Review" --reviews-dir "$HOME/review-pr"
+```
+
+From an archive, verify the checksum first, then extract and run the same
+installer. Verifying is the point of shipping the `.sha256` beside it — a
+truncated download otherwise fails much later and much less clearly:
+
+```bash
+sha256sum -c review-pr-1.29.0.tar.gz.sha256   # Linux
+# or: shasum -a 256 -c review-pr-1.29.0.tar.gz.sha256  # macOS
+tar -xzf review-pr-1.29.0.tar.gz
+cd review-pr-1.29.0
+./install.sh --repo "$HOME/Review" --reviews-dir "$HOME/review-pr"
+```
+
+`--repo` is the dedicated review checkout created above and must be absolute;
+`--reviews-dir` is where reports are written and defaults to `$HOME/review-pr`.
+Run `./install.sh --help` for the full set, including `--prefix` and
+`--config-dir`.
+
+The installer detects the GitHub `owner/repository` slug from that checkout. Pass `--github-repository OWNER/REPOSITORY` only when automatic detection is not available.
+
+The default installation is user-local and needs no `sudo`:
+
+```text
+$HOME/.local/bin/review-pr
+$HOME/.local/libexec/review-pr/review-pr
+$HOME/.local/share/review-pr/
+${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/config.json
+```
+
+If `$HOME/.local/bin` is not on `PATH`, add it to the shell profile:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+For zsh on macOS this normally belongs in `~/.zshrc`; for Bash it normally belongs in `~/.bashrc` or `~/.bash_profile`.
+
+Custom locations are supported:
+
+```bash
+./install.sh \
+  --repo "/absolute/path/to/Review" \
+  --reviews-dir "$HOME/review-pr" \
+  --prefix "$HOME/tools" \
+  --config-dir "$HOME/.config/review-pr"
+```
+
+The installed launcher records the chosen config path, so no persistent environment variable is required for `--config-dir`.
+
+Re-running the installer is the supported upgrade path: it updates package-managed files without replacing `config.json`. Before every repeat installation it writes an immutable timestamped copy to `<config-dir>/backups/config-YYYYMMDD-HHMMSS.json`; no old backups are deleted automatically. `--repo` updates only the default repository entry (and migrates an old single-repository config), while `--reviews-dir` updates only its artifact directory. All other personalized configuration remains intact.
+
+## Configure agents
+
+Edit the installed `config.json`. A hosted-agent-only setup can be as small as:
+
+```json
+{
+  "$schema": "./review-pr.schema.json",
+  "agents": {
+    "claude": {
+      "label": "Claude",
+      "enabled": true,
+      "model": "claude-opus-5",
+      "effort": "high"
+    },
+    "codex": {
+      "label": "Codex",
+      "enabled": true,
+      "model": "gpt-5.6-terra",
+      "effort": "high"
+    }
+  },
+  "reviewers": ["claude", "codex"],
+  "synthesizer": "codex",
+  "default_repository": "repository",
+  "repositories": {
+    "repository": {
+      "github": "YOUR-ORG/YOUR-REPOSITORY",
+      "checkout": "/absolute/path/to/Review"
+    }
+  },
+  "reviews_directory": "/absolute/path/to/review-pr-output",
+  "reporting": {
+    "finding_contract": {
+      "primary": "ndjson-v1",
+      "cross_review": "ndjson-v1",
+      "final": "ndjson-v1"
+    },
+    "comparison_sections": {
+      "cross_review": "none",
+      "final": "standalone"
+    }
+  }
+}
+```
+
+### Several agents on one CLI
+
+An agent's key is a label, not a choice of program. `type` names the built-in adapter that runs it — `claude`, `codex` or `pi` — and defaults to the key, so a configuration whose agents are called `claude`, `codex` and `pi` needs no `type` at all. Naming it lets one CLI serve several agents with different models, which the key alone could not express: two local Pi models, or two Claude models at different efforts, in a single review.
+
+```json
+{
+  "agents": {
+    "pi-local": { "type": "pi",     "model": "dirk-qwen3.8-27b@iq3_s", "max_tool_calls": 300 },
+    "pi-coder": { "type": "pi",     "model": "qwen3.8-27b-coder",      "max_tool_calls": 120 },
+    "opus":     { "type": "claude", "model": "claude-opus-5",   "effort": "high",   "enabled": true },
+    "sonnet":   { "type": "claude", "model": "claude-sonnet-5", "effort": "medium", "enabled": true }
+  },
+  "reviewers": ["pi-local", "pi-coder", "opus", "sonnet"],
+  "synthesizer": "opus"
+}
+```
+
+The adapter decides which executable must be installed, how reasoning effort is spelled, whether `max_tool_calls` is accepted, and whether an event stream is kept for diagnosis. The key keeps everything else: artifacts are named after it, so agents sharing an adapter never collide. A review skill is looked up by key first and by type second, so a new agent inherits its adapter's skill until it is given one of its own. `runner` and `command` still take precedence over `type`.
+
+`model` is passed to Pi as written. When two providers Pi knows serve a model of the same name, write
+the model with its provider prefix, as in `qwen-token-plan/qwen3.8-flash`.
+
+Pi is not present in the distributed default pipeline, so a clean installation only needs Claude and Codex. Add Pi later if wanted; set `"enabled": false` to keep its configuration while excluding it from a run. A profile or repository may name an agent skill (for example, `"pi": "php-code-review"`), but no absolute skill path is required or validated and Pi is never passed a hardcoded `--skill` path. Leaving Pi's model empty makes Pi use its currently configured default provider/model.
+
+`reporting.finding_contract.primary`, `cross_review`, and `final` accept `markdown` or `ndjson-v1`. A configuration that names neither keeps `markdown`, so existing installations are untouched; the distributed example runs `ndjson-v1` in all three stages, which is what a fresh installation therefore gets. Structured cross-review requires structured primary findings and `comparison_sections.cross_review: "none"`; structured final synthesis additionally requires both earlier stages to be structured and `comparison_sections.final` to be `none` or `standalone`. Primary agents return atomic records, cross-reviewers classify canonical primary refs, and the finalizer classifies canonical cross-review refs. The orchestrator validates completeness, provenance, severity, and exact changed-line anchors, derives transitive primary provenance itself, preserves `work/*-raw.ndjson`, publishes canonical `work/*-findings.json`, and renders localized Markdown deterministically. Every structured prompt ends with a short checklist that restates each record's keys, because the lists otherwise sit mid-prompt and a model answering after dozens of tool calls may rebuild a record from memory. Prose ahead of the first record -- an announcement, or the progress notes Codex sends before tool calls -- is dropped without a model call, and a stream written as a JSON array of records is unwrapped the same way. A finding written whole but for its `recommendation` or `failure_scenario`, or anchored to lines the pull request did not change, is first sent back to its own agent for those fields alone, with the repository open; this is the field amendment. The orchestrator takes only the fields it asked for, and a final finding is never asked for an anchor: one anchored off the changed lines is continued in content mode or, failing that, left to salvage. A structurally repairable response receives one content-stable schema-repair pass; cross and final repair additionally freeze classification, severity, provenance, and rejection-presentation decisions. A cross-review or final stream that simply stopped before answering every required source ref is continued instead: the records it already produced are kept, the same agent is asked for the unanswered refs alone, and the merged stream must pass the full contract with those records unchanged. A stream that also broke some of its records is continued the same way: the broken records are set aside and their refs asked again with the unanswered ones. So is one whose failure scenario, recommendation or anchor the field amendment asked for and did not get back. Invalid structured output never falls back to Markdown; when no recovery pass can produce a clean stream, the phase publishes the records that pass the contract on their own and records what it dropped. Resume uses the modes saved in the manifest, and final reruns reuse canonical cross-review sidecars. The installed `review-pr-findings-v1.schema.json` documents the portable record shape.
+
+`reporting.comparison_sections.cross_review` accepts `none` or `inline`; `final` accepts `none`, `inline`, or `standalone`. The distributed default keeps cross-reviews compact and generates the extended Sources, reviewer matrix, Agreements/Disagreements, review-depth, conclusion, and agreed-actions material as a separate `<review-stem>-comparison.md` after the core final report. This reduces final-output pressure for local models. The deprecated `include_comparison_sections` boolean remains compatible (`true` = inline/inline, `false` = none/none). A configuration with neither key gets the old default, inline/inline, which a structured cross-review or final contract refuses at startup, so set `comparison_sections` whenever `cross_review` or `final` runs `ndjson-v1`. With `comparison_sections` present, a key it leaves out means `none` for the cross-review and `standalone` for the final.
+
+Pi output is extracted from its final assistant `message_end` event. If Pi reports `stopReason: length`, the run fails with an explicit output-token-limit reason and preserves normalized usage, raw JSONL events, and any partial Markdown next to the error log. Increasing the model's configured `maxTokens` can resolve a genuinely truncated response; splitting comparison content into the standalone report often reduces the required final-output size.
+
+### Output language and time zone
+
+`language` sets the language every stage writes in: `EN`, the default, or `UK` for Ukrainian.
+`languages.primary`, `languages.cross_review` and `languages.final` override it for one stage; an
+empty string keeps the global value. Classification words and the `P0`–`P3` severities stay the
+same in every language. `UA`, the country code, is still read as `UK`, and the log names each
+field to change. `finalization.language` is an older spelling; use `language` or `languages.final`.
+
+`timezone` names the zone every timestamp is written in: the run identifier that `--run` takes,
+manifest and run-history times, log lines, and the dashboard clock. Without it the machine's own
+zone is used. A zone that is not installed on the system is refused when the configuration loads.
+
+```json
+"language": "EN", "languages": {"final": "UK"}, "timezone": "Europe/Warsaw"
+```
+
+### Other settings
+
+The installed `reference.md` and `review-pr.schema.json` describe every key. The ones this page
+does not cover elsewhere:
+
+- `finalization.model` and `finalization.effort` set the synthesizer's model and effort for the
+  final and comparison phases. Left out, the synthesizer's own agent settings apply; an empty
+  `effort` sends no level at all. `finalization.fallback_effort` does the same for the fallback
+  synthesizer, described in the next section.
+- `reporting.dispute_resolution: true` makes the finalizer emit resolution records for
+  cross-review disagreements. It requires `finding_contract.final = ndjson-v1`, and
+  `reporting.execute_measurements` requires it.
+- `status.mode` (`auto`, `table`, `log`, `off`), `status.color`, `status.refresh_interval_seconds`,
+  `status.log_interval_seconds` and `status.show_pid` shape the live dashboard;
+  `status_interval_seconds` is an older spelling of `status.log_interval_seconds`.
+- `prompts.cross_review` and `prompts.final` replace the output-format instructions of the
+  `markdown` contract. They are not sent under `ndjson-v1`.
+- `agents.<name>.instructions` replaces the default sentence that tells an agent to use its
+  review skills, for an agent the active profile and repository give no skill entry.
+- `repositories.<alias>.skills` maps agents to skill names for one repository and takes precedence
+  over its profile's `skills`.
+
+## When a reviewer or the synthesizer fails
+
+A reviewer that fails a phase no longer takes the whole run with it. A primary or cross-review phase
+goes on while at least `execution.quorum` reviewers finish it; the default is 2. Two is the floor
+rather than a preference: every finding is checked by everyone except its author, so with one
+reviewer left its own findings would have nobody to check them and would drop out of the final
+unseen. A quorum below 2 is refused. Set `"quorum": "all"` to stop the run on any failure, as
+earlier versions did.
+
+```json
+"execution": {"max_concurrency": 4, "quorum": 2, "retry": {"max_attempts": 2, "delay_seconds": 10}}
+```
+
+`retry.max_attempts` counts the first attempt. A failed primary or cross-review attempt is retried
+as soon as a slot is free, after `delay_seconds`. With more than one attempt allowed, Codex runs
+without `--ephemeral` and keeps its sessions under `~/.codex/sessions`: an attempt a provider error
+cut short is then resumed with `codex exec resume`, keeping the commands it had already run,
+instead of starting over.
+
+A reviewer that fails its primary review takes no part in cross-review, and its missing report is
+not handed to anyone. One that fails only its cross-review stays a primary source: the others still
+checked its findings. Either way the loss is recorded rather than absorbed. The console says who was
+left out and why, the manifest gains an `agent_losses` entry, and the published review lists the
+reviewer among its verification limitations. Resuming the run does not retry a reviewer the quorum
+already set aside, and a `--rerun-final` of the run works from the cross-reviews it has and names
+the same loss in its own report.
+
+The finalizer does not review the pull request a second time. Cross-review has already checked each
+finding against the code, so the finalizer checks in proportion to the stakes: it settles a factual
+dispute against the source, checks the premise of any P0 or P1 it publishes even when every
+reviewer agrees, and takes undisputed P2 and P3 findings, and disputes about severity alone, from
+the reports. The resolution table records a severity judgment as `manual`, so it shows what was
+actually measured.
+
+Final synthesis is the one phase nobody can stand in for, so it takes a fallback instead of a
+quorum. When the synthesizer has used up its attempts, `finalization.fallback_synthesizer` takes the
+same inputs and tries again with a prompt built for it. It must be an enabled agent, and either a
+different agent or the synthesizer itself on a different `fallback_model`: sonnet failing over to
+opus on the same adapter is a real fallback, the same agent on the same model is not. A stronger
+model is the point. Only when every attempt by both has failed the contract is the newest draft
+salvaged, since another attempt usually gets the whole synthesis through.
+
+```json
+"synthesizer": "pi",
+"finalization": {"model": "qwen-token-plan/qwen3.8-flash", "fallback_synthesizer": "claude", "fallback_model": "claude-opus-5-5"}
+```
+
+Left out, `fallback_model` and `fallback_effort` take the fallback agent's own `model` and
+`effort`; an empty `fallback_effort` sends no level at all. The comparison phase stays with the
+fallback once it has taken over. The manifest records the swap as `final_fallback`, and the review
+names who actually wrote it.
+
+Between phases every record travels under a short handle instead of the id its author chose:
+`r01`, `r02`, … for primary findings, `x01`, … for cross-review records, `s01`, … for the final. A
+reviewer handed a 66-character descriptive id rewrote it into a shorter one and so answered
+findings under names nobody had sent it. Numbering runs on across every reviewer of a phase --
+claude's findings `r01`–`r03`, codex's from `r04` -- so each handle names exactly one record, which
+is what still lets a mislabelled agent key be corrected. The letters stay clear of the `P0`–`P3`
+severity scale. The author's own id stays on the record in the canonical sidecar and the raw stream.
+
+## Resume a failed run
+
+Use the timestamp already printed by the failed run to continue it without repeating successful reviewers:
+
+```bash
+review-pr repository#123 --run 20260901-154503-CEST
+```
+
+The command verifies the manifest and PR head, runs only missing/failed reports in the first incomplete phase, and then continues the remaining phases. Use `--rerun-final` only when primary and cross-review are already complete.
+
+A run can only be resumed for the exact PR head it recorded. If new commits were pushed to the pull request since then, the preserved reports describe older code, so the command refuses to resume and names the head change; start a new run for the current head instead.
+
+To re-synthesize a completed historical run without touching Git or GitHub, select its timestamp:
+
+```bash
+review-pr --rerun-final repository#123 --run 20260901-154503-CEST
+```
+
+`--run last` saves copying the timestamp. For a resume it is the newest full run of the pull
+request. For `--rerun-final` it is the newest run whose primary and cross-review phases completed,
+which is also what `--rerun-final` without `--run` selects. Both log the run they chose. For
+`findings` it is the newest final synthesis, the same as leaving `--run` out.
+
+Manifest-backed final reruns are artifact-only: metadata comes from the source manifest, and its preserved cross-review reports plus repository-facts snapshot are supplied to the finalizer. The current PR head may have changed. No fetch, checkout, branch switch, GitHub request, or current-source inspection is performed. The legacy `--force --run` compatibility path is the exception because pre-manifest artifacts lack reliable recorded metadata.
+
+## CI checks as review evidence
+
+Every reviewer receives the check runs GitHub reports for the exact PR head, with each check's status and conclusion, plus the annotations it produced. Annotations carry a level, a file, a line, and a message, so a red `phpstan` or a coverage gap becomes usable evidence instead of a bare conclusion. At most 20 annotations per check and 60 per run are attached, each message trimmed to 200 characters; failing to read them never fails the review.
+
+A failed, pending, or skipped check is never a finding by itself, in any phase. It is recorded as a verification limitation, because a review states what the code does, not what a pipeline reported.
+
+Checks that are still running when the reviewers start often settle before the synthesis, so the check state is read again just before the final phase. The snapshot the reviewers received stays published as it was; only the finalizer sees the settled state. An artifact-only rerun never reads GitHub.
+
+## Authoritative repository facts
+
+Every new full run measures shared repository facts before agents start and stores
+`work/*-repo-facts.json` plus `work/*-repo-facts.md`. They include exact base/head SHAs, merge base,
+the fetched default-branch tip, stacked-PR status, the exact changed-file list, and resolvable PR or
+commit references from the description. Primary, cross-review, and final prompts receive the same
+Markdown snapshot.
+
+GitHub `merged=true` is retained only as context. The `ancestry_on_current_default.value` field is
+set only from local `git merge-base --is-ancestor` against the fetched default tip; unmeasurable
+facts remain `null` instead of being guessed. Optional reference lookup failures produce a
+`complete_with_unknowns` snapshot, while failure to determine a structural fact stops the run
+before agents start and does not publish a partial canonical facts pair.
+
+Resume and manifest-backed `--rerun-final` reuse the facts named by the source manifest. Historical
+manifests without facts remain compatible, but their finalizer is told not to infer missing
+topology from agreement between reports.
+
+## RIGHT-side anchors for final findings
+
+All three review stages receive a common database-migration verification rule: report deterministic failures unequivocally when code/schema evidence proves them; keep data-dependent risks qualified and recommend validation on staging with production-like data when such an environment exists. The tool does not assume that staging exists or claim it was used without evidence.
+
+Git-backed runs also capture paginated GitHub review-thread state and map GraphQL threads to REST inline-comment IDs. Reports can therefore distinguish new feedback from confirmation of an existing unresolved thread. GraphQL failure or nested-thread truncation is explicitly `unavailable` or `partial`; it is never treated as proof that no unresolved feedback exists. Resolved and outdated threads remain historical context and do not automatically suppress a current occurrence.
+
+New full runs write `work/*-changed-lines.json`, a compact map of added/modified RIGHT-side line
+ranges from the exact diff. A detailed confirmed finding uses
+`<!-- review-pr:anchor:changed-line -->` with one repository-relative File and a Line or range whose
+end exists in that map. Missing tests, migrations, and genuine PR-wide omissions instead use
+`<!-- review-pr:anchor:pr-level -->` with `File: —` and `Line: —`; the finalizer is not forced to
+invent a location.
+
+Validation results are stored in `work/*-anchor-validation.json`. An invalid but otherwise useful
+draft receives one bounded repair attempt. Only marker/File/Line fields may change, the result is
+validated against the map again, and byte-level comparison rejects any attempt to rewrite the
+finding itself. The original invalid draft remains available as a diagnostic. Historical manifests
+without a map continue to work with validation explicitly marked unavailable.
+
+### Add any stdin/stdout CLI without a runner
+
+For a new agent, use a JSON argument array — not a shell command string. `review-pr` invokes the command directly, streams its prompt to stdin, accepts only Markdown from stdout, and sends diagnostics to stderr. This means adding a compatible agent is a config-only change:
+
+```json
+{
+  "agents": {
+    "other": {
+      "label": "Other CLI",
+      "enabled": true,
+      "model": "chosen-model",
+      "command": ["other-agent", "--non-interactive"]
+    }
+  },
+  "reviewers": ["claude", "codex", "other"]
+}
+```
+
+For a CLI that accepts a prompt file rather than stdin, use an exact placeholder argument: `"command": ["other-agent", "--prompt-file", "{{prompt_file}}"]`. Other safe placeholders are `{{repository}}`, `{{model}}`, `{{effort}}`, `{{phase}}`, `{{pr_number}}`, `{{base_ref}}`, `{{head_ref}}`, `{{base_sha}}`, and `{{head_sha}}`. Each generic command receives its own disposable detached worktree at the exact PR head, which is removed afterward; select the CLI's read-only mode as an additional guard when it has one. `command` and `runner` are mutually exclusive.
+
+Use `runner` only for protocols which cannot fit this contract, such as Antigravity's streaming JSON mode, structured-output parsing, or a runner that provides additional workspace isolation. Generic commands receive the same `REVIEW_PR_*` context environment variables as runners, but their Tokens field remains `-` unless they write the documented normalized usage files.
+
+The complete custom-command and runner contract is documented in `reference.md` after installation.
+
+## Optional review skills
+
+The public package does not bundle repository-specific methodology. A profile may configure a skill
+name for each agent, but skills remain optional: the agent may resolve the name from its native skill
+installation, or the orchestrator may append a local copy from
+`${XDG_CONFIG_HOME:-$HOME/.config}/review-pr/skills/<agent>/<skill>/SKILL.md`. A `--config` file
+elsewhere looks for `skills/` beside itself first and then falls back to that directory. A missing skill never
+prevents a review, but the log warns about it. Teams can distribute their own skills as a separate overlay without patching the
+core executable or replacing the user's `config.json`.
+
+A team overlay is an ordinary directory tree that each member copies into place, for example:
+
+1. Ship `skills/<agent>/<skill-name>/SKILL.md` for every agent that should receive the methodology
+   (`claude`, `codex`, `pi`, `agy`, or a custom agent name); the installer preserves existing copies
+   and never overwrites a member's own edits.
+2. Ship a JSON fragment for `profiles.<profile>.skills` that maps agents to `<skill-name>`, plus the
+   `repositories.<alias>` entries with `profile` set, and merge it into `config.json` with `jq`.
+3. Keep repository rules the skill relies on (contribution guides, ADRs, lint configuration) inside
+   the reviewed repository itself, so a finding can cite an explicit rule with its path.
+
+Nothing in the overlay is executed: skill text is appended to the agent prompt as methodology, and
+the core prompt takes precedence over it for safety, persistence, the output format, and the scope
+of each phase. A skill that says every one of its steps runs does not turn a cross-review or a final
+synthesis into a second full review; what a later phase checks again is the prompt's decision.
+
+## Environment variables
+
+None is needed after installation. Each one overrides a single setting for the command it is
+given to:
+
+- `REVIEW_PR_CONFIG=<file>` reads another configuration file.
+- `REVIEW_PR_REPO=<path>` uses another dedicated checkout in place of the selected repository's
+  `checkout`.
+- `REVIEW_PR_OUTPUT_DIR=<path>` uses another reviews directory in place of `reviews_directory`, for
+  runs, `findings`, `prune` and `contract-test`. `install.sh` takes it as the default of
+  `--reviews-dir`.
+- `REVIEW_PR_SCRATCH_DIR=<path>` or `work` chooses where a run keeps its intermediate files; see
+  below.
+- `REVIEW_PR_QUOTA_TIMEOUT_SECONDS=<n>` sets how long `review-pr quota` and the quota check wait
+  for `codex app-server` to answer; the default is 20.
+- `REVIEW_PR_BASH=<path>` names the Bash 5.1 or newer that the launcher and installer use.
+
+```bash
+REVIEW_PR_REPO="/other/dedicated/clone" REVIEW_PR_CONFIG="/other/config.json" review-pr --show-config
+```
+
+While a review runs, its intermediate files (prompts, agent streams and logs, the steps between a
+stream and its records) are kept in a directory of its own under `/dev/shm` when that is a writable
+directory with at least 256 MiB free, and only the finished artifacts are written to the reviews
+directory. Endpoint scanners that check every write under the home directory, `/tmp` and `/run`
+often leave `/dev/shm` alone, so this keeps a review from costing the scanner thousands of checks.
+The directory is private to its owner (`/dev/shm/review-pr-<uid>/run-<pid>-<n>`), removed when the
+run ends, and removed by the next run if the run was killed. `REVIEW_PR_SCRATCH_DIR=<path>` names
+another root, with no free-space check; a relative path is taken from the directory `review-pr`
+was started in. A root that cannot be created, is not owned by the user, or cannot be made private
+is named in a WARNING, and the run keeps its files in the work directory.
+`REVIEW_PR_SCRATCH_DIR=work` keeps the files in the run's work directory, as before. Without
+`/dev/shm`, on macOS for one, the work directory is used.
+
+## Verify and run
+
+Verification does not start a PR review:
+
+```bash
+review-pr --show-config
+```
+
+Then run a review explicitly. A bare number selects `default_repository`; aliases, `owner/repo#number`, and GitHub PR URLs select a configured repository directly:
+
+```bash
+review-pr 123
+review-pr repository#123
+review-pr YOUR-ORG/YOUR-REPOSITORY#123
+review-pr YOUR-ORG/YOUR-REPOSITORY/pull/123
+review-pr https://github.com/YOUR-ORG/YOUR-REPOSITORY/pull/123
+```
+
+The command fetches and detaches the dedicated checkout at the exact PR head. It refuses tracked changes and never operates on another checkout.
+
+`review-pr --help` prints every form the command takes, and `review-pr --version` (or `-V`) the
+installed release.
+
+## Check the Codex quota before a run
+
+A review can spend a large share of a Codex subscription window. `review-pr quota` reads the limits Codex itself reports, through `codex app-server` and the login Codex already holds; nothing reads or stores a token:
+
+```bash
+review-pr quota
+review-pr quota codex --json
+```
+
+```text
+Codex (team)
+  5h             80% left   resets Tue 29 Sep 21:12
+  weekly         70% left   resets Sat 03 Oct 10:30
+```
+
+Windows are named by their length, every rate-limit bucket Codex returns is kept, and a field it does not send stays `null` rather than becoming zero. A reading is cached for a minute in `${XDG_CACHE_HOME:-~/.cache}/review-pr/quota-codex.json`. The command exits 0 whenever the quota was read, however little is left; 1 when it is unavailable (Codex missing or logged out, or `codex app-server` silent for `REVIEW_PR_QUOTA_TIMEOUT_SECONDS`, 20 by default) and 2 when the answer has a shape review-pr does not know.
+
+To refuse a run that would start a Codex agent below a threshold, set it in the configuration:
+
+```json
+"quota": {"codex": {"minimum_remaining_percent": 15}}
+```
+
+One number is the minimum of every window. Since a review spends far more of the five-hour window than of the weekly one, each window can have its own minimum instead, keyed by the name `review-pr quota` prints; a window left out has none, and an unknown name is refused:
+
+```json
+"quota": {"codex": {"minimum_remaining_percent": {"5h": 15, "weekly": 3}}}
+```
+
+Every window with a minimum counts: the run stops before it starts, naming the window, its minimum and its reset time. The quota is read again before every phase, since one review spends a good share of the five-hour window: a Codex reviewer whose quota has run below the threshold is not started for that phase and counts as a reviewer the phase lost, so the quorum decides whether the run goes on without it; a Codex synthesizer short of quota fails the final or the comparison before it starts, with every input kept for `--run` to resume. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
+
+## Reviewing the same head again
+
+A new full run is refused when the last complete full run of that pull request already reviewed the same head and base with the same methodology: the reviewers would see exactly what they saw then. The methodology hash covers the review-pr version, the configured prompts, and every skill and checklist embedded in an agent's prompt, so a changed checklist is reason enough to review again, and the log says so. Push a change, or pass `--same-head` to repeat the review on purpose:
+
+```bash
+review-pr --same-head 123
+```
+
+`--rerun-final` and `--run` are never refused this way; each is a deliberate rerun of a run that exists.
+`--same-head` itself applies only to a new full run, and is refused together with either of them.
+
+A new run is also refused when the head adds nothing to its base -- typically a PR stacked on a branch that has already merged it through another PR. The diff would be empty, so no reviewer is started and the message says why.
+
+## Choosing the reviewers for one run
+
+`--reviewers` names the reviewers of one new run, in place of the configured list and the `enabled` flags, without touching the config file. A local model kept disabled for everyday runs can join one review, or a reviewer whose quota is low can sit one out:
+
+```bash
+review-pr --reviewers claude,codex,pi,pi-local 123
+review-pr --reviewers claude,pi 123
+```
+
+Each name must have an entry under `agents`, and at least two are needed. The synthesizer stays as configured.
+`review-pr --reviewers claude,pi --show-config` shows the selection without starting a run. A resume
+or `--rerun-final` keeps the reviewers of the run it continues and refuses `--reviewers`.
+
+## Hand a finished review to a fixing agent
+
+The final report is written for a human. An agent that will do the fixing needs the actionable part, not the prose, so `findings` prints it as JSON:
+
+```bash
+review-pr findings 123
+review-pr findings --include uncertain 123
+review-pr findings --run 20260914-120000-CEST 123
+```
+
+A structured run also publishes that set on its own, as `<review-id>-<timestamp>-fix-list.json` beside the final report, so the fixing agent's copy travels with the review instead of being regenerated by hand. `reporting.findings_export` chooses its scope: `confirmed` (the default), `uncertain`, `all`, or `off` to publish nothing. Runs whose final contract is `markdown` publish nothing either, because there is no structured set to export. The subcommand stays useful for a different scope, or for a run finished before the file existed.
+
+The subcommand reads only the canonical final sidecar a structured run already published, so it needs no agent CLI, no network, and no Git work, and it writes nothing. Each entry carries the id, classification, severity, category, exact anchor, title, claim, failure scenario, recommendation, and the verification limitations that qualify it. A `review` object names what produced the set: the head and base it reviewed, their refs, the review-pr version, the methodology hash, the kind of run (`full` or `final-rerun`), and the seconds each phase took (`null` for a phase another process ran).
+
+Confirmed findings are exported by default. `--include uncertain` adds the claims that could not be settled, and `--include all` adds refuted ones too; an agent should act on the confirmed set and reproduce an uncertain claim before touching anything. Findings with no natural changed-line anchor, such as a missing test or migration, keep an empty anchor and are listed after the anchored ones instead of being dropped. Without `--run`, the freshest final synthesis for that pull request is used, including one produced by `--rerun-final`. A run without `reporting.finding_contract.final = ndjson-v1` publishes no such sidecar and is refused with that reason.
+
+## Free space in the reviews directory
+
+Every run keeps what its agents streamed and logged in its work directory, so a review that went
+wrong can be looked into later. Those event streams, logs and failed attempts are most of the reviews
+directory, and nothing reads them once the run is over. `prune` compresses them with gzip for pull
+requests that GitHub reports merged or closed, and removes the temporary files that killed runs left
+in any review:
+
+```bash
+review-pr prune           # says what it would do, changes nothing
+review-pr prune --apply   # does it
+```
+
+Reports, fix-lists, manifests, findings and usage files are never touched, and neither is any file
+a run's manifest names; nor are the streams and logs of an open pull request or of one whose state
+GitHub does not report, so a resume, `--rerun-final` and `--same-head` work as before. A file is
+judged by what follows the run's timestamp in its name, never by the branch name before it, and a
+failed attempt by how review-pr names one. Prompts are temporary files: a killed run's are removed
+with its other leftovers. A review belongs to the repository its
+folder is named after, as its manifests, the run history or the configuration say; when they do not
+agree on one, it is left alone. The states come from GitHub, fifty pull requests a query, and a
+repository GitHub did not answer for is named and kept. A file changed in the last day is not
+touched, so a review that is running keeps its files even if the run history missed it; `--apply`
+also refuses while the run history shows a review running. A compressed file reads back with
+`gzip -dc`. Only reviews under `<reviews directory>/<owner>-<repository>/` are pruned; reviews of
+earlier layouts, directly in the reviews directory or in the checkout's `docs/reviews`, are not.
+The worktree a killed command agent left is counted, not removed: `git worktree remove --force <path>`
+in the review checkout clears it.
+
+The run history is `<reviews directory>/run-history.jsonl`: every review, resume and final rerun
+appends one line when it starts and one when it ends, with the pull request, repository, mode,
+run, exit status, duration and process id. The installed `reference.md` describes it.
+
+## Upgrade
+
+Get the newer version the same way you got the first one — pull the checkout and check out the newer tag, or extract a newer archive — and run its `install.sh` with the same prefix/config options. The existing configuration is retained, and a timestamped pre-upgrade backup is written to `<config-dir>/backups/`. Uninstalling first is neither needed nor recommended. Each file is renamed into place rather than rewritten where it stands, so a review already running keeps reading the build it started with instead of a half-replaced script.
+
+Use `review-pr --version` to identify the installed release. See `CHANGELOG.md` in the checkout or the release archive for release notes and compatibility-impacting changes.
+
+Rollback works the same way: check out the previous tag, or extract the previous archive, and run
+that `install.sh` with the same options. Program files are replaced wholesale and the configuration is backed up again first. If a
+newer release migrated `config.json` (for example the legacy single `review_repository` field into
+`repositories`), restore the matching pre-upgrade copy from `<config-dir>/backups/config-<timestamp>.json`
+before running the older version; backups are byte-for-byte copies and are never pruned by the
+installer or the uninstaller.
+
+Report compatibility: Markdown reports and `*-manifest.json` files written by earlier releases stay
+readable. `--run` resumes them as long as the recorded PR head still matches; `--rerun-final`
+works from the artifacts of a run that has a manifest, whatever the head is now, and a Markdown-only
+run from before manifests needs `--rerun-final --force --run <timestamp>`. Structured `ndjson-v1` artifacts carry
+`schema_version: 1`; a release that introduces a new schema version says so in `CHANGELOG.md`. A
+configuration that names no contract keeps `markdown`, and the installer changes no contract in an
+existing `config.json`, so an upgrade never changes the output format of an existing configuration
+by itself.
+
+## Uninstall
+
+Remove installed program files while preserving configuration:
+
+```bash
+./uninstall.sh
+```
+
+Pass the same `--prefix <path>` the installer was given if it was not the default. To remove the
+configuration too:
+
+```bash
+./uninstall.sh --purge-config
+```
+
+The uninstaller has no `--config-dir`: for a configuration installed elsewhere, name it with
+`REVIEW_PR_CONFIG_DIR=<config-dir> ./uninstall.sh --purge-config`. Purging removes `config.json`
+and the two schema files; `backups/` and `skills/` stay, and so does the directory that holds them.
+Review reports and the dedicated Git checkout are never deleted by the uninstaller.
+
+## Security model
+
+- **Agents run with your privileges.** Every configured `command`, `runner`, or built-in CLI is
+  started as the invoking user without a shell: `agents.<name>.command` is an argv array, so
+  configuration values are never re-parsed by `sh`. Only commands named in the active configuration
+  are required or executed.
+- **The review checkout is disposable.** The orchestrator works in the dedicated clone at the exact PR
+  head, refuses tracked changes there, and never touches other repositories. The Antigravity runner
+  goes further and reviews a throwaway Git worktree, so accidental edits are discarded.
+- **PR text is untrusted input.** PR descriptions, comments, and review threads are passed to agents
+  inside a clearly delimited context block with an instruction to treat them as data, never as
+  instructions; the checked-out source and exact diff remain the source of truth.
+- **Orchestrator-executed commands are allow-listed.** With `reporting.execute_measurements`
+  enabled, the orchestrator runs only read-only tools (`rg`, `grep`, `git show|log|diff|...`, `ls`,
+  `cat`, `head`, `wc`, `test`) proposed by the finalizer, without a shell, inside the review checkout,
+  with a ten-second timeout and bounded, credential-redacted output. Anything else is recorded as
+  skipped and never run. The feature is off by default and requires
+  `reporting.dispute_resolution: true`.
+- **Pi tool calls are bounded.** `agents.pi.max_tool_calls` loads a small extension that blocks
+  duplicate tool calls and terminates the agent after the budget, so a looping local model cannot run
+  indefinitely.
+- **Antigravity permissions are explicit.** Headless AGY denies any command not covered by an allow
+  rule; the reference documents the read-only rule set the runner expects. Grant only those.
+- **Nothing is uploaded by the orchestrator.** GitHub access is read-only through `gh` (PR metadata,
+  comments, review threads, check runs). Reports stay in `reviews_directory`; publishing them is a
+  manual step.
+
+## Troubleshooting
+
+- **Bash 5.1 or newer is required:** on macOS run `brew install bash`; the launcher searches Apple Silicon and Intel Homebrew paths automatically. `REVIEW_PR_BASH=/custom/path/bash` is also supported.
+- **Required command not found:** install or add the configured `claude`, `codex`, `pi`, generic agent command, or custom runner to `PATH`.
+- **GitHub errors:** run `gh auth status` and verify access to the repository and its pull requests/checks.
+- **Configured skill unavailable:** it is advisory only. Install the named skill for that agent, change the name, set it to `""`, or remove the mapping; the orchestrator does not fail because a local skill file is absent.
+- **Review repository has tracked changes:** preserve or commit them elsewhere; this checkout is intentionally dedicated to reviews.
+- **An agent times out:** the phase log reports `timeout after <n>s` and the manifest records the
+  attempt under `attempt_failures`. Raise `agents.<name>.timeout_seconds` for slow local models, or
+  lower `execution.max_concurrency` so agents do not compete for the same GPU or API quota. A resume
+  with `--run <timestamp>` re-runs only the agents that did not complete.
+- **A local model loops on tool calls:** set `agents.pi.max_tool_calls` (a few hundred is generous
+  for a large PR). The guard blocks repeated identical calls, terminates the agent when the budget is
+  spent, and writes a summary into the agent log; the final diagnostics record it as
+  `pi_guard_budget_exhausted` or `pi_guard_duplicates_blocked`.
+- **A local model hits its output token limit** (`stop_reason: length`, failure reason
+  `repair_output_token_limit`, or a truncated NDJSON stream): reasoning models can spend most of the
+  budget thinking before they print the contract. Use a larger output limit in the model server,
+  pick a non-reasoning finalizer with `finalization.model`, or reduce the input by running with fewer
+  reviewers. The orchestrator never publishes a truncated report; the partial output is kept for
+  inspection as `*-error*-truncated-raw.ndjson` when the model stopped on its limit, and as
+  `*-error*-partial-raw.ndjson` after any other failure.
+- **A structured stream stops after the first records** (`stream.no_complete` together with
+  `source_refs.missing[...]`): the agent treated one record as the whole answer. A cross-review or
+  final synthesis is continued automatically in that case, and the interrupted draft is kept as
+  `*-error*-continuation*-source-raw.ndjson`, with the attempt number in the name once retries are
+  allowed. A continuation that answers an unlisted ref or repeats an answered one is refused with
+  `continuation_changed_kept_findings_or_remained_invalid`, and the run falls back to the ordinary
+  retry.
+- **Invalid structured output:** the failure reason names the field, for example
+  `schema_or_completeness_validation_failed: finding[F-2].anchor`. One bounded repair pass asks the
+  same agent to fix only the schema; substantive fields are frozen and a changed decision is rejected.
+  The invalid response and the repair exchange are kept next to the run's `*-error*` artifacts.
+  When the repair or continuation cannot rescue the stream either, the phase is not abandoned: every
+  record is put to the contract on its own, the ones that pass are published, and the ones that do
+  not are dropped and named. The console says what was lost and why, the manifest gains a
+  `salvage_losses` entry, and the review itself lists the loss among its verification limitations. A
+  phase fails only when no record survives. The reasoning is that by then every agent has already
+  run: refusing to publish would throw away the surviving work along with the broken part, and leave
+  nothing but a log to explain hours of spent quota.
+
+## License
+
+`review-pr` is released under the [MIT License](LICENSE).

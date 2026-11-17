@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "github_repository": "example/repository",
+  "pr_number": 123,
+  "base_sha": "1111111111111111111111111111111111111111",
+  "head_sha": "2222222222222222222222222222222222222222",
+  "anchor_semantics": {
+    "side": "RIGHT",
+    "eligible_lines": "added_or_modified",
+    "range_rule": "The range end must be an eligible RIGHT-side line."
+  },
+  "files": [
+    {
+      "path": "src/Changed.php",
+      "old_path": null,
+      "git_status": "M",
+      "status": "modified",
+      "binary": false,
+      "right_side_ranges": [
+        {"start": 10, "end": 12},
+        {"start": 20, "end": 20}
+      ],
+      "right_side_line_count": 4,
+      "inline_anchorable": true
+    },
+    {
+      "path": "src/Renamed.php",
+      "old_path": "src/Old.php",
+      "git_status": "R095",
+      "status": "renamed",
+      "binary": false,
+      "right_side_ranges": [{"start": 7, "end": 7}],
+      "right_side_line_count": 1,
+      "inline_anchorable": true
+    },
+    {
+      "path": "src/Deleted.php",
+      "old_path": null,
+      "git_status": "D",
+      "status": "deleted",
+      "binary": false,
+      "right_side_ranges": [],
+      "right_side_line_count": 0,
+      "inline_anchorable": false
+    },
+    {
+      "path": "assets/image.bin",
+      "old_path": null,
+      "git_status": "M",
+      "status": "modified",
+      "binary": true,
+      "right_side_ranges": [],
+      "right_side_line_count": 0,
+      "inline_anchorable": false
+    }
+  ]
+}

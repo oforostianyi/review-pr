@@ -1,0 +1,709 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "review-pr configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reviewers",
+    "synthesizer",
+    "agents"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "review_repository": {
+      "type": "string",
+      "pattern": "^/",
+      "deprecated": true,
+      "description": "Legacy single-repository checkout. Prefer repositories.<alias>.checkout. REVIEW_PR_REPO overrides the selected checkout."
+    },
+    "default_repository": {
+      "$ref": "#/$defs/repositoryAlias",
+      "description": "Alias selected when the command receives only a PR number, for example review-pr 123."
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Reusable repository profiles. Repository-level skills override profile skills.",
+      "propertyNames": {
+        "$ref": "#/$defs/repositoryAlias"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "repositories": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Configured GitHub repositories and their dedicated local review checkouts.",
+      "propertyNames": {
+        "$ref": "#/$defs/repositoryAlias"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/repository"
+      }
+    },
+    "reviews_directory": {
+      "type": "string",
+      "pattern": "^/",
+      "description": "Absolute directory outside the selected review checkout where review artifacts are stored. Defaults to $HOME/review-pr when omitted. REVIEW_PR_OUTPUT_DIR overrides this value."
+    },
+    "reviewers": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/agentName"
+      }
+    },
+    "synthesizer": {
+      "$ref": "#/$defs/agentName"
+    },
+    "language": {
+      "$ref": "#/$defs/reviewLanguage",
+      "default": "EN",
+      "description": "Global output language for every review stage. Stage-specific entries under languages override this value."
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone name used for every timestamp the orchestrator writes: run identifiers, manifest times, log lines, and the dashboard clock. Omit it to follow the machine's own zone. The name must be installed in the system timezone database.",
+      "examples": [
+        "Europe/Warsaw",
+        "America/New_York",
+        "UTC"
+      ]
+    },
+    "finalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model override used only by the configured synthesizer during final synthesis."
+        },
+        "effort": {
+          "type": "string",
+          "description": "Reasoning-effort override used only by the configured synthesizer during final synthesis. Omit to inherit agents.<synthesizer>.effort; set an empty string to disable inherited effort. Supported values depend on the synthesizer and model."
+        },
+        "fallback_synthesizer": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Agent that takes over final synthesis when the synthesizer has used up its attempts. It must be a configured, enabled agent, and either a different agent or the synthesizer on a different fallback_model -- sonnet failing over to opus on the same adapter is a real fallback; the same agent on the same model is not. The comparison phase stays with it once it has taken over."
+        },
+        "fallback_model": {
+          "type": "string",
+          "description": "Model the fallback synthesizer uses for final synthesis. Omit to use agents.<fallback_synthesizer>.model."
+        },
+        "fallback_effort": {
+          "type": "string",
+          "description": "Reasoning-effort override for the fallback synthesizer. Omit to inherit agents.<fallback_synthesizer>.effort; set an empty string to disable it."
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "EN",
+            "UK",
+            "UA"
+          ],
+          "deprecated": true,
+          "description": "Legacy spelling of the global language: without the top-level language field it sets the language of every stage, not only the final synthesis. Prefer language and languages.final. Classification values and P0–P3 severity values remain fixed."
+        }
+      }
+    },
+    "languages": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-stage overrides of the global language. An empty string explicitly inherits the global value.",
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        },
+        "cross_review": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        },
+        "final": {
+          "$ref": "#/$defs/reviewLanguageOverride"
+        }
+      }
+    },
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Subscription limits checked before a run starts and again before every phase. Each provider is off until it is configured here.",
+      "properties": {
+        "codex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimum_remaining_percent"
+          ],
+          "properties": {
+            "minimum_remaining_percent": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "The minimum share left of every Codex rate-limit window."
+                },
+                {
+                  "type": "object",
+                  "minProperties": 1,
+                  "propertyNames": {
+                    "pattern": "^(weekly|primary|secondary|spend control|[1-9][0-9]*[mhd])$"
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "description": "A minimum per window, keyed by the window's name as `review-pr quota` prints it (5h, weekly, 1d, ...). A window the object does not name has no minimum; a name review-pr never gives a window, such as week or 7d, is refused."
+                }
+              ],
+              "description": "A run that would start a Codex agent is refused when a Codex rate-limit window reports less left than its minimum: one number for every window, or an object with a minimum per window. It is read again before every phase: a Codex reviewer short of quota is set aside under the reviewer quorum, and a Codex synthesizer short of quota fails its phase. The quota is read through `codex app-server` with Codex's own login; when it cannot be read, the run goes on with a warning.",
+              "examples": [
+                15,
+                {
+                  "5h": 15,
+                  "weekly": 3
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "reporting": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Controls machine-readable finding contracts and optional comparison sections.",
+      "properties": {
+        "finding_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Versioned machine-readable finding contract. Markdown remains the default; ndjson-v1 is opt-in per implemented phase.",
+          "properties": {
+            "primary": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
+              "default": "markdown"
+            },
+            "cross_review": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
+              "default": "markdown",
+              "description": "Structured cross-review requires primary=ndjson-v1 and comparison_sections.cross_review=none."
+            },
+            "final": {
+              "type": "string",
+              "enum": [
+                "markdown",
+                "ndjson-v1"
+              ],
+              "default": "markdown",
+              "description": "Structured final synthesis requires primary and cross_review ndjson-v1, and comparison_sections.final set to none or standalone."
+            }
+          }
+        },
+        "findings_export": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "uncertain",
+            "all",
+            "off"
+          ],
+          "default": "confirmed",
+          "description": "Publish the actionable findings of a structured final synthesis as <review-id>-<timestamp>-fix-list.json beside the final report, for an agent that will do the fixing. off publishes nothing. Runs whose final contract is markdown publish nothing either."
+        },
+        "dispute_resolution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emit and validate opt-in resolution records for cross-review disagreements in the final ndjson-v1 stream. Requires finding_contract.final = ndjson-v1."
+        },
+        "execute_measurements": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the allow-listed, read-only, shell-free commands proposed by resolution records inside the review checkout and attach the captured result to the resolutions sidecar. Requires dispute_resolution = true. Artifact-only final reruns skip execution."
+        },
+        "include_comparison_sections": {
+          "type": "boolean",
+          "default": true,
+          "deprecated": true,
+          "description": "Legacy all-or-nothing switch. True maps both stages to inline; false maps both stages to none. Prefer comparison_sections."
+        },
+        "comparison_sections": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cross_review": {
+              "type": "string",
+              "enum": [
+                "none",
+                "inline"
+              ],
+              "default": "none",
+              "description": "Whether each cross-review omits or embeds the extended comparison block."
+            },
+            "final": {
+              "type": "string",
+              "enum": [
+                "none",
+                "inline",
+                "standalone"
+              ],
+              "default": "standalone",
+              "description": "Whether final synthesis omits, embeds, or generates the extended comparison block as a separate report."
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/agentName"
+      },
+      "properties": {
+        "claude": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "$ref": "#/$defs/claudeEffort"
+                }
+              },
+              "not": {
+                "required": [
+                  "max_tool_calls"
+                ]
+              }
+            }
+          ]
+        },
+        "codex": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "$ref": "#/$defs/codexEffort"
+                }
+              },
+              "not": {
+                "required": [
+                  "max_tool_calls"
+                ]
+              }
+            }
+          ]
+        },
+        "pi": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agent"
+            },
+            {
+              "properties": {
+                "effort": {
+                  "$ref": "#/$defs/piThinking"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "status_interval_seconds": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 3600,
+      "default": 30,
+      "deprecated": true,
+      "description": "Legacy alias for status.log_interval_seconds."
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "table",
+            "log",
+            "off"
+          ],
+          "default": "auto"
+        },
+        "color": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "default": "auto"
+        },
+        "refresh_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 1
+        },
+        "log_interval_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "default": 30
+        },
+        "show_pid": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of reviewer processes running at once in primary and cross-review phases. Omit for unlimited concurrency."
+        },
+        "quorum": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 2
+            },
+            {
+              "type": "string",
+              "enum": [
+                "all"
+              ]
+            }
+          ],
+          "default": 2,
+          "description": "How many reviewers must finish a primary or cross-review phase for the run to go on without the rest. The minimum and default is 2: with one reviewer left, its own findings would have nobody to check them and would drop out of the final unseen. A failed reviewer is left out of the later phases and named in the manifest and the report. Set \"all\" to stop the run on any failure, as it did before."
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 1,
+              "description": "Maximum attempts per agent in each primary and cross-review phase, including the initial attempt."
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600,
+              "default": 0,
+              "description": "Delay before starting a failed-only retry round."
+            }
+          }
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cross_review": {
+          "$ref": "#/$defs/prompt"
+        },
+        "final": {
+          "$ref": "#/$defs/prompt"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "required": [
+            "review_repository"
+          ],
+          "not": {
+            "required": [
+              "repositories"
+            ]
+          }
+        },
+        {
+          "required": [
+            "repositories",
+            "default_repository"
+          ],
+          "not": {
+            "required": [
+              "review_repository"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "claude"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "$ref": "#/$defs/claudeEffort"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "codex"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "$ref": "#/$defs/codexEffort"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "synthesizer": {
+            "const": "pi"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "finalization": {
+            "properties": {
+              "effort": {
+                "$ref": "#/$defs/piThinking"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "repositoryAlias": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "skillMap": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/agentName"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "description": "Optional skill name as known by the target agent. An empty string explicitly disables an inherited profile skill; no filesystem path is required or validated."
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skills": {
+          "$ref": "#/$defs/skillMap"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "github",
+        "checkout"
+      ],
+      "properties": {
+        "github": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "description": "GitHub owner/repository slug used for PR metadata and context requests."
+        },
+        "checkout": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute path to the dedicated Git checkout for this repository."
+        },
+        "profile": {
+          "$ref": "#/$defs/repositoryAlias"
+        },
+        "skills": {
+          "$ref": "#/$defs/skillMap",
+          "description": "Per-repository agent skill-name overrides. These take precedence over profile skills."
+        }
+      }
+    },
+    "agentName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to keep this agent's configuration but exclude it from primary and cross-review. The configured synthesizer must remain enabled."
+        },
+        "label": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "pi"
+          ],
+          "description": "Built-in adapter that runs this agent. Defaults to the agent key, so an agent named after an adapter needs no type. Several agents may share one adapter with different models. Ignored when runner or command is set."
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string",
+          "description": "Reasoning effort. Built-in Claude and Codex agents support their documented values; custom runners receive the resolved value in REVIEW_PR_EFFORT."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800,
+          "default": 0,
+          "description": "Maximum wall-clock time for one agent attempt in any phase. Zero or omission disables the timeout. Timed-out attempts fail with exit status 124 and follow the normal failed-only retry policy."
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Pi only. Enables the orchestrator's Pi tool guard extension for tool-enabled phases: identical tool calls never execute twice, and after this many executed calls every further call is blocked and the model must return its output. Zero keeps the duplicate guard with no budget. Omit to run Pi without the guard."
+        },
+        "runner": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Generic non-shell command adapter. The first item is the executable; remaining items are literal arguments. It receives the orchestration prompt on stdin and must return only Markdown on stdout from a disposable worktree at the PR head. It is mutually exclusive with runner. Exact placeholder arguments {{prompt_file}}, {{repository}}, {{model}}, {{effort}}, {{phase}}, {{pr_number}}, {{base_ref}}, {{head_ref}}, {{base_sha}}, and {{head_sha}} are expanded safely."
+        },
+        "instructions": {
+          "type": "string"
+        }
+      }
+    },
+    "claudeEffort": {
+      "enum": [
+        "",
+        "auto",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "reviewLanguage": {
+      "description": "EN for English, UK for Ukrainian (ISO 639-1). UA, the country code, is still read as UK with a warning.",
+      "enum": [
+        "EN",
+        "UK",
+        "UA"
+      ]
+    },
+    "reviewLanguageOverride": {
+      "description": "Empty inherits the global language; otherwise EN or UK. UA is still read as UK with a warning.",
+      "enum": [
+        "",
+        "EN",
+        "UK",
+        "UA"
+      ]
+    },
+    "piThinking": {
+      "description": "Pi thinking level passed as --thinking; empty keeps the model's current default.",
+      "enum": [
+        "",
+        "auto",
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "codexEffort": {
+      "enum": [
+        "",
+        "auto",
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ]
+    },
+    "prompt": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  }
+}

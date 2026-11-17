@@ -1,0 +1,12 @@
+{"type":"session","version":3,"id":"fixture","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/fixture"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[],"timestamp":1}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"fixture","model":"local-fixture","usage":{"input":1000,"output":10,"cacheRead":0,"cacheWrite":0,"reasoning":1,"totalTokens":1010},"stopReason":"toolUse","timestamp":2}}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"t1","toolName":"bash","isError":false,"timestamp":3}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"fixture","model":"local-fixture","usage":{"input":2000,"output":20,"cacheRead":0,"cacheWrite":0,"reasoning":2,"totalTokens":2020},"stopReason":"toolUse","timestamp":4}}
+{"type":"compaction_start","reason":"context_window"}
+{"type":"compaction_end","reason":"context_window"}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"t2","toolName":"bash","isError":false,"timestamp":5}}
+{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"fixture","model":"local-fixture","usage":{"input":3000,"output":30,"cacheRead":0,"cacheWrite":0,"reasoning":3,"totalTokens":3030},"stopReason":"stop","timestamp":6}}
+{"type":"turn_end","message":{"role":"assistant","usage":{"input":3000,"output":30,"cacheRead":0,"cacheWrite":0,"reasoning":3,"totalTokens":3030}}}
+{"type":"agent_end","messages":[{"role":"assistant","usage":{"input":1000,"output":10,"cacheRead":0,"cacheWrite":0,"reasoning":1,"totalTokens":1010}},{"role":"assistant","usage":{"input":3000,"output":30,"cacheRead":0,"cacheWrite":0,"reasoning":3,"totalTokens":3030}}]}

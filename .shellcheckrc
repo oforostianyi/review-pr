@@ -1,0 +1,6 @@
+# shellcheck policy for review-pr (CI runs `shellcheck -S warning`).
+#
+# SC1112: Ukrainian prompt prose inside single-quoted strings legitimately uses
+#         the typographic apostrophe (’); it is literal text, not a quote.
+# SC1007: `CDPATH= cd ...` deliberately clears CDPATH for that one command.
+disable=SC1112,SC1007

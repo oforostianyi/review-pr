@@ -1,0 +1,762 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2154 # Tests assign the sourced orchestrator's globals and index its associative arrays.
+
+set -euo pipefail
+
+test_dir=$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd -P)
+repo_root=$(cd -P -- "$test_dir/../.." && pwd -P)
+source "$test_dir/lib/assert.sh"
+
+export REVIEW_PR_LIBRARY_MODE=true
+# shellcheck source=/dev/null
+source "$repo_root/bin/review-pr" --
+unset REVIEW_PR_LIBRARY_MODE
+
+suite_root=$(portable_mktemp_dir review-pr-phases)
+trap 'rm -rf -- "$suite_root"' EXIT
+
+prepare_phase_case() {
+    local case_name=$1
+    shift
+    local -a agents=("$@")
+    local agent
+
+    CASE_DIR="$suite_root/$case_name"
+    WORK_DIR="$CASE_DIR/work"
+    REVIEW_REPO="$CASE_DIR/repository"
+    REPORT_STEM=$case_name
+    mkdir -p -- "$WORK_DIR" "$REVIEW_REPO"
+
+    PR_NUMBER=123
+    PR_TITLE='Fixture PR'
+    PR_TASK_DISPLAY='FIX-123 — Fixture PR'
+    PR_AUTHOR_DISPLAY='Fixture Author (@fixture)'
+    PR_CHANGED_FILES=1
+    PR_ADDITIONS=1
+    PR_DELETIONS=0
+    BASE_REF=main
+    HEAD_REF=fixture
+    BASE_SHA=1111111111111111111111111111111111111111
+    HEAD_SHA=2222222222222222222222222222222222222222
+    FINAL_HEADER_TITLE='# Code Review: [PR #123](https://example.test/pull/123) — Fixture PR'
+    FINAL_HEADER_TABLE_HEADER='| Field | Value |'
+    FINAL_HEADER_TABLE_SEPARATOR='|---|---|'
+    FINAL_HEADER_TASK='| **Task** | FIX-123 — Fixture PR |'
+    FINAL_HEADER_BASE='| **Base** | `main` → `fixture` |'
+    FINAL_HEADER_FILES='| **Files changed** | 1 · +1 / −0 |'
+    FINAL_HEADER_AUTHOR='| **Author** | Fixture Author (@fixture) |'
+
+    REVIEW_AGENTS=("${agents[@]}")
+    FINAL_SYNTHESIZER=${agents[0]}
+    FINAL_COMPARISON_MODE=none
+    HEARTBEAT_LOG_ENABLED=false
+    DASHBOARD_ACTIVE=true
+    TEMP_FILES=()
+    RUNNING_PIDS=()
+    PROMPT_FILES=()
+    TEMP_OUTPUTS=()
+    TEMP_LOGS=()
+    TEMP_USAGE_FILES=()
+    TEMP_USAGE_JSON_FILES=()
+    FINAL_OUTPUTS=()
+    USAGE_OUTPUTS=()
+    ERROR_LOGS=()
+    AGENT_RUNNERS=()
+    AGENT_MODELS=()
+    AGENT_EFFORTS=()
+    AGENT_TIMEOUT_SECONDS=()
+    AGENT_LABELS=()
+
+    for agent in "${agents[@]}"; do
+        AGENT_RUNNERS[$agent]="$test_dir/mock-agent-runner.sh"
+        AGENT_MODELS[$agent]="mock-${agent}"
+        AGENT_EFFORTS[$agent]=low
+        AGENT_TIMEOUT_SECONDS[$agent]=0
+        AGENT_LABELS[$agent]="${agent^}"
+        PROMPT_FILES[$agent]="$CASE_DIR/${agent}.prompt"
+        TEMP_OUTPUTS[$agent]="$CASE_DIR/${agent}.tmp.md"
+        TEMP_LOGS[$agent]="$CASE_DIR/${agent}.tmp.log"
+        TEMP_USAGE_FILES[$agent]="$CASE_DIR/${agent}.tmp.tokens"
+        TEMP_USAGE_JSON_FILES[$agent]="$CASE_DIR/${agent}.tmp.usage.json"
+        FINAL_OUTPUTS[$agent]="$CASE_DIR/${agent}.md"
+        USAGE_OUTPUTS[$agent]="$CASE_DIR/${agent}-usage.json"
+        ERROR_LOGS[$agent]="$CASE_DIR/${agent}-error.log"
+        printf 'mock prompt\n' >"${PROMPT_FILES[$agent]}"
+    done
+
+    initialize_dashboard full
+    EVENT_LOG="$CASE_DIR/events.log"
+    SCENARIO_DIR="$CASE_DIR/scenarios"
+    mkdir -p -- "$SCENARIO_DIR"
+    : >"$EVENT_LOG"
+    export REVIEW_PR_MOCK_EVENT_LOG=$EVENT_LOG
+    export REVIEW_PR_MOCK_SCENARIO_DIR=$SCENARIO_DIR
+}
+
+prepare_phase_case sequential alpha beta
+MAX_CONCURRENCY=1
+RETRY_MAX_ATTEMPTS=1
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=1
+run_review_phase 'primary review' alpha beta
+assert_eq $'start\talpha\nend\talpha\nstart\tbeta\nend\tbeta' \
+    "$(awk -F '\t' '{print $1 "\t" $2}' "$EVENT_LOG")" \
+    'max_concurrency=1 executes agents sequentially'
+assert_file_exists "${FINAL_OUTPUTS[alpha]}" 'sequential alpha report is committed atomically'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'sequential beta report is committed atomically'
+
+prepare_phase_case parallel alpha beta
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=1
+export REVIEW_PR_MOCK_DELAY_SECONDS=1
+run_review_phase 'primary review' alpha beta
+assert_eq $'start\nstart' "$(awk -F '\t' 'NR <= 2 {print $1}' "$EVENT_LOG")" \
+    'max_concurrency=2 starts both agents before either completes'
+
+prepare_phase_case retry alpha beta
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+run_review_phase 'primary review' alpha beta
+assert_eq '1' "$(awk -F '\t' '$1 == "start" && $2 == "alpha" {count++} END {print count + 0}' "$EVENT_LOG")" \
+    'successful agent waits and is not rerun'
+assert_eq '2' "$(awk -F '\t' '$1 == "start" && $2 == "beta" {count++} END {print count + 0}' "$EVENT_LOG")" \
+    'only the failed agent is retried'
+assert_eq '2' "${PHASE_ATTEMPTS[beta]}" 'retry attempt count is recorded'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'retried agent eventually commits its report'
+assert_file_exists "$CASE_DIR/beta-error-attempt-1-usage.json" \
+    'failed retry usage is preserved for diagnosis'
+
+# A runner's review-pr-failure line is shown on the console line of the failed
+# attempt, but never joins the failure reason, which the report classifies
+# ("timeout" in a denied command must not make it a timeout) and quotes.
+prepare_phase_case retry-hint alpha beta
+printf 'fail-once-with-hint\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+DASHBOARD_ACTIVE=false
+run_review_phase 'primary review' alpha beta 2>"$CASE_DIR/phase-stderr.log"
+DASHBOARD_ACTIVE=true
+assert_file_contains "$CASE_DIR/phase-stderr.log" \
+    ': exit 17: AGY denied a command that no allow rule covers: rg -n timeout src; queued for retry' \
+    'the console line of a failed attempt carries the runner hint'
+assert_eq 'beta attempt 1/2 (exit 17)' "${PHASE_ATTEMPT_FAILURES[*]}" \
+    'the recorded failure reason does not'
+
+# A failed attempt is retried as soon as a slot is free, not once every peer has
+# finished (on one review codex stood idle for fifteen minutes while pi ran on).
+prepare_phase_case retry-early alpha beta
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=2
+run_review_phase 'primary review' alpha beta
+assert_eq 'yes' "$(awk -F '\t' '
+    $1 == "start" && $2 == "beta" { starts++; if (starts == 2) retried = NR }
+    $1 == "end" && $2 == "alpha" { ended = NR }
+    END { print (retried && ended && retried < ended) ? "yes" : "no" }' "$EVENT_LOG")" \
+    'the failed agent starts its retry while a slower peer is still running'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'and the retry commits its report'
+assert_file_exists "${FINAL_OUTPUTS[alpha]}" 'while the slower peer commits its own'
+
+# The retry's pause is its own: a queued first attempt takes the freed slot at
+# once instead of waiting out retry.delay_seconds (self-review of 2e3acc4).
+prepare_phase_case retry-delay alpha beta gamma
+printf 'fail-once\n' >"$SCENARIO_DIR/beta-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=2
+RETRY_DELAY_SECONDS=3
+export REVIEW_PR_MOCK_DELAY_SECONDS=2
+run_review_phase 'primary review' alpha beta gamma
+event_time() { awk -F '\t' -v kind="$1" -v who="$2" -v attempt="$3" \
+    '$1 == kind && $2 == who && $4 == attempt {print $5; exit}' "$EVENT_LOG"; }
+beta_failed=$(event_time start beta 1)
+assert_true 'a queued first attempt starts while the failed one waits out its retry delay' \
+    test "$(( $(event_time start gamma 1) - beta_failed ))" -le 1
+assert_true 'and the retry still waits that delay before it starts' \
+    test "$(( $(event_time start beta 2) - beta_failed ))" -ge 3
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'after which it commits its report'
+RETRY_DELAY_SECONDS=0
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+
+prepare_phase_case truncated alpha
+printf 'truncated\n' >"$SCENARIO_DIR/alpha-primary-review"
+MAX_CONCURRENCY=1
+RETRY_MAX_ATTEMPTS=1
+export REVIEW_PR_MOCK_DELAY_SECONDS=0
+if run_review_phase 'primary review' alpha; then
+    fail 'truncated output must fail the phase'
+fi
+pass 'truncated output fails the phase'
+assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'truncated output never becomes a canonical report'
+assert_file_exists "$CASE_DIR/alpha-error-truncated.md" 'truncated model output is preserved'
+assert_file_exists "$CASE_DIR/alpha-error-usage.json" 'truncation usage diagnostics are preserved'
+
+prepare_phase_case nonzero alpha
+printf 'nonzero\n' >"$SCENARIO_DIR/alpha-primary-review"
+MAX_CONCURRENCY=1
+RETRY_MAX_ATTEMPTS=1
+if run_review_phase 'primary review' alpha; then
+    fail 'non-zero runner exit must fail the phase'
+fi
+pass 'non-zero runner exit fails the phase'
+assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'failed runner cannot publish a partial report'
+assert_file_exists "$CASE_DIR/alpha-error-partial.md" 'non-zero runner partial output is preserved'
+assert_file_exists "$CASE_DIR/alpha-error.log" 'non-zero runner stderr is preserved'
+
+# The timeout is kept by one watchdog per command rather than a loop that reads
+# the clock every second; a command that ends first takes the watchdog with it.
+watchdog_status=0
+run_with_agent_timeout 4711 'quick fixture' bash -c 'exit 7' || watchdog_status=$?
+assert_eq 7 "$watchdog_status" 'a command that ends before its timeout returns its own status'
+assert_false 'and leaves no watchdog sleeping out the timeout' pgrep -f -x 'sleep 4711'
+watchdog_status=0
+watchdog_started=$EPOCHSECONDS
+run_with_agent_timeout 1 'hanging fixture' sleep 4712 2>"$suite_root/watchdog.log" || watchdog_status=$?
+assert_eq 124 "$watchdog_status" 'a command past its timeout is stopped and reported as timed out'
+assert_true 'within moments of the timeout' test "$((EPOCHSECONDS - watchdog_started))" -le 3
+assert_false 'and is not left running' pgrep -f -x 'sleep 4712'
+assert_file_contains "$suite_root/watchdog.log" 'hanging fixture exceeded its configured timeout of 1s' \
+    'the console names the command that timed out'
+
+prepare_phase_case timeout alpha beta
+printf 'hang\n' >"$SCENARIO_DIR/alpha-primary-review"
+MAX_CONCURRENCY=2
+RETRY_MAX_ATTEMPTS=1
+AGENT_TIMEOUT_SECONDS[alpha]=1
+if run_review_phase 'primary review' alpha beta; then
+    fail 'timed-out runner must fail the phase'
+fi
+pass 'timed-out runner fails without blocking its peer'
+assert_file_not_exists "${FINAL_OUTPUTS[alpha]}" 'timed-out output is never published'
+assert_file_exists "${FINAL_OUTPUTS[beta]}" 'successful peer remains published when another agent times out'
+assert_file_contains "$CASE_DIR/alpha-error.log" 'exceeded its configured timeout of 1s' 'timeout reason is preserved in agent diagnostics'
+assert_eq 'failed' "${PHASE_AGENT_STATUSES[alpha]}" 'timed-out agent is recorded as failed'
+assert_eq 'complete' "${PHASE_AGENT_STATUSES[beta]}" 'successful peer remains complete'
+
+prepare_phase_case preserved alpha beta
+PRIMARY_OUTPUTS[alpha]="$WORK_DIR/preserved-alpha.md"
+PRIMARY_OUTPUTS[beta]="$WORK_DIR/preserved-beta.md"
+CROSS_OUTPUTS[alpha]="$WORK_DIR/preserved-cross-alpha.md"
+CROSS_OUTPUTS[beta]="$WORK_DIR/preserved-cross-beta.md"
+printf 'preserved primary report\n' >"${PRIMARY_OUTPUTS[alpha]}"
+printf '{"reported_total_tokens": 512}\n' >"$WORK_DIR/${REPORT_STEM}-alpha-usage.json"
+printf 'preserved cross report\n' >"${CROSS_OUTPUTS[beta]}"
+: >"${CROSS_OUTPUTS[alpha]}"
+load_preserved_dashboard_statuses
+assert_eq 'LOADED' "${DASHBOARD_STATUSES[$(dashboard_key primary alpha)]}" \
+    'a preserved primary report is shown as loaded instead of waiting'
+assert_eq '512' "${DASHBOARD_TOKENS[$(dashboard_key primary alpha)]}" \
+    'a preserved report shows its recorded token total'
+assert_eq 'WAITING' "${DASHBOARD_STATUSES[$(dashboard_key primary beta)]}" \
+    'a missing primary report still waits'
+assert_eq 'LOADED' "${DASHBOARD_STATUSES[$(dashboard_key cross beta)]}" \
+    'a preserved cross-review is shown as loaded'
+assert_eq 'WAITING' "${DASHBOARD_STATUSES[$(dashboard_key cross alpha)]}" \
+    'an empty cross-review artifact is not treated as preserved'
+
+DASHBOARD_SHOW_PID=true
+DASHBOARD_COLOR_ENABLED=false
+calculate_dashboard_line_count
+render_dashboard_snapshot false 2>"$CASE_DIR/frame.txt"
+assert_eq "$DASHBOARD_LINE_COUNT" "$(wc -l <"$CASE_DIR/frame.txt" | tr -d ' ')" \
+    'the rendered frame height matches the cursor movement used for redraws'
+assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/frame.txt")" \
+    'one frame draws the primary section title exactly once'
+
+# A retry looks exactly like a first attempt in the table unless the status says
+# otherwise, and the attempt number is the whole point of saying it.
+assert_eq 'RUNNING' "$(dashboard_attempt_status 1)" \
+    'a first attempt is plain RUNNING'
+assert_eq 'RETRYING[2]' "$(dashboard_attempt_status 2)" \
+    'a second attempt names itself a retry and its number'
+assert_eq 'RETRY[12]' "$(dashboard_attempt_status 12)" \
+    'a two-digit attempt uses the short form so it still fits the column'
+
+set_dashboard_status primary beta "$(dashboard_attempt_status 2)" 4242 "$(date +%s)" 0 '31m'
+render_dashboard_snapshot false 2>"$CASE_DIR/retry-frame.txt"
+assert_file_contains "$CASE_DIR/retry-frame.txt" 'RETRYING[2]' \
+    'the rendered table shows the retry and its attempt number'
+table_line_widths() {
+    local file=$1 line widths=()
+    while IFS= read -r line; do
+        if [[ "$line" == *'│'* || "$line" == *'─'* ]]; then
+            widths+=("${#line}")
+        fi
+    done <"$file"
+    printf '%s\n' "${widths[@]}" | sort -u | tr '\n' ' '
+}
+assert_eq '84 ' "$(table_line_widths "$CASE_DIR/retry-frame.txt")" \
+    'every table line keeps the same width once a retry status is shown'
+
+# A line printed straight to the terminal while the table is up leaves the cursor
+# one row below where the next redraw expects it, and every later frame strands a
+# copy of its own header — the reason the section title appeared three times. The
+# renderer is the only writer while the table is up; log hands it the line.
+DASHBOARD_MESSAGE_FILE="$CASE_DIR/dashboard-messages.txt"
+: >"$DASHBOARD_MESSAGE_FILE"
+DASHBOARD_ACTIVE=true
+log 'WARNING: something happened while the table was up' 2>"$CASE_DIR/direct-stderr.txt"
+assert_eq '' "$(cat "$CASE_DIR/direct-stderr.txt")" \
+    'a message logged while the table is up does not go straight to the terminal'
+assert_file_contains "$DASHBOARD_MESSAGE_FILE" 'something happened while the table was up' \
+    'the message waits for the renderer instead'
+render_dashboard_snapshot false 2>"$CASE_DIR/message-frame.txt"
+DASHBOARD_ACTIVE=false
+assert_file_contains "$CASE_DIR/message-frame.txt" 'something happened while the table was up' \
+    'the renderer prints the waiting message where the frame begins'
+assert_eq '1' "$(grep -c 'PRIMARY REVIEW' "$CASE_DIR/message-frame.txt")" \
+    'the frame that follows the message still draws its title once'
+assert_eq "$((DASHBOARD_LINE_COUNT + 1))" \
+    "$(wc -l <"$CASE_DIR/message-frame.txt" | tr -d ' ')" \
+    'the frame keeps its height and the message adds exactly its own line'
+# The file is read on from where the renderer stopped rather than emptied, so a
+# line appended while it prints is not lost; the next frame still skips it.
+render_dashboard_snapshot false 2>"$CASE_DIR/message-frame-2.txt"
+assert_false 'a printed message is not printed again on the next frame' \
+    grep -q 'something happened while the table was up' "$CASE_DIR/message-frame-2.txt"
+DASHBOARD_MESSAGE_FILE=""
+
+AGENT_LABELS[wide]='An unusually long agent label'
+AGENT_MODELS[wide]='provider/some-model'
+AGENT_EFFORTS[wide]=''
+assert_eq 'An unusually long agent ...' "$(dashboard_agent_label wide primary)" \
+    'a label that leaves no room for the model keeps its ellipsis inside the column'
+AGENT_LABELS[alpha]='Alpha'
+AGENT_MODELS[alpha]='vendor/gpt-5.6-terra'
+AGENT_EFFORTS[alpha]='high'
+assert_eq 'Alpha (gpt-5.6-terra high)' "$(dashboard_agent_label alpha primary)" \
+    'the dashboard label drops the provider prefix and keeps the effort'
+AGENT_MODELS[alpha]='vendor/a-very-long-model-identifier-that-overflows'
+assert_eq 'Alpha (a-very-long-mode...)' "$(dashboard_agent_label alpha primary)" \
+    'an overlong model identifier is truncated with an ellipsis inside the fixed dashboard width'
+# The label is trimmed to the width of the column that prints it. When the two
+# disagree the printf cuts the ellipsis off and the label ends mid-word, which is
+# what a reader sees as a broken table rather than a shortened name.
+assert_eq '0' "$(dashboard_agent_label alpha primary | awk -v w="$DASHBOARD_AGENT_COLUMN_WIDTH" 'length($0) > w' | wc -l | tr -d ' ')" \
+    'a truncated label never exceeds the agent column, so printf cannot cut its ellipsis'
+assert_eq '0' "$(dashboard_agent_label wide primary | awk -v w="$DASHBOARD_AGENT_COLUMN_WIDTH" 'length($0) > w' | wc -l | tr -d ' ')" \
+    'a label with no room for a model stays inside the column too'
+FINALIZATION_MODEL='final-model'
+FINALIZATION_EFFORT_CONFIGURED=false
+assert_eq 'Alpha (final-model high)' "$(dashboard_agent_label alpha final)" \
+    'the final phase shows the configured finalization model'
+FINALIZATION_MODEL=''
+
+assert_eq '--effort high' "$(agent_effort_arguments claude high | paste -sd ' ' -)" 'Claude receives its effort as --effort'
+assert_eq '-c model_reasoning_effort="medium"' "$(agent_effort_arguments codex medium | paste -sd ' ' -)" 'Codex receives its effort as a reasoning override'
+assert_eq '--thinking xhigh' "$(agent_effort_arguments pi xhigh | paste -sd ' ' -)" 'Pi receives its effort as a thinking level'
+
+# Neither CLI accepts "auto": claude warns and falls back to its default, codex
+# answers 400. Passing nothing is what "let the model decide" already meant, so
+# `auto` is the word for that and not a value to forward.
+assert_eq '' "$(agent_effort_arguments claude auto | paste -sd ' ' -)" \
+    'an auto effort sends no flag to Claude rather than a word it rejects'
+assert_eq '' "$(agent_effort_arguments codex auto | paste -sd ' ' -)" \
+    'an auto effort sends no reasoning override to Codex'
+assert_eq '' "$(agent_effort_arguments pi auto | paste -sd ' ' -)" \
+    'an auto effort sends no thinking level to Pi'
+assert_eq '' "$(agent_effort_arguments claude '' | paste -sd ' ' -)" \
+    'an empty effort still sends nothing, which is what auto is a name for'
+assert_eq '' "$(agent_effort_arguments pi '' | paste -sd ' ' -)" 'an empty Pi effort adds no thinking flag'
+assert_eq '' "$(agent_effort_arguments custom high | paste -sd ' ' -)" 'other agents receive no effort flag'
+
+# The adapter decides how effort is spelled, so an agent named anything at all
+# passes the flags of its type. Without this the key had to be the CLI name.
+AGENT_TYPES[opus]=claude
+AGENT_TYPES[flash]=pi
+AGENT_TYPES[terra]=codex
+assert_eq '--effort high' "$(agent_effort_arguments opus high | paste -sd ' ' -)" \
+    'an agent typed as claude receives the Claude effort flag under any key'
+assert_eq '--thinking low' "$(agent_effort_arguments flash low | paste -sd ' ' -)" \
+    'an agent typed as pi receives a thinking level under any key'
+assert_eq '-c model_reasoning_effort="medium"' "$(agent_effort_arguments terra medium | paste -sd ' ' -)" \
+    'an agent typed as codex receives a reasoning override under any key'
+assert_eq 'claude' "$(agent_type opus)" 'the adapter is reported for a typed agent'
+assert_eq 'codex' "$(agent_type codex)" 'an agent without a type is still its own adapter'
+
+# A failed final synthesis is retried only when the agent actually produced
+# something. An attempt that never got a turn, because of a usage limit or any
+# other startup failure, records no tokens and no output; repeating it would
+# only spend wall-clock time. An attempt stopped by the output token limit is
+# not repeated either, because an identical request meets the same ceiling.
+retry_case="$suite_root/final-retry"
+mkdir -p -- "$retry_case"
+printf '%s\n' '{"record":"finding"}' >"$retry_case/produced.ndjson"
+: >"$retry_case/empty.ndjson"
+jq -n '{input_tokens: 168072, output_tokens: 4504, stop_reason: null}' >"$retry_case/usage-productive.json"
+jq -n '{input_tokens: null, output_tokens: null, stop_reason: null}' >"$retry_case/usage-null.json"
+jq -n '{input_tokens: 12, output_tokens: 0, stop_reason: null}' >"$retry_case/usage-zero.json"
+
+assert_true 'a final attempt that wrote output is retried' \
+    final_attempt_is_retryable "$retry_case/produced.ndjson" "$retry_case/usage-productive.json" ''
+assert_true 'a final attempt that reported output tokens is retried even with no file' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-productive.json" ''
+assert_false 'a final attempt that never got a turn is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-null.json" ''
+assert_false 'a final attempt with zero output tokens and no file is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/usage-zero.json" ''
+assert_false 'a final attempt without any usage record is not retried' \
+    final_attempt_is_retryable "$retry_case/empty.ndjson" "$retry_case/missing-usage.json" ''
+assert_false 'a final attempt stopped by the output token limit is not retried' \
+    final_attempt_is_retryable "$retry_case/produced.ndjson" "$retry_case/usage-productive.json" length
+
+# Working files live under work/<run timestamp>. Runs made before that layout kept
+# them directly in work/, and resume must still find those.
+layout_case="$suite_root/work-layout"
+REPORT_DIR="$layout_case/report"
+REVIEW_ID=123-fixture
+mkdir -p -- "$REPORT_DIR/work"
+assert_eq "$REPORT_DIR/work/20260914-101500-CEST" \
+    "$(resolve_run_work_dir 20260914-101500-CEST)" \
+    'a run with no artifacts yet is placed in its own directory'
+mkdir -p -- "$REPORT_DIR/work/20260914-101500-CEST"
+assert_eq "$REPORT_DIR/work/20260914-101500-CEST" \
+    "$(resolve_run_work_dir 20260914-101500-CEST)" \
+    'an existing run directory is reused'
+: >"$REPORT_DIR/work/${REVIEW_ID}-20260101-000000-CEST-manifest.json"
+assert_eq "$REPORT_DIR/work" \
+    "$(resolve_run_work_dir 20260101-000000-CEST)" \
+    'a run whose manifest sits directly in work keeps the flat layout'
+
+# A source run can be re-synthesised more than once — comparing two models on the
+# same inputs is exactly that — so the pointer back to the source has to collect
+# the reruns rather than keep only the last one.
+rerun_case="$suite_root/final-rerun-record"
+mkdir -p -- "$rerun_case"
+SOURCE_MANIFEST="$rerun_case/source-manifest.json"
+jq -n '{status: {final: "failed", pipeline: "failed"}}' >"$SOURCE_MANIFEST"
+
+record_rerun_fixture() {
+    local timestamp=$1 model=$2 completed_at=$3
+    local status=${4:-complete} final_status=${5:-complete}
+
+    MANIFEST_FILE="$rerun_case/rerun-${timestamp}-manifest.json"
+    jq -n \
+        --arg timestamp "$timestamp" \
+        --arg model "$model" \
+        --arg status "$status" \
+        --arg final_status "$final_status" \
+        '{timestamp: $timestamp, synthesizer: "pi-local", finalization: {model: $model},
+          status: $status, final_status: $final_status,
+          artifact: ("report-" + $timestamp + ".md")}' >"$MANIFEST_FILE"
+    record_final_rerun_on_source_manifest "$completed_at"
+}
+
+record_rerun_fixture 20260922-001052-CEST dirk@iq3_s '2026-09-22T00:21:20+0200'
+assert_eq 1 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'the first rerun is recorded on the run it came from'
+assert_eq 'dirk@iq3_s' "$(jq -r '.final_reruns[0].model' "$SOURCE_MANIFEST")" \
+    'the record names the model that produced the replacement'
+assert_eq 'report-20260922-001052-CEST.md' "$(jq -r '.final_reruns[0].final' "$SOURCE_MANIFEST")" \
+    'the record names the report the rerun published'
+
+record_rerun_fixture 20260922-084036-CEST dirk@iq3_xxs '2026-09-22T08:52:57+0200'
+assert_eq 2 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a second rerun is appended rather than replacing the first'
+assert_eq 'dirk@iq3_s dirk@iq3_xxs' "$(jq -r '[.final_reruns[].model] | join(" ")' "$SOURCE_MANIFEST")" \
+    'the reruns stay in the order they were made'
+assert_eq 'failed' "$(jq -r '.status.pipeline' "$SOURCE_MANIFEST")" \
+    'what the source run itself did is never rewritten'
+
+# What makes a source run rescued is that a report was published for it. A rerun
+# whose comparison failed after the final succeeded published one; a rerun whose
+# final failed published nothing and leaves no trace.
+record_rerun_fixture 20260922-120000-CEST dirk@iq3_s '2026-09-22T12:10:00+0200' failed complete
+assert_eq 3 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a rerun that published its final but failed the comparison is still recorded'
+assert_eq 'failed' "$(jq -r '.final_reruns[2].status' "$SOURCE_MANIFEST")" \
+    'the record reports the outcome of the rerun rather than assuming success'
+
+record_rerun_fixture 20260922-130000-CEST dirk@iq3_s '2026-09-22T13:10:00+0200' failed failed
+assert_eq 3 "$(jq '.final_reruns | length' "$SOURCE_MANIFEST")" \
+    'a rerun that never published a final report is not recorded'
+
+SOURCE_MANIFEST=""
+assert_true 'a forced rerun with no source manifest records nothing and does not fail' \
+    record_final_rerun_on_source_manifest '2026-09-22T09:00:00+0200'
+
+# Temporary files are made by the shell instead of mktemp and must come out the
+# same: empty, private to their owner, never a name already taken.
+temp_dir="$suite_root/temp-files"
+mkdir -p "$temp_dir"
+umask_before=$(umask)
+make_temp_file made_file "$temp_dir/.fixture.tmp."
+assert_true 'a temporary file is created empty' test -f "$made_file" -a ! -s "$made_file"
+assert_eq 600 "$(stat -c '%a' "$made_file" 2>/dev/null || stat -f '%Lp' "$made_file")" \
+    'and readable by its owner only, as mktemp makes it'
+assert_true 'with six random characters after the prefix' \
+    bash -c '[[ "$1" =~ /\.fixture\.tmp\.[A-Za-z0-9]{6}$ ]]' _ "$made_file"
+assert_eq "$umask_before" "$(umask)" 'the umask is restored afterwards'
+assert_false 'and noclobber is left as it was' test -o noclobber
+for _ in $(seq 50); do make_temp_file made_file "$temp_dir/.many."; done
+assert_eq 50 "$(find "$temp_dir" -name '.many.*' | wc -l | tr -d ' ')" 'fifty calls make fifty distinct files'
+made_status=0
+(make_temp_file made_file "$suite_root/missing/.fixture.") 2>/dev/null || made_status=$?
+assert_eq 1 "$made_status" 'a directory that cannot take the file fails the call'
+# A failure that is not the directory's (here: no file descriptor left, as a
+# full disk or a quota would also do) ends the call instead of retrying for ever.
+made_status=0
+(
+    ulimit -n 32
+    for spare_fd in {3..31}; do
+        eval "exec ${spare_fd}</dev/null" 2>/dev/null || true
+    done
+    make_temp_file made_file "$temp_dir/.no-fd."
+) 2>/dev/null || made_status=$?
+assert_eq 1 "$made_status" 'a creation that keeps failing gives up rather than spinning'
+
+# A file is printed as cat prints it, a NUL byte and what follows it included.
+printf 'before\0after\ntail' >"$suite_root/nul.txt"
+assert_eq 17 "$(emit_file "$suite_root/nul.txt" | wc -c | tr -d ' ')" 'a file holding a NUL byte is printed whole'
+assert_eq 'tail' "$(emit_file "$suite_root/nul.txt" | tail -n 1)" 'up to its last line'
+
+# A run keeps its intermediate files in a scratch directory of its own, removes
+# the ones left by runs that are gone, and stays in the work directory when told.
+scratch_root="$suite_root/scratch-root"
+mkdir -p "$scratch_root/run-999999999-1" "$scratch_root/run-$$-2"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+REVIEW_PR_SCRATCH_DIR=work setup_scratch_dir
+assert_eq '' "$SCRATCH_DIR" '"work" keeps intermediate files in the work directory'
+REVIEW_PR_SCRATCH_DIR=$scratch_root setup_scratch_dir
+assert_true 'a configured root gets a directory for this run' test -d "$SCRATCH_DIR"
+assert_eq 700 "$(stat -c '%a' "$SCRATCH_DIR" 2>/dev/null || stat -f '%Lp' "$SCRATCH_DIR")" 'private to its owner'
+assert_false 'the directory of a run that is gone is removed' test -e "$scratch_root/run-999999999-1"
+assert_true 'the directory of a run still going is kept' test -d "$scratch_root/run-$$-2"
+new_temp_file scratch-fixture
+assert_eq "$SCRATCH_DIR" "${NEW_TEMP_FILE%/*}" 'temporary files are made there'
+ln -s "$scratch_root" "$suite_root/scratch-link"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+REVIEW_PR_SCRATCH_DIR="$suite_root/scratch-link" setup_scratch_dir
+assert_eq '' "$SCRATCH_DIR" 'a root that is a symbolic link is not used'
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+# A relative root is taken from where review-pr was started: the run and its
+# agents change directory afterwards, and the paths have to hold everywhere.
+mkdir -p "$suite_root/launch"
+REVIEW_PR_START_DIR="$suite_root/launch" REVIEW_PR_SCRATCH_DIR=relative-scratch setup_scratch_dir
+assert_eq "$suite_root/launch/relative-scratch" "${SCRATCH_DIR%/run-*}" 'a relative root is resolved from the start directory'
+rm -rf "$SCRATCH_DIR"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false
+
+# The staging copy of a publication is cleared at the end of a run even when an
+# agent's subshell made it and was killed before renaming it into place, and so
+# is a temporary file such a subshell made -- but only those of this run: a
+# --rerun-final takes no lock and shares the work directory of the run it reruns.
+staging_case="$suite_root/staging"
+mkdir -p "$staging_case/work" "$staging_case/report"
+printf 'partial\n' >"$staging_case/work/.this-run-usage.json.publish.Ab12Cd"
+printf 'partial\n' >"$staging_case/report/.this-run.md.publish.Xy34Zw"
+printf 'partial\n' >"$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er"
+printf 'live\n' >"$staging_case/work/.other-run-amendment-reply.tmp.Rt78Yu"
+printf 'live\n' >"$staging_case/report/.other-run.md.publish.Ui90Op"
+printf 'live\n' >"$staging_case/work/.this-run-final-rerun-20261002-120000-CEST-final-continuation-prompt.tmp.Zx12Cv"
+printf 'partial\n' >"$staging_case/work/..this-run-anchor-records.tmp.AbCdEf.publish.XyZ123"
+printf 'kept\n' >"$staging_case/work/this-run-usage.json"
+(
+    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
+    REPORT_STEM_OWNED=true
+    collect_leftover_temp_files
+    printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
+) >"$staging_case/leftovers.txt"
+(
+    WORK_DIR="$staging_case/work" REPORT_DIR="$staging_case/report" REPORT_STEM=this-run TEMP_FILES=()
+    REPORT_STEM_OWNED=false
+    collect_leftover_temp_files
+    printf '%s\n' "${LEFTOVER_TEMP_FILES[@]}"
+) >"$staging_case/borrowed-leftovers.txt"
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run-usage.json.publish.Ab12Cd" \
+    'a staging copy left in the work directory is cleared'
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/report/.this-run.md.publish.Xy34Zw" \
+    'and one left in the report directory'
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/.this-run-amendment-reply.tmp.Qw56Er" \
+    'as is a temporary file a subshell made without a scratch directory'
+assert_false 'while the artifacts themselves stay' grep -qxF "$staging_case/work/this-run-usage.json" "$staging_case/leftovers.txt"
+assert_false 'and the files of another run are left alone' grep -q 'other-run' "$staging_case/leftovers.txt"
+assert_false 'nor those of a final rerun of this one, whose names start with its stem' \
+    grep -q 'final-rerun' "$staging_case/leftovers.txt"
+assert_file_contains "$staging_case/leftovers.txt" "$staging_case/work/..this-run-anchor-records.tmp.AbCdEf.publish.XyZ123" \
+    'the staging copy of a temporary file is cleared too'
+assert_eq '' "$(tr -d '\n' <"$staging_case/borrowed-leftovers.txt")" \
+    'and nothing is swept under a stem this invocation only borrowed from the run it reads'
+
+# The history of the runs is opened in a reviews directory that does not exist
+# yet too, so that prune can tell the first run of a new one is running.
+(
+    REVIEWS_ROOT="$suite_root/new-reviews-root" RUN_HISTORY_FILE="" PR_NUMBER=1
+    open_run_history
+    [[ -n "$RUN_HISTORY_FILE" ]]
+) || fail 'the run history of a new reviews directory is not opened'
+assert_true 'and the directory is created for it' test -d "$suite_root/new-reviews-root"
+
+# A file leaving the scratch directory for another file system is copied next
+# to its destination and renamed into place, so the destination never holds a
+# partial file; within one file system it is an ordinary rename.
+publish_root=${TMPDIR:-/tmp}
+other_root=/tmp
+[[ "$(df -P "$publish_root" | awk 'NR == 2 { print $NF }')" != "$(df -P "$other_root" | awk 'NR == 2 { print $NF }')" ]] \
+    || other_root=""
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_DEVICE=""
+REVIEW_PR_SCRATCH_DIR="$suite_root/publish-scratch" setup_scratch_dir
+printf 'same file system\n' >"$SCRATCH_DIR/same.txt"
+mkdir -p "$suite_root/publish-target"
+mv -- "$SCRATCH_DIR/same.txt" "$suite_root/publish-target/same.txt"
+assert_eq 'same file system' "$(<"$suite_root/publish-target/same.txt")" 'a file moved within one file system arrives'
+assert_false 'and leaves the scratch directory' test -e "$SCRATCH_DIR/same.txt"
+if [[ -n "$other_root" ]]; then
+    publish_target=$(mktemp -d "$other_root/review-pr-publish.XXXXXX")
+    printf 'other file system\n' >"$SCRATCH_DIR/other.txt"
+    chmod 600 "$SCRATCH_DIR/other.txt"
+    mv -- "$SCRATCH_DIR/other.txt" "$publish_target/other.txt"
+    assert_eq 'other file system' "$(<"$publish_target/other.txt")" 'a file moved to another file system arrives whole'
+    assert_eq 600 "$(stat -c '%a' "$publish_target/other.txt" 2>/dev/null || stat -f '%Lp' "$publish_target/other.txt")" \
+        'with its mode'
+    assert_false 'and leaves the scratch directory' test -e "$SCRATCH_DIR/other.txt"
+    assert_eq '' "$(find "$publish_target" -name '.*.publish.*' -print)" 'with no staging file left behind'
+    rm -rf "$publish_target"
+else
+    pass 'no second file system to publish across here'
+fi
+rm -rf "$SCRATCH_DIR"
+SCRATCH_DIR="" SCRATCH_DIR_OWNED=false SCRATCH_DIR_DEVICE=""
+
+# Times are formatted by the shell instead of date, and must read the same as
+# date does, in the configured zone and in the machine's own.
+fixed_epoch=1760000000
+date_at() { date -d "@${fixed_epoch}" "$@" 2>/dev/null || date -r "$fixed_epoch" "$@"; }
+saved_timezone=$REVIEW_PR_TIMEZONE
+for zone in America/New_York Asia/Kathmandu ''; do
+    REVIEW_PR_TIMEZONE=$zone
+    review_pr_format_time formatted '%Y-%m-%dT%H:%M:%S%z %Z' "$fixed_epoch"
+    if [[ -n "$zone" ]]; then
+        expected=$(TZ=$zone date_at '+%Y-%m-%dT%H:%M:%S%z %Z')
+    else
+        expected=$(date_at '+%Y-%m-%dT%H:%M:%S%z %Z')
+    fi
+    assert_eq "$expected" "$formatted" "a time formatted in ${zone:-the machine zone} reads as date prints it"
+done
+REVIEW_PR_TIMEZONE=America/New_York
+assert_eq "$(TZ=America/New_York date '+%Z')" "$(review_pr_date '+%Z')" \
+    'review_pr_date still answers a single format in the configured zone'
+assert_eq "$(LC_ALL=C TZ=America/New_York date_at '+%a %d %b %H:%M')" "$(format_quota_reset "$fixed_epoch")" \
+    'a quota reset time is shown in the configured zone'
+# The console is English, so the reset time is too, whatever the locale: under
+# Polish, bash printed "czw 09 paź" and date "czw. 09 paź" (or English on macOS).
+foreign_locale="" foreign_locpath=""
+foreign_locale=$(locale -a 2>/dev/null | grep -Eim1 '^(pl_PL|de_DE|fr_FR|uk_UA)\.utf-?8$' || true)
+if [[ -z "$foreign_locale" ]] && command -v localedef >/dev/null 2>&1 \
+    && [[ -f /usr/share/i18n/locales/pl_PL ]]; then
+    # Under the suite's directory, so its EXIT trap removes it on any exit.
+    foreign_locpath="$suite_root/locale"
+    mkdir -p -- "$foreign_locpath"
+    if localedef -i pl_PL -f UTF-8 "$foreign_locpath/pl_PL.UTF-8" >/dev/null 2>&1; then
+        foreign_locale=pl_PL.UTF-8
+    fi
+fi
+english_reset=$(LC_ALL=C TZ=America/New_York date_at '+%a %d %b %H:%M')
+if [[ -n "$foreign_locale" ]]; then
+    # A system locale is read without an inherited LOCPATH, which would hide
+    # the locale archive. The child prints the epoch in that locale first, so a
+    # locale that did not load cannot let the check pass in English.
+    if [[ -n "$foreign_locpath" ]]; then
+        locale_environment=(env LOCPATH="$foreign_locpath")
+    else
+        locale_environment=(env -u LOCPATH)
+    fi
+    foreign_output=$("${locale_environment[@]}" LC_ALL="$foreign_locale" REVIEW_PR_LIBRARY_MODE=true \
+        bash -c 'epoch=$2; printf "%(%a %d %b %H:%M)T\n" "$epoch"; source "$1" -- && REVIEW_PR_TIMEZONE=America/New_York && format_quota_reset "$epoch"' \
+        _ "$repo_root/bin/review-pr" "$fixed_epoch" 2>/dev/null)
+    foreign_baseline=${foreign_output%%$'\n'*}
+    foreign_reset=${foreign_output#*$'\n'}
+    if [[ "${foreign_baseline:0:3}" == "${english_reset:0:3}" ]]; then
+        pass "the ${foreign_locale} locale did not load here, so the reset time is not checked under it"
+    else
+        assert_eq "$english_reset" "$foreign_reset" "and in English under ${foreign_locale}"
+    fi
+else
+    pass 'no non-English locale here to show the reset time under'
+fi
+review_pr_format_time formatted '%Z'
+printf -v machine_zone '%(%Z)T' -1
+assert_eq "$(date '+%Z')" "$machine_zone" 'and the zone does not stay changed afterwards'
+REVIEW_PR_TIMEZONE=$saved_timezone
+unset -f date_at
+
+# A run identifier ends in whatever abbreviation the configured timezone has, and
+# some zones have no abbreviation at all -- date prints a numeric offset instead.
+assert_true 'a Central European identifier is still accepted' \
+    is_run_timestamp 20260922-092256-CEST
+assert_true 'an identifier from another zone is accepted' \
+    is_run_timestamp 20260922-110000-EDT
+assert_true 'a zone that prints a numeric offset is accepted' \
+    is_run_timestamp 20260922-194855-+0545
+assert_true 'an offset without minutes is accepted' \
+    is_run_timestamp 20260922-110355--03
+assert_true 'UTC is accepted' \
+    is_run_timestamp 20260922-110000-UTC
+assert_false 'a truncated identifier is still rejected' \
+    is_run_timestamp 20260922-110000
+assert_false 'an identifier with a path separator is rejected' \
+    is_run_timestamp 20260922-110000-CE/ST
+assert_false 'a malformed date is rejected' \
+    is_run_timestamp 2026922-110000-CEST
+
+# A timezone abbreviation does not order chronologically, so "newest" cannot be
+# the largest identifier. GMT follows IST but sorts before it, and a run made
+# after flying west carries a smaller clock time than the run before the flight.
+assert_eq 1790029280 "$(timestamp_to_epoch 2026-09-22T00:21:20+0200)" \
+    'an offset timestamp converts to the instant it names'
+assert_eq 1790029280 "$(timestamp_to_epoch 2026-09-21T22:21:20+0000)" \
+    'the same instant written in another offset converts identically'
+assert_false 'a timestamp that is not an instant is refused rather than guessed' \
+    timestamp_to_epoch 20260922-002120-CEST
+
+newest_case="$suite_root/newest-run"
+mkdir -p -- "$newest_case"
+write_run_manifest() {
+    jq -n --arg created_at "$2" '{created_at: $created_at}' >"$newest_case/$1.json"
+}
+
+# Ireland, the night the clocks go back: 01:30 IST, then 01:30 GMT an hour later.
+write_run_manifest ireland-first 2026-10-25T01:30:00+0100
+write_run_manifest ireland-second 2026-10-25T01:30:00+0000
+assert_true 'the run made after the clocks went back is the newer one' \
+    manifest_is_newer "$newest_case/ireland-second.json" 20261025-013000-GMT \
+        "$newest_case/ireland-first.json" 20261025-013000-IST
+assert_false 'and the earlier one is not' \
+    manifest_is_newer "$newest_case/ireland-first.json" 20261025-013000-IST \
+        "$newest_case/ireland-second.json" 20261025-013000-GMT
+
+# Warsaw 14:00, then New York 11:00 three hours later on the same day.
+write_run_manifest warsaw 2026-09-22T14:00:00+0200
+write_run_manifest new-york 2026-09-22T11:00:00-0400
+assert_true 'a run made after flying west is the newer one' \
+    manifest_is_newer "$newest_case/new-york.json" 20260922-110000-EDT \
+        "$newest_case/warsaw.json" 20260922-140000-CEST
+
+# Runs made before created_at existed still have to be ordered somehow.
+printf '{}\n' >"$newest_case/legacy-old.json"
+printf '{}\n' >"$newest_case/legacy-new.json"
+assert_true 'without a recorded instant the identifier still decides' \
+    manifest_is_newer "$newest_case/legacy-new.json" 20260922-140000-CEST \
+        "$newest_case/legacy-old.json" 20260922-090000-CEST
+assert_true 'the first candidate seen is always newer than nothing' \
+    manifest_is_newer "$newest_case/warsaw.json" 20260922-140000-CEST '' ''
+
+# The finalization model and the artifact-only rule were keyed on two phase names,
+# but a final answer that is continued, schema-repaired or anchor-repaired runs
+# under a name of its own. Those passes fell back to the agent's own model and, in
+# a --rerun-final, to the checkout -- reaching for code the same prompt forbids
+# them to read, and failing outright once the checkout has moved on.
+for phase in 'final synthesis' 'comparison synthesis' 'final findings continuation' 'final findings repair' 'final anchor repair'; do
+    assert_true "the finalization settings cover the $phase phase" is_final_phase "$phase"
+done
+for phase in 'primary review' 'cross-review' 'primary findings repair' 'cross-review findings repair' 'cross-review findings continuation'; do
+    assert_false "they do not reach the $phase phase" is_final_phase "$phase"
+done
+
+printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

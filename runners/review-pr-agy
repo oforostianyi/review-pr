@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+# The prompt, the event stream and the workspace copy of the repository stay
+# private to the user, whatever umask the orchestrator was started with.
+umask 077
+
+artifact_only=${REVIEW_PR_ARTIFACT_ONLY:-false}
+temporary_root=${TMPDIR:-/tmp}
+# Resolved, so the workspace path in the prompt is the one AGY sees as its cwd
+# and the sweep below recognises this runner's own directory by its path.
+temporary_root=$(cd -P -- "$temporary_root" && pwd -P)
+temporary_root=${temporary_root%/}
+# Everything this runner writes -- the prompt, the event stream, the response
+# and the workspace copy of the repository -- lives in one private directory,
+# with an owner file naming this process, so a later call can remove what a
+# runner killed outright left behind once that owner is gone.
+work_directory=""
+workspace_directory=""
+# The background child the runner waits for -- the workspace preparation, then
+# AGY -- in a process group of its own, so a signal stops it and everything it
+# started at once.
+child_pid=""
+signal_exit=false
+# AGY 1.4 can keep running after it has written its result, and it ignores
+# TERM and INT; it is stopped once this many seconds have passed since then.
+result_grace_seconds=${REVIEW_PR_AGY_RESULT_GRACE_SECONDS:-30}
+if [[ "$result_grace_seconds" =~ ^[0-9]{1,5}$ ]]; then
+    result_grace_seconds=$((10#$result_grace_seconds))
+else
+    result_grace_seconds=30
+fi
+(( result_grace_seconds <= 3600 )) || result_grace_seconds=3600
+runtime_directory=$(pwd -P)
+
+# Only a directory that this script made with mktemp is removed. Something
+# made read-only inside it gets write permission back for a second attempt.
+remove_work_directory() {
+    case "$1" in
+        */review-pr-agy.??????)
+            rm -rf -- "$1" 2>/dev/null || { chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" 2>/dev/null; } || true
+            ;;
+    esac
+}
+
+# Starts a command in the background in a process group of its own (job
+# control does that), with TTIN and TTOU ignored: a background group that
+# touches the terminal would otherwise be stopped, and the runner would wait
+# for it until the agent timeout.
+start_child() {
+    set -m
+    (
+        trap '' TTIN TTOU
+        "$@"
+    ) &
+    child_pid=$!
+    set +m
+}
+
+# KILL the whole group at once: AGY 1.4 ignores TERM and INT, git may be in
+# the middle of a clone, and the orchestrator kills this runner 5 s after its
+# own TERM.
+stop_child() {
+    kill -KILL -- "-${child_pid}" 2>/dev/null || kill -KILL "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=""
+}
+
+cleanup() {
+    local exit_status=$?
+
+    trap - EXIT HUP INT TERM
+    [[ -z "$child_pid" ]] || stop_child
+    [[ -z "${sleep_pid:-}" ]] || kill "$sleep_pid" 2>/dev/null || true
+    if [[ -n "$work_directory" ]]; then
+        if [[ "$signal_exit" == true ]]; then
+            # Deleting a large copy can outlast the 5 s the orchestrator allows
+            # after TERM, so it goes on in the background.
+            remove_work_directory "$work_directory" </dev/null >/dev/null 2>&1 &
+        else
+            remove_work_directory "$work_directory"
+        fi
+    fi
+    exit "$exit_status"
+}
+
+trap cleanup EXIT
+trap 'signal_exit=true; exit 129' HUP
+trap 'signal_exit=true; exit 130' INT
+trap 'signal_exit=true; exit 143' TERM
+
+work_directory=$(mktemp -d "${temporary_root}/review-pr-agy.XXXXXX")
+# The owner is this process and its start time, so a PID that another process
+# has reused does not keep an abandoned directory for good. The time is read in
+# the C locale and UTC, so runners with another TZ or LANG read it alike.
+process_start_time() {
+    LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null || true
+}
+
+# The whole command line of a process, or nothing when it cannot be read; -ww
+# keeps ps from cutting it at the terminal width or COLUMNS.
+process_command() {
+    LC_ALL=C ps -ww -o command= -p "$1" 2>/dev/null || true
+}
+printf '%s %s\n' "$$" "$(process_start_time "$$")" >"${work_directory}/owner"
+prompt_file=${work_directory}/prompt
+events_file=${work_directory}/events
+response_file=${work_directory}/response
+message_file=${work_directory}/message
+# Each turn of the conversation keeps its own event stream, the first in
+# events_file, so a failure can show all of them.
+declare -a turn_events_files=("$events_file")
+
+# Removes the directories of runners that are gone. One without an owner file
+# may belong to a runner that has only just made it, unless it is an hour old.
+sweep_abandoned_work_directories() {
+    local directory owner owner_pid owner_started current_start current_command
+
+    for directory in "${temporary_root}"/review-pr-agy.??????; do
+        [[ -d "$directory" && ! -L "$directory" && -O "$directory" ]] || continue
+        [[ "$directory" != "$work_directory" ]] || continue
+        owner=""
+        [[ ! -f "${directory}/owner" ]] || owner=$(<"${directory}/owner") || owner=""
+        owner_pid=${owner%% *}
+        owner_started=""
+        [[ "$owner" != *" "* ]] || owner_started=${owner#* }
+        if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+            if kill -0 "$owner_pid" 2>/dev/null; then
+                # Alive, unless the PID now belongs to a process started later.
+                # A start time that cannot be read keeps the directory. On
+                # Linux a clock step moves every reported start time, so a
+                # changed one alone is not enough: the PID must also run
+                # something other than this runner.
+                current_start=$(process_start_time "$owner_pid")
+                [[ -n "$owner_started" && -n "$current_start" && "$current_start" != "$owner_started" ]] || continue
+                current_command=$(process_command "$owner_pid")
+                [[ -n "$current_command" && "$current_command" != *review-pr-agy* ]] || continue
+            fi
+        elif [[ -z "$(find "$directory" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+            continue
+        fi
+        remove_work_directory "$directory"
+    done
+}
+
+command -v agy >/dev/null 2>&1 || {
+    printf '%s\n' 'review-pr-agy: required command not found: agy' >&2
+    exit 127
+}
+if [[ "$artifact_only" != true ]]; then
+    command -v git >/dev/null 2>&1 || {
+        printf '%s\n' 'review-pr-agy: required command not found: git' >&2
+        exit 127
+    }
+fi
+command -v jq >/dev/null 2>&1 || {
+    printf '%s\n' 'review-pr-agy: required command not found: jq' >&2
+    exit 127
+}
+
+cat >"$prompt_file"
+sweep_abandoned_work_directories
+
+# Copies the checkout into the workspace. It runs in the background, so a
+# signal is handled at once instead of after a clone of a large repository.
+prepare_workspace() {
+    source_repository=$(git rev-parse --show-toplevel)
+    head_sha=$(git -C "$source_repository" rev-parse --verify 'HEAD^{commit}')
+    # Source-aware phases run in a throwaway copy of the PR checkout, so
+    # accidental changes are discarded. A copy, not a worktree: a worktree's
+    # .git points into the review checkout, outside the workspace, where AGY's
+    # terminal sandbox does not let git read. Copied object files, not
+    # hardlinks, so nothing run in the copy can reach the checkout's objects,
+    # and dissociated from any alternates the checkout borrows from.
+    git clone --quiet --local --no-hardlinks --dissociate --no-checkout -- \
+        "$source_repository" "$workspace_directory" >&2
+    # A shallow checkout is copied over the transport, which brings only what
+    # its refs reach; the base, fetched by commit, is not among them.
+    for review_commit in "$head_sha" ${REVIEW_PR_BASE_SHA:+"$REVIEW_PR_BASE_SHA"}; do
+        git -C "$workspace_directory" cat-file -e "${review_commit}^{commit}" 2>/dev/null && continue
+        git -C "$workspace_directory" fetch --quiet --no-tags --update-shallow \
+            "$source_repository" "$review_commit" >&2 || {
+            printf 'review-pr-failure: could not copy commit %s into the AGY workspace\n' "$review_commit" >&2
+            exit 1
+        }
+    done
+    # LFS objects stay in the review checkout; AGY sees their pointer files.
+    GIT_LFS_SKIP_SMUDGE=1 git -C "$workspace_directory" checkout --quiet --detach "$head_sha" >&2
+}
+
+if [[ "$artifact_only" != true ]]; then
+    workspace_directory=${work_directory}/repo
+    start_child prepare_workspace
+    preparation_status=0
+    wait "$child_pid" || preparation_status=$?
+    child_pid=""
+    (( preparation_status == 0 )) || exit "$preparation_status"
+    runtime_directory=$workspace_directory
+fi
+
+declare -a model_arguments=()
+declare -a effort_arguments=()
+if [[ -n "${REVIEW_PR_MODEL:-}" ]]; then
+    model_arguments=(--model "$REVIEW_PR_MODEL")
+fi
+if [[ -n "${REVIEW_PR_EFFORT:-}" ]]; then
+    effort_arguments=(--effort "$REVIEW_PR_EFFORT")
+fi
+
+read_only_preamble='This is a read-only code review. Never create, edit, rename, or delete files or directories. Do not redirect command output with > or >> and do not create temporary files in /tmp, scratch, or anywhere else. Run exactly one read-only command per tool call: never use shell control operators or composition such as &&, ||, ;, |, command substitution, or redirection. Use only commands that print results to stdout: git diff, git show, git log, git grep, git status, rg, grep, sed, find, and ls; when rg is missing, use grep. Do not run tests, builds, linters, interpreters, package managers, or network commands: they are denied, and a denied command ends the review without a result. Return the complete review as your final response.'
+runtime_workspace_instruction='The Repository path in the orchestrator metadata is logical context, not the filesystem location you may inspect. The only permitted runtime workspace is supplied below. Use relative paths from that workspace, or this exact path, for every file/search tool. Do not access the logical repository path or any other checkout.'
+if [[ "$artifact_only" == true ]]; then
+    read_only_preamble='This is an artifact-only final re-synthesis. Use only the reports embedded in the prompt. Do not inspect source files, run Git, read the current GitHub PR, or use filesystem/search/command tools. Return the complete synthesized review as your final response.'
+    runtime_workspace_instruction='No source checkout is supplied for this artifact-only run. The current directory is only the orchestrator artifact directory and must not be inspected.'
+fi
+
+# Characters that must not reach a terminal or a log line as they are: C0, DEL
+# and C1 controls, and invisible or bidirectional formatting characters.
+printable_jq='def printable: explode | map(if . < 32 or (. >= 127 and . < 160) or (. >= 8203 and . <= 8207) or (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297) or . == 65279 then 32 else . end) | implode;'
+
+# Normalizes the usage of all turns, from the last result of each turn's
+# stream that reports one. AGY 1.4 counts a resumed conversation as a whole:
+# a result whose num_turns has grown already includes the earlier turns, so it
+# replaces them. A result without a growing turn count is added. It runs before
+# the response is judged: an empty or failed response has still spent its
+# tokens, and the orchestrator decides whether to retry a final synthesis by them.
+write_usage_summary() {
+    local quiet=${1:-} usage_temporary_file
+
+    [[ -n "${REVIEW_PR_USAGE_JSON:-}" ]] || return 0
+    usage_temporary_file="${REVIEW_PR_USAGE_JSON}.agy.$$"
+    if jq -R -n -e \
+        --arg agent "${REVIEW_PR_AGENT:-agy}" \
+        --arg phase "${REVIEW_PR_PHASE:-unknown}" \
+        --arg model "${REVIEW_PR_MODEL:-}" \
+        --arg effort "${REVIEW_PR_EFFORT:-}" \
+        '
+            def add_usage($earlier; $later):
+                reduce ("total_tokens", "input_tokens", "output_tokens", "cache_read_tokens") as $key
+                    ($earlier;
+                     .[$key] = (if $earlier[$key] == null and $later[$key] == null then null
+                                else ($earlier[$key] // 0) + ($later[$key] // 0) end));
+            reduce (inputs
+                    | input_filename as $file
+                    | fromjson?
+                    | select(type == "object" and .event? == "result")
+                    | .result
+                    | select((.usage? | type) == "object")
+                    | {file: $file, result: .}) as $item
+                ([]; if length > 0 and .[-1].file == $item.file then .[:-1] + [$item] else . + [$item] end)
+            | map(.result)
+            | if length == 0 then null else
+                reduce .[1:][] as $result ({usage: .[0].usage, turns: .[0].num_turns};
+                    if ($result.num_turns | type) == "number" and (.turns | type) == "number"
+                        and $result.num_turns > .turns
+                    then {usage: $result.usage, turns: $result.num_turns}
+                    else {usage: add_usage(.usage; $result.usage), turns: ($result.num_turns // .turns)}
+                    end)
+                | .usage
+              end
+            | if type != "object" then error("missing Antigravity usage") else
+                {
+                    schema_version: 1,
+                    agent: $agent,
+                    phase: $phase,
+                    model: (if $model == "" then null else $model end),
+                    effort: (if $effort == "" then null else $effort end),
+                    reasoning_effort: (if $effort == "" then null else $effort end),
+                    available: true,
+                    source: "antigravity_cli_stream_json",
+                    reported_total_tokens: (.total_tokens // null),
+                    input_tokens: (.input_tokens // null),
+                    output_tokens: (.output_tokens // null),
+                    cache_read_tokens: (.cache_read_tokens // null),
+                    cache_write_tokens: null
+                }
+              end
+        ' "${turn_events_files[@]}" >"$usage_temporary_file" 2>/dev/null; then
+        mv -- "$usage_temporary_file" "$REVIEW_PR_USAGE_JSON"
+        if [[ -n "${REVIEW_PR_USAGE_FILE:-}" ]]; then
+            jq -r '.reported_total_tokens // empty' "$REVIEW_PR_USAGE_JSON" >"$REVIEW_PR_USAGE_FILE"
+        fi
+    else
+        rm -f -- "$usage_temporary_file"
+        [[ -n "$quiet" ]] \
+            || printf '%s\n' 'review-pr-agy: could not normalize Antigravity usage; preserving the generic usage summary.' >&2
+    fi
+}
+
+# Headless AGY denies a command that no allow rule covers and may then end the
+# turn with an empty response. AGY 1.3 marks the denied step as an ERROR with
+# the command in it; AGY 1.4 lists the denial in the result's denied_actions,
+# without the command, and the turn ends at it, so the command is the last
+# run_command step. Prints what was denied in one turn's stream, or nothing.
+# The command is model-chosen text, so it is cut short and stripped of
+# control characters.
+describe_denial() {
+    jq -R -n -r "$printable_jq"'
+        [inputs | fromjson?] as $events
+        | ([$events[]
+            | select(.event? == "step_update" and .step_update.state? == "ERROR")
+            | .step_update.tool_info?
+            | select(((.error.message? // "") | tostring | startswith("permission check failed")))
+            | .parameters.CommandLine? // empty] | last) as $errored_command
+        | [$events[] | select(.event? == "result") | .result.denied_actions? // empty | .[]?] as $denied_actions
+        | ([$events[]
+            | select(.event? == "step_update")
+            | .step_update
+            | select((.tool_name? // .tool_info.name? // "") == "run_command")
+            | .tool_info.parameters.CommandLine? // empty] | last) as $last_command
+        | if $errored_command != null then "a command that no allow rule covers: \($errored_command)"
+          elif any($denied_actions[]; .action? == "command") and $last_command != null then
+              "a command that no allow rule covers: \($last_command)"
+          elif ($denied_actions | length) > 0 then
+              "a tool call that no allow rule covers: \($denied_actions | map(.display_name? // .action? // "unknown" | tostring) | join(", "))"
+          else empty end
+        | printable
+        | .[0:240]
+    ' <"$1" 2>/dev/null || true
+}
+
+# The orchestrator shows a review-pr-failure line with the failure. No rule is
+# suggested for a denied command: a denial can be the policy working.
+report_denied_command() {
+    local denial
+
+    denial=$(describe_denial "${turn_events_files[-1]}")
+    if [[ -n "$denial" ]]; then
+        printf 'review-pr-failure: AGY denied %s\n' "$denial" >&2
+    else
+        printf '%s\n' "review-pr-failure: AGY returned $1; a denied tool call is the usual cause, see the error log" >&2
+    fi
+}
+
+jq -cn \
+    --rawfile prompt "$prompt_file" \
+    --arg preamble "$read_only_preamble" \
+    --arg runtime_instruction "$runtime_workspace_instruction" \
+    --arg workspace "$runtime_directory" \
+    '{event: "user", message: {content: ($preamble + "\n\n" + $prompt + "\n\n===== AGY RUNTIME WORKSPACE =====\n" + $runtime_instruction + "\nWorkspace: " + $workspace + "\n===== END AGY RUNTIME WORKSPACE =====")}}' \
+    >"$message_file"
+
+# Runs AGY on message_file into the given stream; further arguments go before
+# the fixed flags.
+run_agy() {
+    local turn_events_file=$1
+    shift
+
+    cd "$runtime_directory"
+    exec agy \
+        "$@" \
+        --input-format stream-json \
+        --output-format stream-json \
+        --sandbox \
+        "${model_arguments[@]}" \
+        "${effort_arguments[@]}" <"$message_file" >"$turn_events_file"
+}
+
+# Reads the event lines AGY has completed since the last call, from the open
+# descriptor events_fd, and returns 0 at the first that is a result event. A
+# line still being written is kept for the next call, so a torn result cannot
+# start the grace period. Only a complete line that names a result anywhere is
+# parsed, and only its top-level event counts.
+pending_event_text=""
+read_result_event() {
+    local line
+
+    while IFS= read -r -u "$events_fd" line; do
+        line=${pending_event_text}${line}
+        pending_event_text=""
+        if [[ "$line" == *'"result"'* ]] && jq -e '.event == "result"' <<<"$line" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    pending_event_text+=$line
+    return 1
+}
+
+# A KILL can cut the last event of a stream short. Only complete events are
+# judged; the torn one would make every whole-stream jq below fail.
+drop_incomplete_events() {
+    local stream=$1 complete_events all_lines
+
+    jq -R -c 'fromjson? | objects' "$stream" >"${stream}.complete" 2>/dev/null || return 0
+    complete_events=$(wc -l <"${stream}.complete")
+    all_lines=$(wc -l <"$stream")
+    if (( complete_events < all_lines )) || [[ -s "$stream" && -n "$(tail -c 1 "$stream")" ]]; then
+        printf '%s\n' 'review-pr-agy: dropped an incomplete or malformed line from the Antigravity event stream.' >&2
+    fi
+    mv -- "${stream}.complete" "$stream"
+}
+
+# Runs one AGY turn into the given stream; further arguments go to agy. Waits
+# for AGY or for the next check, whichever comes first. The check runs every
+# few seconds on one sleep, not once a second on a sleep and a grep: an
+# endpoint scanner inspects each process. A signal to the runner interrupts the
+# wait at once. AGY is stopped when it outlives its result by the grace period.
+# Sets agy_status.
+check_interval_seconds=5
+run_agy_turn() {
+    local turn_events_file=$1
+    local result_seen_at="" remaining_grace wait_seconds finished_pid wait_status agy_pid
+    shift
+
+    # The stream exists before AGY starts, so the runner can open it for reading.
+    : >"$turn_events_file"
+    start_child run_agy "$turn_events_file" "$@"
+    agy_pid=$child_pid
+    exec {events_fd}<"$turn_events_file"
+    pending_event_text=""
+    agy_status=""
+    while [[ -z "$agy_status" ]]; do
+        if [[ -z "$result_seen_at" ]] && read_result_event; then
+            result_seen_at=$EPOCHSECONDS
+        fi
+        wait_seconds=$check_interval_seconds
+        if [[ -n "$result_seen_at" ]]; then
+            remaining_grace=$(( result_grace_seconds - (EPOCHSECONDS - result_seen_at) ))
+            if (( remaining_grace <= 0 )); then
+                printf 'review-pr-agy: Antigravity did not exit %s s after its result; stopping it.\n' "$result_grace_seconds" >&2
+                stop_child
+                agy_status=0
+                break
+            fi
+            (( remaining_grace >= wait_seconds )) || wait_seconds=$remaining_grace
+        fi
+        sleep "$wait_seconds" &
+        sleep_pid=$!
+        finished_pid=""
+        wait_status=0
+        wait -n -p finished_pid "$agy_pid" "$sleep_pid" || wait_status=$?
+        if [[ "$finished_pid" == "$agy_pid" ]]; then
+            agy_status=$wait_status
+            kill "$sleep_pid" 2>/dev/null || true
+            wait "$sleep_pid" 2>/dev/null || true
+        elif ! kill -0 "$agy_pid" 2>/dev/null; then
+            # Bash 5.1 and 5.2 may not report through wait -n a job that
+            # ended between two waits; its status is collected directly.
+            agy_status=0
+            wait "$agy_pid" 2>/dev/null || agy_status=$?
+            kill "$sleep_pid" 2>/dev/null || true
+            wait "$sleep_pid" 2>/dev/null || true
+        elif [[ -z "$finished_pid" ]]; then
+            # wait -n failed without naming a job: keep the pace on the sleep.
+            wait "$sleep_pid" 2>/dev/null || true
+        fi
+        sleep_pid=""
+    done
+    child_pid=""
+    exec {events_fd}<&-
+    drop_incomplete_events "$turn_events_file"
+}
+
+# True when the last result of a turn's stream is a SUCCESS with no text.
+ended_with_empty_success() {
+    jq -R -n -e '
+        [inputs | fromjson? | select(type == "object" and .event? == "result")]
+        | last
+        | (.result.status? == "SUCCESS") and ((.result.response? // "") | tostring | test("^\\s*$"))
+    ' <"$1" >/dev/null 2>&1
+}
+
+# The conversation of a turn's stream: AGY 1.4 names it on the init and result
+# events, AGY 1.3 on every step. Only a plain identifier is passed back to agy.
+conversation_of() {
+    jq -R -n -r '
+        first(inputs
+              | fromjson?
+              | select(type == "object")
+              | (.conversation_id?, .result.conversation_id?, .step_update.conversation_id?)
+              | strings
+              | select(test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
+        // empty
+    ' <"$1" 2>/dev/null || true
+}
+
+# Dumps every turn's events, the result of each turn last, for the error log.
+dump_event_streams() {
+    local turn_index
+
+    for turn_index in "${!turn_events_files[@]}"; do
+        printf 'review-pr-agy: event stream of turn %s of %s\n' "$((turn_index + 1))" "${#turn_events_files[@]}" >&2
+        jq -c 'select(.event != "init" and .event != "result")' "${turn_events_files[turn_index]}" >&2 || true
+        jq -c 'select(.event == "result") | .result | {status, response, usage, error}' "${turn_events_files[turn_index]}" >&2 || true
+    done
+}
+
+# A turn that ends with an empty response after a denial is continued in the
+# same conversation, at most this many times. The follow-up message is fixed:
+# the denied command is model-chosen text, possibly steered by the PR, and must
+# not come back to the model as an instruction.
+follow_up_limit=2
+follow_up_message='A command or tool call in your previous turn was denied by the permission policy and did not run. The denial is final: do not run it again or a substitute for it. Continue the task with the allowed read-only commands only, and return the complete result the task asks for as your final response, in the format it specifies.'
+conversation_id=""
+follow_ups=0
+declare -a conversation_arguments=()
+
+while true; do
+    run_agy_turn "${turn_events_files[-1]}" "${conversation_arguments[@]}"
+    # Recorded after every turn, so a runner stopped during a follow-up still
+    # reports what the finished turns spent; the orchestrator retries a final
+    # synthesis only when it sees spent output tokens.
+    write_usage_summary quietly
+    (( agy_status == 0 && follow_ups < follow_up_limit )) || break
+    ended_with_empty_success "${turn_events_files[-1]}" || break
+    denial=$(describe_denial "${turn_events_files[-1]}")
+    [[ -n "$denial" ]] || break
+    [[ -n "$conversation_id" ]] || conversation_id=$(conversation_of "${turn_events_files[-1]}")
+    [[ -n "$conversation_id" ]] || break
+
+    follow_ups=$((follow_ups + 1))
+    printf 'review-pr-agy: AGY denied %s; continuing the conversation (follow-up %s of %s)\n' \
+        "$denial" "$follow_ups" "$follow_up_limit" >&2
+    turn_events_files+=("${work_directory}/events.$((follow_ups + 1))")
+    jq -cn --arg content "$follow_up_message" '{event: "user", message: {content: $content}}' >"$message_file"
+    conversation_arguments=(--conversation "$conversation_id")
+done
+last_events_file=${turn_events_files[-1]}
+
+write_usage_summary
+
+# A non-zero exit after a successful result keeps the result, as a stop by
+# the grace period does.
+if (( agy_status != 0 )); then
+    if jq -n -e 'any(inputs; .event == "result" and .result.status == "SUCCESS" and ((.result.response | strings) | test("\\S")))' \
+        "$last_events_file" >/dev/null 2>&1; then
+        printf 'review-pr-agy: Antigravity exited with status %s after a successful result; using that result.\n' "$agy_status" >&2
+    else
+        dump_event_streams
+        printf '%s\n' 'review-pr-agy: Antigravity CLI failed.' >&2
+        printf 'review-pr-failure: the Antigravity CLI exited with status %s\n' "$agy_status" >&2
+        exit 1
+    fi
+fi
+
+# The whole stream as one input, so an event after the result cannot decide
+# the exit status, which jq 1.6 takes from the last input.
+if ! jq -n -e -r '
+    last(inputs | select(.event == "result" and .result.status == "SUCCESS") | .result.response)
+' "$last_events_file" >"$response_file"; then
+    dump_event_streams
+    printf '%s\n' 'review-pr-agy: Antigravity did not return a successful response.' >&2
+    result_error=$(jq -r "$printable_jq"'
+        select(.event == "result") | .result.error // empty | tostring
+        | printable
+        | .[0:200]
+    ' "$last_events_file" 2>/dev/null | tail -n 1) || result_error=""
+    if [[ -n "$result_error" ]]; then
+        printf 'review-pr-failure: AGY ended with an error: %s\n' "$result_error" >&2
+    else
+        report_denied_command 'no successful response'
+    fi
+    exit 1
+fi
+
+if ! grep -q '[^[:space:]]' "$response_file"; then
+    dump_event_streams
+    printf '%s\n' 'review-pr-agy: Antigravity returned an empty final response.' >&2
+    report_denied_command 'an empty final response'
+    exit 1
+fi
+
+cat -- "$response_file"

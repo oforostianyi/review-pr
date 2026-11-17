@@ -1,0 +1,56 @@
+#!/bin/sh
+
+set -eu
+
+find_bash() {
+    candidate=${REVIEW_PR_BASH:-}
+    if [ -n "$candidate" ] && "$candidate" -c '(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))' 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [ -x "$candidate" ] && "$candidate" -c '(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))' 2>/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    candidate=$(command -v bash 2>/dev/null || true)
+    if [ -n "$candidate" ] && "$candidate" -c '(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))' 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+case $0 in
+    */*) launcher_path=$0 ;;
+    *) launcher_path=$(command -v "$0" 2>/dev/null || true) ;;
+esac
+[ -n "$launcher_path" ] || {
+    printf '%s\n' 'review-pr could not resolve its installation path.' >&2
+    exit 1
+}
+
+bin_dir=$(CDPATH= cd "$(dirname "$launcher_path")" && pwd -P)
+prefix_dir=$(CDPATH= cd "${bin_dir}/.." && pwd -P)
+implementation="${prefix_dir}/libexec/review-pr/review-pr"
+[ -f "$implementation" ] || {
+    printf 'review-pr implementation not found: %s\n' "$implementation" >&2
+    exit 1
+}
+
+config_pointer="${prefix_dir}/libexec/review-pr/config-path"
+if [ -z "${REVIEW_PR_CONFIG:-}" ] && [ -r "$config_pointer" ]; then
+    IFS= read -r REVIEW_PR_CONFIG <"$config_pointer" || true
+    [ -n "$REVIEW_PR_CONFIG" ] && export REVIEW_PR_CONFIG
+fi
+
+bash_path=$(find_bash) || {
+    printf '%s\n' 'review-pr requires Bash 5.1 or newer.' >&2
+    printf '%s\n' 'On macOS install it with: brew install bash' >&2
+    exit 1
+}
+
+exec "$bash_path" "$implementation" "$@"
