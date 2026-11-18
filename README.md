@@ -763,6 +763,24 @@ The subcommand reads only the canonical final sidecar a structured run already p
 
 Confirmed findings are exported by default. `--include uncertain` adds the claims that could not be settled, and `--include all` adds refuted ones too; an agent should act on the confirmed set and reproduce an uncertain claim before touching anything. Findings with no natural changed-line anchor, such as a missing test or migration, keep an empty anchor and are listed after the anchored ones instead of being dropped. Without `--run`, the freshest final synthesis for that pull request is used, including one produced by `--rerun-final`. A run without `reporting.finding_contract.final = ndjson-v1` publishes no such sidecar and is refused with that reason.
 
+## Compare reviewers
+
+`review-pr stats` reads the artifacts of finished runs and prints, for each reviewer (a model with
+its reasoning effort), how many findings it raised and what the final synthesis made of them, by
+severity: confirmed and found by it alone, confirmed and shared with another reviewer, uncertain,
+rejected. Together with the precision and the average tokens per run, that shows which reviewer
+finds real problems of its own and which mostly costs tokens:
+
+```bash
+review-pr stats
+review-pr stats --since 2026-11-01 --json
+```
+
+`--since`, `--until` and `--repo <owner/name>` narrow the runs, and `--json` prints the figures for
+another tool. The command only reads; it needs a structured final synthesis
+(`reporting.finding_contract.final` set to `ndjson-v1`) and skips runs without one. The columns
+and the counting rules are described under "Reviewer statistics" in `docs/review-pr.md`.
+
 ## Free space in the reviews directory
 
 Every run keeps what its agents streamed and logged in its work directory, so a review that went

@@ -4,6 +4,21 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- `review-pr stats` compares reviewers from the artifacts finished runs already keep. For each
+  reviewer -- a model with its reasoning effort, whatever the agent is called -- it prints one row:
+  the runs it took part in, the findings it raised and, per severity, how many the final synthesis
+  confirmed that only this reviewer had found (`So`), confirmed that another reviewer had found too
+  (`Sh`), left uncertain (`Un`) and rejected (`Rj`), then the confirmed share of everything it
+  raised and its average tokens per run. A confirmed finding counts at its final severity and an
+  uncertain or rejected one at the severity its reviewer claimed, so a false P1 alarm shows as one.
+  `--since` and `--until` (`YYYY-MM-DD`, inclusive) and `--repo <owner/name>` narrow the runs, and
+  `--json` prints the same figures as one object. Runs without a complete structured final
+  synthesis are skipped and counted as skipped. The command reads only: it starts no agent, writes
+  nothing and is not recorded in the run history. `--json` is accepted with `stats` as well as
+  `quota`.
+
 ## [1.29.0] - 2026-11-10
 
 ### Added

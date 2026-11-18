@@ -825,7 +825,7 @@ inspection.
 
 ## Report layout
 
-The root of `reviews_directory` holds `run-history.jsonl`, an append-only log of every run across every configured repository, so "what ran last night" is one file rather than a walk through review directories. Each run appends two lines: one when it starts and one when it ends. Both are written, because a run that was interrupted, or refused once it had started (nothing to review, the same head again), would otherwise leave no trace at all; a run refused before it starts, for its configuration, its arguments or the Codex quota, is not recorded, and the end record is appended from the exit path so it survives a failure, a `die`, or Ctrl+C. A record carries the time, pull request, repository, mode (`full`, `resume`, `rerun-final`), review id, run timestamp, exit status, duration, the `review-pr` version, the configuration file, and the process id. `findings`, `quota`, `prune`, `contract-test`, and `--show-config` are not runs and are not logged. The first run creates the file, and the reviews directory if needed, and `prune` reads it to tell whether a review is still running.
+The root of `reviews_directory` holds `run-history.jsonl`, an append-only log of every run across every configured repository, so "what ran last night" is one file rather than a walk through review directories. Each run appends two lines: one when it starts and one when it ends. Both are written, because a run that was interrupted, or refused once it had started (nothing to review, the same head again), would otherwise leave no trace at all; a run refused before it starts, for its configuration, its arguments or the Codex quota, is not recorded, and the end record is appended from the exit path so it survives a failure, a `die`, or Ctrl+C. A record carries the time, pull request, repository, mode (`full`, `resume`, `rerun-final`), review id, run timestamp, exit status, duration, the `review-pr` version, the configuration file, and the process id. `findings`, `quota`, `prune`, `stats`, `contract-test`, and `--show-config` are not runs and are not logged. The first run creates the file, and the reviews directory if needed, and `prune` reads it to tell whether a review is still running.
 
 ```bash
 jq -r 'select(.event=="finished") | "\(.at) \(.repository)#\(.pr) \(.mode) exit=\(.exit_status) \(.duration_seconds)s"' \
@@ -976,6 +976,49 @@ review-pr findings --run last repository#123
 ```
 
 `--include` takes `confirmed` (the default), `uncertain`, or `all`; it does not read `reporting.findings_export`. Without `--run`, or with `--run last`, the newest structured final synthesis is used, a `--rerun-final` included, judged by the time its manifest recorded; runs whose final contract is `markdown` have nothing to export and are skipped. The command is refused when no structured final synthesis exists, or when `--run <timestamp>` names a run without one. The command only reads published artifacts: it starts no agent, writes nothing, and is not recorded in the run history. Each entry carries the id, classification, severity, category, anchor, title, claim, failure scenario, recommendation, and verification limitations; findings without a changed-line anchor are listed last. A `review` object names the head, base, version, methodology hash, run kind (`full` or `final-rerun`), and phase durations; a field the run's manifest did not record is `null`. `--run <timestamp>` selects that run, or the newest `--rerun-final` made from it.
+
+## Reviewer statistics
+
+`review-pr stats` says, for every reviewer, what became of the findings it raised: how many the final synthesis confirmed, how many of those nobody else had found, and how many it left uncertain or rejected. It answers "is this reviewer worth its tokens" from the artifacts finished runs already keep, without reading a single Markdown report:
+
+```bash
+review-pr stats
+review-pr stats --since 2026-11-01 --until 2026-11-30
+review-pr stats --repo owner/name --json
+```
+
+```text
+review-pr stats   2026-11-01..2026-11-17   42 runs
+
+                        |       P1       |       P2       |       P3        |
+Reviewer Eff   Runs   T |  T So Sh Un Rj |  T So Sh Un Rj |   T So Sh Un Rj | Prec Tok/run
+model-a  high    42 190 | 14  3  8  1  2 | 61 12 33  5 11 | 115 26 57 11 21 |  73%    6.7M
+model-b  xhigh   42 164 | 11  2  7  0  2 | 55 10 31  4 10 |  98 21 52  9 16 |  75%    3.4M
+model-c  high     5  31 |  4  0  1  0  3 | 11  2  4  1  4 |  16  6  3  3  4 |  52%    2.1M
+
+T total   So confirmed, only this reviewer   Sh confirmed, shared
+Un uncertain   Rj rejected   Prec (So+Sh)/T   Tok/run avg tokens per run
+3 runs skipped (no structured final findings)
+```
+
+A reviewer is a model with a reasoning effort, read from the usage file of its primary review, not an agent name: an agent that was switched to another model becomes another row, and two agents that ran the same model with the same effort share one. The table shows the model without a provider prefix. When a run recorded no model for a reviewer, the agent name stands in for it. Each reviewer is measured only on the runs it took part in, which is what `Runs` counts.
+
+What is counted is a final finding for a reviewer whose primary review contributed to it, so two primary records the final synthesis merged into one finding count once:
+
+| Column | Meaning | Severity group |
+|---|---|---|
+| `So` | confirmed, and no other reviewer raised it | the final severity |
+| `Sh` | confirmed, and another reviewer raised it too | the final severity |
+| `Un` | left uncertain | the severity the reviewer claimed |
+| `Rj` | rejected | the severity the reviewer claimed |
+
+A confirmed finding sits in the group of its final severity, so `P1 So 1` means the reviewer alone found a real P1, not that it called something P1. An uncertain or rejected finding has no final severity and sits in the group the reviewer claimed, so `P1 Rj 3` reads as three false P1 alarms. The first `T` is everything the reviewer raised, `Prec` is the confirmed share of it, and `Tok/run` is the tokens its primary review and its cross-review reported, averaged over its runs; tokens of failed attempts are not included. The P0 group appears only when someone has a P0 figure.
+
+A run counts when it has a complete structured final synthesis whose findings name the primary records behind them, which needs `reporting.finding_contract.final` set to `ndjson-v1`; after a `--rerun-final` the latest complete synthesis is the one read. Any other run, and one whose manifest or findings do not parse, is skipped, and the last line says how many were. Three rare cases are part of a reviewer's total without belonging to a severity group, and the table names each in a line of its own when it occurs: an uncertain or rejected finding whose reviewer claimed no severity, a finding that fits no group (confirmed without a severity, or a reference to a primary record that does not exist), and a primary record no final finding refers to.
+
+`--since` and `--until` take a date as `YYYY-MM-DD`, are inclusive, and compare with the date in the run's own timestamp. `--repo` takes a GitHub repository as `owner/name` and keeps the runs stored in that repository's folder whose manifest does not name another one. `--json` prints the same figures as one object: `schema_version`, the `filters` in force, `runs` (`counted`, `skipped`), the `period` of the counted runs, and `reviewers`, each with `model`, `effort`, `agents`, `runs`, `by_severity` (`P0` to `P3` with `total`, `sole`, `shared`, `uncertain`, `rejected`, and `none` with `uncertain` and `rejected`), `total`, `unresolved`, `unaccounted`, `precision` (a whole percentage, `null` when nothing was raised), and `tokens` (`total`, `per_run`, `runs_without_usage`).
+
+The command only reads: it starts no agent, needs neither `gh` nor a checkout, writes nothing, is not recorded in the run history, and can run while a review is running. It reads one run per `jq` process, so a history of several hundred runs takes a few seconds, and a period given with `--since` takes proportionally less. `prune` does not remove anything it reads. `stats` takes no pull-request target and cannot be combined with another subcommand or with `--show-config`, `--run`, `--rerun-final`, `--force`, `--same-head` or `--reviewers`; `--since`, `--until` and `--repo` are accepted only with `stats`, and `--json` only with `stats` and `quota`.
 
 ## Add an agent without writing code
 

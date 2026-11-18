@@ -207,6 +207,10 @@ QUOTA_MODE=false
 QUOTA_JSON=false
 PRUNE_MODE=false
 PRUNE_APPLY=false
+STATS_MODE=false
+STATS_SINCE=""
+STATS_UNTIL=""
+STATS_REPOSITORY=""
 QUOTA_CODEX_MINIMUM=""
 CODEX_QUOTA_SHORTFALL=""
 CODEX_QUOTA_SUMMARY=""
@@ -799,6 +803,310 @@ prune_add_repository_candidate() {
     dir_candidates[$dir]=${existing:+${existing}$'\n'}${repository}
 }
 
+# A date as --since and --until take it. The day is not checked against the
+# month: the value is only compared with run dates, and 02-31 compares as well
+# as any other.
+is_calendar_date() {
+    [[ "$1" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]
+}
+
+# One finished run as one line of JSON: who reviewed it and what became of each
+# final finding a reviewer had a hand in. Prints nothing and returns 1 for a run
+# that cannot be counted -- no complete structured final synthesis, one from
+# before findings named their primary records, an artifact that does not parse,
+# or no reviewer's primary findings on disk -- so one damaged run costs only
+# itself.
+#
+# A reviewer took part when the manifest lists it and its primary findings file
+# is a non-empty regular file, which is how phase_handle_map decides whose
+# records get a handle; the handles are derived here the same way, since they
+# are never stored. The manifest's agent_status is not asked: a resumed run can
+# record "unknown" for a reviewer whose review was kept.
+stats_run_summary() {
+    local manifest=$1 prefix run agent file content candidate phase index
+    local -a agents=() primary_files=() usage=() candidates=() reruns=()
+    local restore_shopt
+
+    [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
+    [[ "${manifest##*/}" =~ (${RUN_TIMESTAMP_PATTERN})-manifest\.json$ ]] || return 1
+    run=${BASH_REMATCH[1]}
+    prefix=${manifest%-manifest.json}
+
+    restore_shopt=$(shopt -p nullglob || :)
+    shopt -s nullglob
+    for file in "$prefix"-*-findings.json; do
+        agent=${file#"${prefix}-"}
+        agent=${agent%-findings.json}
+        [[ "$agent" != cross-* && "$agent" != final && "$agent" != final-rerun-* ]] || continue
+        [[ -f "$file" && -s "$file" && ! -L "$file" ]] || continue
+        agents+=("$agent")
+        primary_files+=("$file")
+    done
+    reruns=("$prefix"-final-rerun-*-findings.json)
+    eval "$restore_shopt"
+    (( ${#agents[@]} > 0 )) || return 1
+
+    # The names differ only in the rerun's timestamp, so the last one in name
+    # order is the latest synthesis; the run's own final comes after them all.
+    for (( index = ${#reruns[@]} - 1; index >= 0; index-- )); do
+        candidates+=("${reruns[index]}")
+    done
+    candidates+=("${prefix}-final-findings.json")
+
+    # A usage file is read here and parsed leniently in jq: one that is missing,
+    # empty or cut short leaves the reviewer without a model and without tokens,
+    # and must not cost the run.
+    for agent in "${agents[@]}"; do
+        for phase in primary cross; do
+            file="${prefix}-${agent}-usage.json"
+            [[ "$phase" == primary ]] || file="${prefix}-cross-${agent}-usage.json"
+            [[ -f "$file" && -s "$file" && ! -L "$file" ]] || continue
+            content=""
+            { content=$(<"$file"); } 2>/dev/null || continue
+            usage+=("$agent" "$phase" "$content")
+        done
+    done
+
+    for candidate in "${candidates[@]}"; do
+        [[ -f "$candidate" && -s "$candidate" && ! -L "$candidate" ]] || continue
+        if jq -n -c --arg run "$run" --arg agents "$(printf '%s\n' "${agents[@]}")" '
+            def rank: if type == "string" then {"P0": 0, "P1": 1, "P2": 2, "P3": 3}[.] else null end;
+            def ref_key: .agent + " " + (.source_id | tostring);
+
+            input as $manifest | input as $final | [inputs] as $documents
+            | $ARGS.positional as $usage
+            | ($agents | split("\n") | map(select(length > 0))) as $names
+            | if ($documents | length) != ($names | length) then error("a primary findings file holds no document") else . end
+            | if ($final.complete == true and ($final.findings | type) == "array"
+                  and ($final.findings | all(type == "object" and (.primary_refs | type) == "array")))
+              then . else error("no complete structured final synthesis") end
+            | [$manifest.reviewers[] | select(type == "string") | . as $reviewer
+                | ($names | index($reviewer)) as $at | select($at != null)
+                | {agent: $reviewer, findings: $documents[$at].findings}] as $parts
+            | if ($parts | length) == 0 then error("no reviewer took part") else . end
+            | ($manifest.reporting.source_handles == true) as $handles
+            | ([$parts[] | .agent as $agent | .findings[] | {agent: $agent, source_id, severity}]
+                | to_entries
+                | map(.value + {source_id: (if $handles
+                        then ((.key + 1) | tostring) as $n | "r" + (if ($n | length) < 2 then "0" + $n else $n end)
+                        else .value.source_id end)})) as $records
+            | ($records | map({key: ref_key, value: .}) | from_entries) as $known
+            | ([$final.findings[].primary_refs[] | select(type == "object") | {key: ref_key, value: true}] | from_entries) as $referenced
+            # A reviewer is a model with an effort. Two agents that ran the same
+            # one are one reviewer of this run: a finding both raised is its own
+            # and counts once. An agent with no model on record is a reviewer by
+            # its own name, as is an agent a finding names that took no part.
+            | [$parts[] | .agent as $agent
+                | ([range(0; $usage | length; 3) | select($usage[.] == $agent) | {phase: $usage[. + 1], usage: ($usage[. + 2] | fromjson? | select(type == "object"))}]) as $own_usage
+                | ([$own_usage[] | select(.phase == "primary") | .usage] | first) as $primary_usage
+                | (($primary_usage.model? // null) | if type == "string" and length > 0 then . else null end) as $model
+                | {agent: $agent,
+                   reviewer: [($model // $agent),
+                              (if $model == null then "" else (($primary_usage.effort? // null) | if type == "string" then . else "" end) end)],
+                   tokens: [$own_usage[] | .usage.reported_total_tokens | select(type == "number")]}] as $agents_seen
+            | ($agents_seen | map({key: .agent, value: .reviewer}) | from_entries) as $reviewer_of
+            | {run: $run,
+               date: ($run[0:4] + "-" + $run[4:6] + "-" + $run[6:8]),
+               repository: ($manifest.github_repository | if type == "string" and length > 0 then . else null end),
+               reviewers: [$agents_seen | group_by(.reviewer)[]
+                | .[0].reviewer as $reviewer
+                | (map({key: .agent, value: true}) | from_entries) as $mine
+                | ([.[].tokens[]]) as $tokens
+                | {agents: (map(.agent) | sort),
+                   model: $reviewer[0],
+                   effort: $reviewer[1],
+                   tokens: ($tokens | add // 0),
+                   has_usage: (($tokens | length) > 0),
+                   unaccounted: ([$records[] | select($mine[.agent]) | ref_key | select($referenced[.] | not)] | length),
+                   pairs: [$final.findings[]
+                    | [.primary_refs[] | select(type == "object")] as $refs
+                    | select(any($refs[]; $mine[.agent]))
+                    | ([$refs[] | select($mine[.agent]) | $known[ref_key] | select(. != null)]) as $own
+                    | if .classification == "CONFIRMED" then
+                        {column: (if ([$refs[].agent | $reviewer_of[.] // ["", "", .]] | unique | length) == 1 then "sole" else "shared" end),
+                         group: (if (.severity | rank) != null then .severity else "unresolved" end)}
+                      elif .classification == "UNCERTAIN" or .classification == "REJECTED" then
+                        {column: (.classification | ascii_downcase),
+                         group: (if ($own | length) == 0 then "unresolved"
+                                 else ([$own[].severity | select(rank != null)] | min_by(rank)) // "none" end)}
+                      else empty end]}]}
+            ' "$manifest" "$candidate" "${primary_files[@]}" --args "${usage[@]}" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Every run the filters leave, as its summary line, and then one line that
+# says how many of them could not be counted. The date is the one in the run's
+# file names, so a run outside the period costs no jq process; a repository is
+# first the folder named after it, as findings looks reviews up, and the
+# manifest has the last word in stats_document.
+stats_collect_summaries() {
+    local dir name manifest stamp date slug="" restore_shopt skipped=0
+    local -a manifests=()
+
+    if [[ -n "$STATS_REPOSITORY" ]]; then
+        slug=${STATS_REPOSITORY//\//-}
+        slug=${slug,,}
+    fi
+    if [[ -d "$REVIEWS_ROOT" ]]; then
+        restore_shopt=$(shopt -p nullglob || :)
+        shopt -s nullglob
+        for dir in "$REVIEWS_ROOT"/*/[0-9]*-*/; do
+            dir=${dir%/}
+            name=${dir##*/}
+            [[ "${name%%-*}" =~ ^[0-9]+$ && -d "${dir}/work" && ! -L "$dir" ]] || continue
+            if [[ -n "$slug" ]]; then
+                name=${dir%/*}
+                [[ "${name##*/}" == "$slug" ]] || continue
+            fi
+            manifests+=("$dir"/work/*-manifest.json "$dir"/work/[0-9]*/*-manifest.json)
+        done
+        eval "$restore_shopt"
+    fi
+    for manifest in "${manifests[@]}"; do
+        [[ "${manifest##*/}" != *-final-rerun-* ]] || continue
+        [[ "${manifest##*/}" =~ (${RUN_TIMESTAMP_PATTERN})-manifest\.json$ ]] || continue
+        stamp=${BASH_REMATCH[1]}
+        date="${stamp:0:4}-${stamp:4:2}-${stamp:6:2}"
+        [[ -z "$STATS_SINCE" || ! "$date" < "$STATS_SINCE" ]] || continue
+        [[ -z "$STATS_UNTIL" || ! "$date" > "$STATS_UNTIL" ]] || continue
+        stats_run_summary "$manifest" || skipped=$((skipped + 1))
+    done
+    printf '{"skipped":%d}\n' "$skipped"
+}
+
+# The statistics document from the lines stats_collect_summaries prints. A
+# reviewer is a model with an effort, whatever its agents were called and
+# whichever repository it reviewed; a run summary already has one entry per
+# reviewer, so the entries of a reviewer are the runs it took part in.
+stats_document() {
+    jq -s --arg since "$1" --arg until "$2" --arg repository "$3" '
+        def given: if . == "" then null else . end;
+        def half_up: (. + 0.5) | floor;
+        def count(condition): [.[] | select(condition)] | length;
+
+        ([.[] | select(has("skipped")) | .skipped] | add // 0) as $skipped
+        | [.[] | select(has("run"))
+            | select($repository == "" or .repository == null
+                or (.repository | ascii_downcase) == ($repository | ascii_downcase))] as $runs
+        | {schema_version: 1,
+           filters: {since: ($since | given), until: ($until | given), repository: ($repository | given)},
+           runs: {counted: ($runs | length), skipped: $skipped},
+           period: (if ($runs | length) == 0 then null
+                    else {from: ([$runs[].date] | min), to: ([$runs[].date] | max)} end),
+           reviewers: ([$runs[].reviewers[]]
+            | group_by([.model, .effort])
+            | map(. as $rows
+                | [$rows[].pairs[]] as $pairs
+                | ($rows | length) as $run_count
+                | ([$rows[].unaccounted] | add) as $unaccounted
+                | (($pairs | length) + $unaccounted) as $total
+                | ([$rows[].tokens] | add) as $tokens
+                | {model: $rows[0].model,
+                   effort: $rows[0].effort,
+                   agents: ([$rows[].agents[]] | unique),
+                   runs: $run_count,
+                   by_severity: ((reduce ("P0", "P1", "P2", "P3") as $group ({};
+                        ([$pairs[] | select(.group == $group)]) as $in
+                        | .[$group] = {total: ($in | length),
+                                       sole: ($in | count(.column == "sole")),
+                                       shared: ($in | count(.column == "shared")),
+                                       uncertain: ($in | count(.column == "uncertain")),
+                                       rejected: ($in | count(.column == "rejected"))}))
+                    + {none: {uncertain: ($pairs | count(.group == "none" and .column == "uncertain")),
+                              rejected: ($pairs | count(.group == "none" and .column == "rejected"))}}),
+                   total: $total,
+                   unresolved: ($pairs | count(.group == "unresolved")),
+                   unaccounted: $unaccounted,
+                   precision: (if $total == 0 then null
+                               else (($pairs | count(.column == "sole" or .column == "shared")) * 100 / $total | half_up) end),
+                   tokens: {total: $tokens,
+                            per_run: ($tokens / $run_count | half_up),
+                            runs_without_usage: ($rows | count(.has_usage | not))}})
+            | sort_by([-.runs, .model, .effort]))}'
+}
+
+# The statistics document as a table: a row per reviewer, a group of columns
+# per severity, every column as wide as its widest figure. P0 is shown only
+# when someone has a P0 figure, since most histories have none.
+stats_render_table() {
+    jq -r '
+        def spaces($count): if $count > 0 then " " * $count else "" end;
+        def right($width): tostring | spaces($width - length) + .;
+        def left($width): tostring | . + spaces($width - length);
+        def centre($width): (($width - length) / 2 | floor) as $before
+            | spaces($before) + . + spaces($width - length - $before);
+        def counted($count; $one; $many): "\($count) " + (if $count == 1 then $one else $many end);
+        def tenths($unit): (. / 10 | floor | tostring) + "." + (. % 10 | tostring) + $unit;
+        # Rounded first, so that 999,950 is 1.0M and not 1000.0K.
+        def short_tokens:
+            if . < 1000 then tostring
+            else ((. / 100 + 0.5) | floor) as $thousands
+                | if $thousands < 10000 then $thousands | tenths("K")
+                  else ((. / 100000 + 0.5) | floor) | tenths("M") end
+            end;
+
+        . as $document
+        | (["P0", "P1", "P2", "P3"] | map(select(. != "P0" or any($document.reviewers[]; .by_severity.P0.total > 0)))) as $groups
+        | ([["Reviewer", "Eff", "Runs", "T"]] + [$groups[] | ["T", "So", "Sh", "Un", "Rj"]] + [["Prec", "Tok/run"]]) as $header
+        | [$document.reviewers[] | . as $reviewer
+            | [[(.model | split("/") | last), .effort, .runs, .total]]
+              + [$groups[] | $reviewer.by_severity[.] | [.total, .sole, .shared, .uncertain, .rejected]]
+              + [[(if .precision == null then "-" else "\(.precision)%" end), (.tokens.per_run | short_tokens)]]
+            | map(map(tostring))] as $rows
+        | [range(0; $header | length) as $segment
+            | [range(0; $header[$segment] | length) as $column
+                | [$header[$segment][$column], ($rows[] | .[$segment][$column])] | map(length) | max]] as $widths
+        | def line: . as $cells
+            | [range(0; $cells | length) as $segment
+                | [range(0; $cells[$segment] | length) as $column
+                    | $cells[$segment][$column]
+                    | if $segment == 0 and $column < 2 then left($widths[$segment][$column]) else right($widths[$segment][$column]) end]
+                | join(" ")]
+            | join(" | ");
+          def segment_width($segment): ($widths[$segment] | add) + ($widths[$segment] | length) - 1;
+          ([counted($document.runs.skipped; "run"; "runs") + " skipped (no structured final findings)"
+            | select($document.runs.skipped > 0)]) as $skipped
+        | if $document.runs.counted == 0 then
+            "No finished review with structured final findings to count.", $skipped[]
+          else
+            "review-pr stats   \($document.period.from)..\($document.period.to)   " + counted($document.runs.counted; "run"; "runs"),
+            "",
+            (spaces(segment_width(0)) + " | "
+                + ([range(0; $groups | length) as $index | $groups[$index] | centre(segment_width($index + 1))] | join(" | ")) + " |"),
+            ($header | line),
+            ($rows[] | line),
+            "",
+            "T total   So confirmed, only this reviewer   Sh confirmed, shared",
+            "Un uncertain   Rj rejected   Prec (So+Sh)/T   Tok/run avg tokens per run",
+            (([$document.reviewers[].by_severity.none | .uncertain + .rejected] | add) as $none
+                | select($none > 0)
+                | counted($none; "uncertain or rejected finding"; "uncertain or rejected findings") + " without a claimed severity (in the overall T only)"),
+            (([$document.reviewers[].unresolved] | add) as $unresolved
+                | select($unresolved > 0)
+                | counted($unresolved; "finding that fits"; "findings that fit") + " no severity group (in the overall T only)"),
+            (([$document.reviewers[].unaccounted] | add) as $unaccounted
+                | select($unaccounted > 0)
+                | counted($unaccounted; "primary finding"; "primary findings") + " no final finding refers to (in the overall T only)"),
+            $skipped[]
+          end'
+}
+
+# The statistics as a table, or as the document itself with --json.
+stats_report() {
+    local document
+
+    document=$(stats_collect_summaries | stats_document "$STATS_SINCE" "$STATS_UNTIL" "$STATS_REPOSITORY") \
+        || die 'The statistics could not be computed'
+    if [[ "$QUOTA_JSON" == true ]]; then
+        printf '%s\n' "$document"
+    else
+        stats_render_table <<<"$document"
+    fi
+}
+
 format_megabytes() {
     local bytes=$1
     printf '%d.%d MB' "$((bytes / 1048576))" "$((bytes * 10 / 1048576 % 10))"
@@ -947,6 +1255,7 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] findings [--run <timestamp>] [--include <confirmed|uncertain|all>] <pull-request-number>
        ${0##*/} [--config <file>] quota [codex] [--json]
        ${0##*/} [--config <file>] prune [--apply]
+       ${0##*/} [--config <file>] stats [--since <YYYY-MM-DD>] [--until <YYYY-MM-DD>] [--repo <owner/name>] [--json]
        ${0##*/} --version
 EOF
 }
@@ -14389,6 +14698,21 @@ while (( $# > 0 )); do
             PRUNE_APPLY=true
             shift
             ;;
+        stats)
+            STATS_MODE=true
+            shift
+            ;;
+        --since | --until)
+            (( $# >= 2 )) && is_calendar_date "$2" || die "$1 requires a date as YYYY-MM-DD"
+            if [[ "$1" == --since ]]; then STATS_SINCE=$2; else STATS_UNTIL=$2; fi
+            shift 2
+            ;;
+        --repo)
+            (( $# >= 2 )) && [[ "$2" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+                || die '--repo requires a GitHub repository as owner/name'
+            STATS_REPOSITORY=$2
+            shift 2
+            ;;
         --json)
             QUOTA_JSON=true
             shift
@@ -14458,11 +14782,15 @@ set -- "${positional_arguments[@]}"
 # dispatch order would otherwise win, and `contract-test prune` would start paid
 # agents for what was meant as a dry run.
 selected_subcommands=0
-for selected_mode in "$CONTRACT_TEST_MODE" "$FINDINGS_MODE" "$QUOTA_MODE" "$PRUNE_MODE"; do
+for selected_mode in "$CONTRACT_TEST_MODE" "$FINDINGS_MODE" "$QUOTA_MODE" "$PRUNE_MODE" "$STATS_MODE"; do
     [[ "$selected_mode" != true ]] || selected_subcommands=$((selected_subcommands + 1))
 done
-(( selected_subcommands <= 1 )) || die 'Only one subcommand at a time: contract-test, findings, quota, or prune'
+(( selected_subcommands <= 1 )) || die 'Only one subcommand at a time: contract-test, findings, quota, prune, or stats'
 [[ "$PRUNE_APPLY" == false || "$PRUNE_MODE" == true ]] || die '--apply is only valid for the prune subcommand'
+[[ "$STATS_MODE" == true || -z "${STATS_SINCE}${STATS_UNTIL}${STATS_REPOSITORY}" ]] \
+    || die '--since, --until and --repo are only valid for the stats subcommand'
+# Both are dates in one fixed form, so the later one sorts after the earlier.
+[[ -z "$STATS_SINCE" || -z "$STATS_UNTIL" || ! "$STATS_SINCE" > "$STATS_UNTIL" ]] || die '--since is later than --until'
 if [[ "$CONTRACT_TEST_MODE" != true && ( ${#CONTRACT_TEST_AGENTS[@]} -gt 0 || "$CONTRACT_TEST_PHASE" != all || -n "$CONTRACT_TEST_OUTPUT" ) ]]; then
     die '--agent, --phase, and --output are only valid with contract-test'
 fi
@@ -14487,7 +14815,7 @@ fi
 load_config
 if [[ -n "$REVIEWERS_OVERRIDE" ]]; then
     [[ "$RERUN_FINAL" == false && -z "$RUN_SELECTOR" && "$CONTRACT_TEST_MODE" == false && "$QUOTA_MODE" == false && "$FINDINGS_MODE" == false \
-        && "$PRUNE_MODE" == false ]] \
+        && "$PRUNE_MODE" == false && "$STATS_MODE" == false ]] \
         || die '--reviewers applies to a new review or --show-config; a rerun or resume keeps the reviewers of the run it continues'
     apply_reviewer_selection "$REVIEWERS_OVERRIDE"
 fi
@@ -14505,7 +14833,7 @@ if [[ "$QUOTA_MODE" == true ]]; then
         || die 'quota cannot be combined with PR workflow options'
     if show_quota; then exit 0; else exit $?; fi
 fi
-[[ "$QUOTA_JSON" == false ]] || die '--json is only valid for the quota subcommand'
+[[ "$QUOTA_JSON" == false || "$STATS_MODE" == true ]] || die '--json is only valid for the quota and stats subcommands'
 if [[ "$PRUNE_MODE" == true ]]; then
     (( $# == 0 )) || die 'prune does not accept a pull-request target'
     [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" \
@@ -14514,6 +14842,16 @@ if [[ "$PRUNE_MODE" == true ]]; then
     [[ -n "$REVIEWS_ROOT" ]] || REVIEWS_ROOT="${HOME}/review-pr"
     [[ "$REVIEWS_ROOT" == /* ]] || die "Reviews directory must be an absolute path: ${REVIEWS_ROOT}"
     prune_review_outputs "$PRUNE_APPLY"
+    exit 0
+fi
+if [[ "$STATS_MODE" == true ]]; then
+    (( $# == 0 )) || die 'stats does not accept a pull-request target'
+    [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" \
+        && "$SAME_HEAD_ALLOWED" == false ]] \
+        || die 'stats cannot be combined with PR workflow options'
+    [[ -n "$REVIEWS_ROOT" ]] || REVIEWS_ROOT="${HOME}/review-pr"
+    [[ "$REVIEWS_ROOT" == /* ]] || die "Reviews directory must be an absolute path: ${REVIEWS_ROOT}"
+    stats_report
     exit 0
 fi
 activate_default_repository
