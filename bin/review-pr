@@ -823,8 +823,8 @@ is_calendar_date() {
 # are never stored. The manifest's agent_status is not asked: a resumed run can
 # record "unknown" for a reviewer whose review was kept.
 stats_run_summary() {
-    local manifest=$1 prefix run agent file content candidate phase index
-    local -a agents=() primary_files=() usage=() candidates=() reruns=()
+    local manifest=$1 prefix run agent file candidate phase index
+    local -a agents=() primary_files=() usage=() usage_files=() candidates=() reruns=()
     local restore_shopt
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
@@ -853,23 +853,23 @@ stats_run_summary() {
     done
     candidates+=("${prefix}-final-findings.json")
 
-    # A usage file is read here and parsed leniently in jq: one that is missing,
-    # empty or cut short leaves the reviewer without a model and without tokens,
-    # and must not cost the run.
+    # A usage file is handed to jq as text and parsed leniently there: one that
+    # is missing, empty or cut short leaves the reviewer without a model and
+    # without tokens, and must not cost the run. As a file, not an argument: a
+    # long error message can make it larger than one argument may be.
     for agent in "${agents[@]}"; do
         for phase in primary cross; do
             file="${prefix}-${agent}-usage.json"
             [[ "$phase" == primary ]] || file="${prefix}-cross-${agent}-usage.json"
-            [[ -f "$file" && -s "$file" && ! -L "$file" ]] || continue
-            content=""
-            { content=$(<"$file"); } 2>/dev/null || continue
-            usage+=("$agent" "$phase" "$content")
+            [[ -f "$file" && -s "$file" && -r "$file" && ! -L "$file" ]] || continue
+            usage+=("$agent" "$phase" "u${#usage_files[@]}")
+            usage_files+=(--rawfile "u${#usage_files[@]}" "$file")
         done
     done
 
     for candidate in "${candidates[@]}"; do
         [[ -f "$candidate" && -s "$candidate" && ! -L "$candidate" ]] || continue
-        if jq -n -c --arg run "$run" --arg agents "$(printf '%s\n' "${agents[@]}")" '
+        if jq -n -c --arg run "$run" --arg agents "$(printf '%s\n' "${agents[@]}")" "${usage_files[@]}" '
             def rank: if type == "string" then {"P0": 0, "P1": 1, "P2": 2, "P3": 3}[.] else null end;
             def ref_key: .agent + " " + (.source_id | tostring);
 
@@ -897,7 +897,7 @@ stats_run_summary() {
             # and counts once. An agent with no model on record is a reviewer by
             # its own name, as is an agent a finding names that took no part.
             | [$parts[] | .agent as $agent
-                | ([range(0; $usage | length; 3) | select($usage[.] == $agent) | {phase: $usage[. + 1], usage: ($usage[. + 2] | fromjson? | select(type == "object"))}]) as $own_usage
+                | ([range(0; $usage | length; 3) | select($usage[.] == $agent) | {phase: $usage[. + 1], usage: ($ARGS.named[$usage[. + 2]] | fromjson? | select(type == "object"))}]) as $own_usage
                 | ([$own_usage[] | select(.phase == "primary") | .usage] | first) as $primary_usage
                 | (($primary_usage.model? // null) | if type == "string" and length > 0 then . else null end) as $model
                 | {agent: $agent,
@@ -937,14 +937,45 @@ stats_run_summary() {
     return 1
 }
 
-# Every run the filters leave, as its summary line, and then one line that
-# says how many of them could not be counted. The date is the one in the run's
-# file names, so a run outside the period costs no jq process; a repository is
-# first the folder named after it, as findings looks reviews up, and the
-# manifest has the last word in stats_document.
+# How many runs are read at a time: one per processor, eight at most.
+stats_job_count() {
+    local count
+
+    count=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || count=1
+    [[ "$count" =~ ^[0-9]+$ ]] || count=1
+    (( count >= 1 )) || count=1
+    (( count <= 8 )) || count=8
+    printf '%d' "$count"
+}
+
+# The summary lines of every <jobs>-th manifest, starting at the <worker>-th,
+# and then one line that says how many of them could not be counted.
+stats_summarise_slice() {
+    local worker=$1 jobs=$2 index=0 skipped=0 manifest
+    shift 2
+
+    for manifest in "$@"; do
+        if (( index++ % jobs == worker )); then
+            stats_run_summary "$manifest" || skipped=$((skipped + 1))
+        fi
+    done
+    printf '{"skipped":%d}\n' "$skipped"
+}
+
+# Every run the filters leave, as its summary line, with a line for the runs
+# that could not be counted. The date is the one in the run's file names, so a
+# run outside the period costs no jq process; a repository is first the folder
+# named after it, as findings looks reviews up, and the manifest has the last
+# word in stats_document.
+#
+# Reading a run is one jq process that parses its findings, a few milliseconds
+# each, so the runs are shared out among workers that read at the same time.
+# Each writes to a pipe of its own and the pipes are read one after another, so
+# the lines of two workers never mix; a worker whose pipe is full waits its
+# turn. The order of the lines does not matter to stats_document.
 stats_collect_summaries() {
-    local dir name manifest stamp date slug="" restore_shopt skipped=0
-    local -a manifests=()
+    local jobs=${1:-} dir name manifest stamp date slug="" restore_shopt worker descriptor
+    local -a manifests=() in_period=() descriptors=()
 
     if [[ -n "$STATS_REPOSITORY" ]]; then
         slug=${STATS_REPOSITORY//\//-}
@@ -972,9 +1003,23 @@ stats_collect_summaries() {
         date="${stamp:0:4}-${stamp:4:2}-${stamp:6:2}"
         [[ -z "$STATS_SINCE" || ! "$date" < "$STATS_SINCE" ]] || continue
         [[ -z "$STATS_UNTIL" || ! "$date" > "$STATS_UNTIL" ]] || continue
-        stats_run_summary "$manifest" || skipped=$((skipped + 1))
+        in_period+=("$manifest")
     done
-    printf '{"skipped":%d}\n' "$skipped"
+
+    [[ "$jobs" =~ ^[0-9]+$ ]] || jobs=$(stats_job_count)
+    (( jobs <= ${#in_period[@]} )) || jobs=${#in_period[@]}
+    if (( jobs <= 1 )); then
+        stats_summarise_slice 0 1 "${in_period[@]}"
+        return 0
+    fi
+    for (( worker = 0; worker < jobs; worker++ )); do
+        exec {descriptor}< <(stats_summarise_slice "$worker" "$jobs" "${in_period[@]}")
+        descriptors+=("$descriptor")
+    done
+    for descriptor in "${descriptors[@]}"; do
+        cat <&"$descriptor"
+        exec {descriptor}<&-
+    done
 }
 
 # The statistics document from the lines stats_collect_summaries prints. A
@@ -1051,8 +1096,12 @@ stats_render_table() {
         . as $document
         | (["P0", "P1", "P2", "P3"] | map(select(. != "P0" or any($document.reviewers[]; .by_severity.P0.total > 0)))) as $groups
         | ([["Reviewer", "Eff", "Runs", "T"]] + [$groups[] | ["T", "So", "Sh", "Un", "Rj"]] + [["Prec", "Tok/run"]]) as $header
+        # The provider prefix is dropped where the rest of the name still says
+        # which model it is, and kept where another model has the same name.
+        | def short: split("/") | last;
+          ([$document.reviewers[].model] | unique | group_by(short) | map(select(length > 1) | .[]) ) as $ambiguous
         | [$document.reviewers[] | . as $reviewer
-            | [[(.model | split("/") | last), .effort, .runs, .total]]
+            | [[(.model | if . as $model | any($ambiguous[]; . == $model) then . else short end), .effort, .runs, .total]]
               + [$groups[] | $reviewer.by_severity[.] | [.total, .sole, .shared, .uncertain, .rejected]]
               + [[(if .precision == null then "-" else "\(.precision)%" end), (.tokens.per_run | short_tokens)]]
             | map(map(tostring))] as $rows
@@ -1067,7 +1116,7 @@ stats_render_table() {
                 | join(" ")]
             | join(" | ");
           def segment_width($segment): ($widths[$segment] | add) + ($widths[$segment] | length) - 1;
-          ([counted($document.runs.skipped; "run"; "runs") + " skipped (no structured final findings)"
+          ([counted($document.runs.skipped; "run"; "runs") + " skipped (unfinished, unreadable, or without structured final findings)"
             | select($document.runs.skipped > 0)]) as $skipped
         | if $document.runs.counted == 0 then
             "No finished review with structured final findings to count.", $skipped[]

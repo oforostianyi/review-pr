@@ -254,6 +254,12 @@ summary=$(stats_run_summary "$run_manifest")
 assert_eq 'alpha||700|true' "$(jq -r '.reviewers[0] | [.model, .effort, .tokens, .has_usage] | map(tostring) | join("|")' <<<"$summary")" \
     'and only the primary usage names the model, while any number of tokens counts'
 
+jq -n '{model: "mock-alpha", effort: "high", reported_total_tokens: 900, error_message: ("x" * 200000)}' >"${run_prefix}-alpha-usage.json"
+assert_eq 0 "$(summary_status)" 'a usage file too large for one command-line argument does not cost the run'
+summary=$(stats_run_summary "$run_manifest")
+assert_eq 'mock-alpha|high|1600|true' "$(jq -r '.reviewers[0] | [.model, .effort, .tokens, .has_usage] | map(tostring) | join("|")' <<<"$summary")" \
+    'and is read like any other'
+
 # Two agents on one model and effort are one reviewer within a run as well.
 make_run 124-fix-FIX-124 20261102-201500-CET
 write_manifest '["alpha", "beta", "gamma"]' true
@@ -470,7 +476,7 @@ assert_eq "$expected" "$stats_output" 'a P0 finding brings the P0 group, and eac
 
 run_stats --until 2026-11-30
 assert_eq 'review-pr stats   2026-11-01..2026-11-03   3 runs' "$(sed -n 1p <<<"$stats_output")" 'the first line names the period and the runs'
-assert_eq '1 run skipped (no structured final findings)' "$(tail -n 1 <<<"$stats_output")" 'and the last one the runs that could not be counted'
+assert_eq '1 run skipped (unfinished, unreadable, or without structured final findings)' "$(tail -n 1 <<<"$stats_output")" 'and the last one the runs that could not be counted'
 assert_eq 6 "$(grep -c -E '^(provider/)?(mock-|gamma|zeta)' <<<"$stats_output")" 'with a row for every reviewer'
 assert_eq 'mock-beta xhigh 2 3 | 2 1 0 0 1 | 1 0 1 0 0 | 0 0 0 0 0 | 67% 1.5K' "$(sed -n 5p <<<"$stats_output" | tr -s ' ')" \
     'the reviewer with the most runs first'
@@ -478,7 +484,7 @@ assert_eq 'mock-beta xhigh 2 3 | 2 1 0 0 1 | 1 0 1 0 0 | 0 0 0 0 0 | 67% 1.5K' "
 run_stats --since 2027-01-01
 assert_eq 'No finished review with structured final findings to count.' "$stats_output" 'a period without runs says so'
 run_stats --since 2026-12-04
-assert_eq $'No finished review with structured final findings to count.\n1 run skipped (no structured final findings)' "$stats_output" \
+assert_eq $'No finished review with structured final findings to count.\n1 run skipped (unfinished, unreadable, or without structured final findings)' "$stats_output" \
     'and names the runs it could not count'
 
 # Widths, plurals and token figures, on a document written by hand.
@@ -510,9 +516,28 @@ assert_eq 'model-with-a-long-name xhigh 42 296 | 14 3 8 1 2 | 61 12 33 5 11 | 21
 assert_eq '- 0|- 999|- 1.0K|- 1.0K|- 1.1K|- 999.9K|- 1.0M' "$(sed -n '6,12p' <<<"$table" | awk '{ printf "%s%s %s", (NR > 1 ? "|" : ""), $(NF - 1), $NF }')" \
     'tokens are written short, and a reviewer that raised nothing has no precision'
 assert_eq 'review-pr stats   2026-11-01..2026-11-17   42 runs' "$(sed -n 1p <<<"$table")" 'many runs are runs'
-assert_eq $'2 uncertain or rejected findings without a claimed severity (in the overall T only)\n2 findings that fit no severity group (in the overall T only)\n2 primary findings no final finding refers to (in the overall T only)\n2 runs skipped (no structured final findings)' \
+assert_eq $'2 uncertain or rejected findings without a claimed severity (in the overall T only)\n2 findings that fit no severity group (in the overall T only)\n2 primary findings no final finding refers to (in the overall T only)\n2 runs skipped (unfinished, unreadable, or without structured final findings)' \
     "$(tail -n 4 <<<"$table")" 'and more than one of anything is plural'
 assert_false 'without a P0 finding there is no P0 group' grep -q 'P0' <<<"$table"
+
+document=$(jq '.reviewers = [.reviewers[1] | (.model = "provider-a/same-name"), (.model = "same-name"), (.model = "provider-b/other-name")]' <<<"$document")
+assert_eq 'provider-a/same-name same-name other-name' "$(stats_render_table <<<"$document" | sed -n '5,7p' | awk '{ printf "%s%s", (NR > 1 ? " " : ""), $1 }')" \
+    'two models that differ only in their provider keep it, so that their rows can be told apart'
+
+# Runs are read several at a time, and the figures do not depend on how many.
+REVIEWS_ROOT=$reviews
+STATS_SINCE="" STATS_UNTIL="" STATS_REPOSITORY=""
+assert_eq 1 "$(stats_collect_summaries 1 | grep -c '^{"skipped":')" 'one worker reports its skipped runs once'
+assert_eq 3 "$(stats_collect_summaries 3 | grep -c '^{"skipped":')" 'three workers each report theirs'
+in_turn=$(stats_collect_summaries 1 | stats_document "" "" "")
+assert_eq '6 counted, 2 skipped' "$(jq -r '"\(.runs.counted) counted, \(.runs.skipped) skipped"' <<<"$in_turn")" 'the whole history, read in turn'
+assert_eq "$in_turn" "$(stats_collect_summaries 3 | stats_document "" "" "")" 'is the same history read three runs at a time'
+assert_eq "$in_turn" "$(stats_collect_summaries 64 | stats_document "" "" "")" 'or with more workers than runs'
+assert_eq "$in_turn" "$(stats_collect_summaries | stats_document "" "" "")" 'or with as many as the machine suggests'
+assert_true 'which is between one and eight' test "$(stats_job_count)" -ge 1 -a "$(stats_job_count)" -le 8
+STATS_SINCE=2027-01-01
+assert_eq '{"skipped":0}' "$(stats_collect_summaries 3)" 'no run at all needs no worker'
+STATS_SINCE=""
 
 # Two agents on one model in one run, end to end.
 make_run 131-fix-FIX-131 20261210-090000-CET
