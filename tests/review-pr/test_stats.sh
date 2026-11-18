@@ -38,11 +38,14 @@ jq -n --arg checkout "$checkout" --arg reviews "$reviews" '{
     finalization: {model: "mock-final", effort: "low"}
 }' >"$config"
 
-# Runs review-pr with the given arguments and no agent CLI or gh on PATH, as CI
-# does, and keeps what it printed and how it ended.
+# Runs review-pr with the given arguments and no agent CLI on PATH, as CI does,
+# and keeps what it printed and how it ended. The Bash and jq are the ones this
+# suite runs with: on macOS /usr/bin and /bin hold only Bash 3.2, and the
+# minimum-jq job puts jq 1.6 first on PATH.
+stats_jq_directory=$(dirname -- "$(command -v jq)")
 run_review_pr() {
     stats_status=0
-    stats_output=$(env PATH=/usr/bin:/bin "$repo_root/bin/review-pr" --config "$config" "$@" 2>"$suite_root/stderr") || stats_status=$?
+    stats_output=$(env PATH="${stats_jq_directory}:/usr/bin:/bin" "$BASH" "$repo_root/bin/review-pr" --config "$config" "$@" 2>"$suite_root/stderr") || stats_status=$?
     stats_error=$(<"$suite_root/stderr")
 }
 
