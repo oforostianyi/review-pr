@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-11-18
+
 ### Added
 
 - `review-pr stats` compares reviewers from the artifacts finished runs already keep. For each
