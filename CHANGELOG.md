@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-11-19
+
 ### Added
 
 - `quota.claude.minimum_remaining_percent` checks Claude's plan limits the way the Codex setting
