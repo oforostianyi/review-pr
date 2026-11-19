@@ -45,5 +45,15 @@ assert_eq 'number,object' \
 assert_eq '1' \
     "$(jq -r '.properties.quota.properties.codex.properties.minimum_remaining_percent.oneOf[] | select(.type == "object") | .minProperties' "$schema")" \
     'and an object with no window in it is invalid in the schema as well'
+# quota.claude mirrors it, with Claude's own window names.
+assert_eq 'minimum_remaining_percent' \
+    "$(jq -r '.properties.quota.properties.claude.required // [] | join(",")' "$schema")" \
+    'the schema requires the threshold the orchestrator requires under quota.claude'
+assert_eq 'number,object' \
+    "$(jq -r '[.properties.quota.properties.claude.properties.minimum_remaining_percent.oneOf[].type] | sort | join(",")' "$schema")" \
+    'the schema accepts a number or an object as the Claude minimum'
+assert_eq '1|^(5h|weekly|fable|opus|sonnet)$' \
+    "$(jq -r '.properties.quota.properties.claude.properties.minimum_remaining_percent.oneOf[] | select(.type == "object") | "\(.minProperties)|\(.propertyNames.pattern)"' "$schema")" \
+    'and names exactly the windows the orchestrator accepts'
 
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

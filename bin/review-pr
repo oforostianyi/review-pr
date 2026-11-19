@@ -212,9 +212,13 @@ STATS_SINCE=""
 STATS_UNTIL=""
 STATS_REPOSITORY=""
 QUOTA_CODEX_MINIMUM=""
+QUOTA_CLAUDE_MINIMUM=""
 CODEX_QUOTA_SHORTFALL=""
 CODEX_QUOTA_SUMMARY=""
 declare -a CODEX_QUOTA_SKIPPED_AGENTS=()
+CLAUDE_QUOTA_SHORTFALL=""
+CLAUDE_QUOTA_SUMMARY=""
+declare -a CLAUDE_QUOTA_SKIPPED_AGENTS=()
 NDJSON_SALVAGE_DROPPED_IDS=()
 NDJSON_SALVAGE_UNREADABLE_IDS=()
 NDJSON_SALVAGE_UNPARSEABLE_LINES=0
@@ -524,6 +528,104 @@ read_codex_quota() {
     printf '%s\n' "$normalized"
 }
 
+# Claude Code reports the plan's limits on every call: with stream-json output
+# a line {"type":"rate_limit_event","rate_limit_info":{...}} carries, in
+# unifiedWindows, each window's utilization (0 to 1), reset and status. Every
+# call reports the five-hour and weekly windows; a call to a model with a weekly
+# limit of its own adds that one too (seven_day_overage_included is the one
+# Claude Code labels "Fable limit"). The names here are the ones
+# quota.claude.minimum_remaining_percent is keyed by.
+readonly CLAUDE_QUOTA_NORMALIZE_JQ='
+    def window_name:
+        {"five_hour": "5h", "seven_day": "weekly", "seven_day_overage_included": "fable",
+         "seven_day_opus": "opus", "seven_day_sonnet": "sonnet"}[.] // .;
+    def instant: if type == "number" then todate else null end;
+    .rate_limit_info as $info |
+    if ($info.unifiedWindows | type) != "object" then error("no unifiedWindows") else . end |
+    {provider: "claude", model: (if $model == "" then null else $model end), available: true,
+     windows: [$info.unifiedWindows | to_entries[] | select(.value | type == "object") |
+        .key as $key | .value as $window |
+        (if ($window.utilization | type) == "number" then ($window.utilization * 100 + 0.5 | floor) else null end) as $used |
+        {name: ($key | window_name), key: $key, used_percent: $used,
+         remaining_percent: (if $window.status == "rejected" then 0
+             elif $used == null then null
+             else ([0, 100 - $used] | max) end),
+         status: ($window.status // null),
+         reset_at: ($window.resetsAt | instant), reset_epoch: ($window.resetsAt // null)}],
+     overage: {enabled: ($info.overageEnabled | if type == "boolean" then . else null end),
+              in_use: ($info.isUsingOverage | if type == "boolean" then . else null end)},
+     checked_at: (now | todate), source: "claude-rate-limit-event"}
+'
+
+# Asks Claude Code for one word with nothing loaded -- no tools, MCP servers,
+# settings, hooks or slash commands, an empty working directory -- and prints
+# the rate_limit_event it reports. About a thousand tokens. --bare would be
+# cheaper still but reads no plan login, so it sees no plan limits. Returns 1
+# when Claude Code is missing, or fails or outlives
+# REVIEW_PR_QUOTA_TIMEOUT_SECONDS without reporting its limits.
+claude_rate_limit_event() {
+    local model=$1 directory event=""
+    local timeout=${REVIEW_PR_QUOTA_TIMEOUT_SECONDS:-20}
+    local -a model_arguments=()
+
+    command -v claude >/dev/null 2>&1 || return 1
+    [[ -z "$model" ]] || model_arguments=(--model "$model")
+    directory=$(mktemp -d "${TMPDIR:-/tmp}/review-pr-claude-quota.XXXXXX") || return 1
+    # The stream goes to a file, not a pipe: a process the CLI left behind
+    # after the timeout stopped it would hold a pipe open until it ended.
+    (cd -- "$directory" && run_with_agent_timeout "$timeout" "Claude quota probe" claude -p \
+        "${model_arguments[@]}" --no-session-persistence --output-format stream-json --verbose \
+        --max-turns 1 --tools "" --strict-mcp-config --disable-slash-commands --setting-sources "" \
+        --system-prompt "Reply with one word." "ok" </dev/null >"${directory}/stream" 2>/dev/null) || :
+    # The exit status does not decide: with a window spent and extra usage
+    # off, Claude Code reports the limits and then refuses the call.
+    event=$(jq -cR 'fromjson? | select(type == "object" and .type == "rate_limit_event")' "${directory}/stream" 2>/dev/null) || event=""
+    rm -rf -- "$directory"
+    event=${event%%$'\n'*}
+    [[ -n "$event" ]] || return 1
+    printf '%s\n' "$event"
+}
+
+# Prints the normalized Claude quota of one model ("" for the CLI default).
+# Agents of one phase start together, and a reading younger than a minute is
+# served from a cache kept per model; nothing older is kept, since every other
+# Claude Code session on the account draws on the same limits. Returns 1 when
+# the quota is unavailable and 2 when the event has a shape the normalizer
+# does not know.
+read_claude_quota() {
+    local model=$1 cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/review-pr" cache_file event normalized
+    local cache_name=${model:-default}
+
+    cache_name=${cache_name//[^A-Za-z0-9._-]/_}
+    cache_file="${cache_dir}/quota-claude-${cache_name}.json"
+    if [[ -s "$cache_file" ]] && jq -e --argjson now "$EPOCHSECONDS" \
+        '.available == true and ((.checked_at | fromdate) > ($now - 60))' "$cache_file" >/dev/null 2>&1; then
+        emit_file "$cache_file"
+        return 0
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        jq -n --arg model "$model" '{provider: "claude", model: (if $model == "" then null else $model end), available: false,
+            windows: [], checked_at: (now | todate), source: "claude-rate-limit-event", error: "Claude Code is not installed"}'
+        return 1
+    fi
+    if ! event=$(claude_rate_limit_event "$model"); then
+        jq -n --arg model "$model" '{provider: "claude", model: (if $model == "" then null else $model end), available: false,
+            windows: [], checked_at: (now | todate), source: "claude-rate-limit-event",
+            error: "Claude Code failed, timed out or reported no rate_limit_event"}'
+        return 1
+    fi
+    if ! normalized=$(jq -c --arg model "$model" "$CLAUDE_QUOTA_NORMALIZE_JQ" <<<"$event" 2>/dev/null) || [[ -z "$normalized" ]]; then
+        jq -n --arg model "$model" '{provider: "claude", model: (if $model == "" then null else $model end), available: false,
+            windows: [], checked_at: (now | todate), source: "claude-rate-limit-event",
+            error: "the rate_limit_event has a shape review-pr does not know"}'
+        return 2
+    fi
+    if mkdir -p -- "$cache_dir" 2>/dev/null; then
+        printf '%s\n' "$normalized" >"${cache_file}.tmp.$$" 2>/dev/null && mv -- "${cache_file}.tmp.$$" "$cache_file" 2>/dev/null
+    fi
+    printf '%s\n' "$normalized"
+}
+
 format_quota_reset() {
     local epoch=$1
 
@@ -536,11 +638,56 @@ format_quota_reset() {
     printf '%s\n' "$formatted"
 }
 
+# One line per window of a normalized reading: its name, what is left ("?" when
+# unknown) and when it resets.
+print_quota_windows() {
+    local quota=$1 name remaining reset_epoch reset line
+
+    # Tab is whitespace to read, so two tabs in a row are one separator: an
+    # empty field would shift the reset epoch into the percentage. Unknown
+    # values are written as "?" and "-" instead.
+    while IFS=$'\t' read -r name remaining reset_epoch; do
+        reset=$(format_quota_reset "$reset_epoch")
+        line=$(printf '  %-14s %s' "$name" "${remaining}% left")
+        printf '%s%s\n' "$line" "${reset:+   resets ${reset}}"
+    done < <(jq -r '.windows[] | [(if (.bucket // "codex") == "codex" then .name else .bucket + " " + .name end),
+        (.remaining_percent // "?" | tostring), (.reset_epoch // "-" | tostring)] | @tsv' <<<"$quota")
+}
+
+# `review-pr quota claude [--json]`: every model a run of this configuration
+# would probe, read once each. Exit 0 when all were read, else the worst status
+# of read_claude_quota (1 unavailable, 2 an unknown shape).
+show_claude_quota() {
+    local model quota status worst=0
+    local -a models=() readings=()
+
+    mapfile -t models < <(claude_run_models all)
+    if (( ${#models[@]} == 0 )); then
+        if [[ "$QUOTA_JSON" == true ]]; then printf '[]\n'; else printf 'No Claude agent to check.\n'; fi
+        return 0
+    fi
+    for model in "${models[@]}"; do
+        status=0
+        quota=$(read_claude_quota "$model") || status=$?
+        (( status <= worst )) || worst=$status
+        readings+=("$quota")
+        [[ "$QUOTA_JSON" != true ]] || continue
+        if (( status != 0 )); then
+            printf 'Claude %s: quota unavailable (%s)\n' "${model:-default}" "$(jq -r '.error' <<<"$quota")"
+        else
+            printf 'Claude %s\n' "${model:-default}"
+            print_quota_windows "$quota"
+        fi
+    done
+    [[ "$QUOTA_JSON" != true ]] || printf '%s\n' "${readings[@]}" | jq -s '.'
+    return "$worst"
+}
+
 # `review-pr quota [codex] [--json]`. Exit 0 when the quota was read, whatever it
 # says: a spent quota is data, not a failure. 1 means unavailable, 2 a shape the
 # normalizer does not know.
 show_quota() {
-    local quota status=0 name remaining reset_epoch reset line
+    local quota status=0
 
     quota=$(read_codex_quota) || status=$?
     if [[ "$QUOTA_JSON" == true ]]; then
@@ -552,15 +699,7 @@ show_quota() {
         return "$status"
     fi
     printf 'Codex%s\n' "$(jq -r 'if .plan then " (\(.plan))" else "" end' <<<"$quota")"
-    # Tab is whitespace to read, so two tabs in a row are one separator: an
-    # empty field would shift the reset epoch into the percentage. Unknown
-    # values are written as "?" and "-" instead.
-    while IFS=$'\t' read -r name remaining reset_epoch; do
-        reset=$(format_quota_reset "$reset_epoch")
-        line=$(printf '  %-14s %s' "$name" "${remaining}% left")
-        printf '%s%s\n' "$line" "${reset:+   resets ${reset}}"
-    done < <(jq -r '.windows[] | [(if .bucket == "codex" then .name else .bucket + " " + .name end),
-        (.remaining_percent // "?" | tostring), (.reset_epoch // "-" | tostring)] | @tsv' <<<"$quota")
+    print_quota_windows "$quota"
     return 0
 }
 
@@ -1260,14 +1399,20 @@ codex_quota_short() {
     [[ -n "$CODEX_QUOTA_SHORTFALL" ]]
 }
 
-# quota.codex.minimum_remaining_percent as --show-config prints it.
-describe_codex_quota_minimum() {
-    if [[ -z "$QUOTA_CODEX_MINIMUM" ]]; then
+# A quota minimum as --show-config prints it.
+describe_quota_minimum() {
+    local minimum=$1
+
+    if [[ -z "$minimum" ]]; then
         printf 'off\n'
         return
     fi
     jq -r 'if type == "number" then "\(.)% of every window"
-        else ([to_entries[] | "\(.key) \(.value)%"] | join(", ")) + "; other windows unchecked" end' <<<"$QUOTA_CODEX_MINIMUM"
+        else ([to_entries[] | "\(.key) \(.value)%"] | join(", ")) + "; other windows unchecked" end' <<<"$minimum"
+}
+
+describe_codex_quota_minimum() {
+    describe_quota_minimum "$QUOTA_CODEX_MINIMUM"
 }
 
 # The quota is read again before every phase, not only when the run starts: one
@@ -1293,6 +1438,133 @@ codex_agents_short_of_quota() {
     log "Codex quota is below its minimum before the ${phase} (${CODEX_QUOTA_SHORTFALL}); not starting ${codex_agents[*]} for it"
 }
 
+# An agent review-pr runs through its own Claude Code invocation. One with a
+# runner or a command of its own may run another account or a gateway, whose
+# limits a probe with the default login would not see, so it is not checked.
+is_builtin_claude_agent() {
+    local agent=$1
+
+    [[ -n "$agent" && "${AGENT_TYPES[$agent]:-$agent}" == claude && -z "${AGENT_RUNNERS[$agent]:-}" \
+        && "${AGENT_COMMANDS[$agent]:-[]}" == '[]' ]]
+}
+
+# The model the final synthesis and the standalone comparison run with. After a
+# fallback took over, FINALIZATION_MODEL already holds the fallback's model.
+claude_synthesis_model() {
+    printf '%s\n' "${FINALIZATION_MODEL:-${AGENT_MODELS[$FINAL_SYNTHESIZER]:-}}"
+}
+
+# Reads the Claude quota of one model and says whether a window is below its
+# minimum, naming the model and the window in CLAUDE_QUOTA_SHORTFALL and what is
+# left in CLAUDE_QUOTA_SUMMARY. QUOTA_CLAUDE_MINIMUM holds the configured value
+# as JSON: a number for every window or an object with a minimum per window. A
+# window the probe did not report, such as fable for a model without a weekly
+# limit of its own, is not checked. An unreadable quota is not a short one.
+claude_model_short() {
+    local model=$1 quota status=0
+
+    CLAUDE_QUOTA_SHORTFALL="" CLAUDE_QUOTA_SUMMARY=""
+    [[ -n "$QUOTA_CLAUDE_MINIMUM" ]] || return 1
+    # An agent without a model runs on the default its settings pick, but the
+    # probe loads no settings and reads the CLI's own default, which may lack
+    # the weekly window of the model the agent really runs.
+    if [[ -z "$model" ]] && jq -e 'type == "number" or has("fable") or has("opus") or has("sonnet")' \
+        <<<"$QUOTA_CLAUDE_MINIMUM" >/dev/null 2>&1; then
+        log "WARNING: no model is configured for a Claude agent, so its quota is read for the CLI default model; a minimum for fable, opus or sonnet may not be checked for it. Set the agent's model to check its own weekly window"
+    fi
+    quota=$(read_claude_quota "$model") || status=$?
+    if (( status != 0 )); then
+        log "WARNING: the Claude quota for ${model:-the default model} could not be read ($(jq -r '.error // "unknown error"' <<<"$quota")); going on without the check"
+        return 1
+    fi
+    CLAUDE_QUOTA_SUMMARY=$(jq -r --arg model_name "${model:-default}" \
+        '"\($model_name): " + ([.windows[] | select(.remaining_percent != null) | "\(.name) \(.remaining_percent)% left"] | join(", "))' <<<"$quota")
+    CLAUDE_QUOTA_SHORTFALL=$(jq -r --arg model_name "${model:-default}" --argjson minimum "$QUOTA_CLAUDE_MINIMUM" '[.windows[]
+        | (if ($minimum | type) == "number" then $minimum else $minimum[.name] end) as $window_minimum
+        | select($window_minimum != null and .remaining_percent != null and .remaining_percent < $window_minimum)
+        | "\($model_name): \(.name) has \(.remaining_percent)% left, below its \($window_minimum)% minimum"
+          + (if .reset_at then ", until \(.reset_at)" else "" end)] | join("; ")' <<<"$quota")
+    [[ -n "$CLAUDE_QUOTA_SHORTFALL" ]]
+}
+
+# With quota.claude.minimum_remaining_percent set, a run that would start a
+# built-in Claude agent is refused when a model it would use has a window below
+# its minimum. Every distinct model is read once: the synthesizer's, the
+# fallback's and, on a full run, the reviewers'.
+# The distinct models of the built-in Claude agents a run would start, one per
+# line, an empty line for an agent on the CLI default: the synthesizer's, the
+# fallback's and, for scope all, the enabled reviewers'.
+claude_run_models() {
+    local scope=$1 agent model
+    local -a models=()
+    local -A seen=()
+
+    if is_builtin_claude_agent "$FINAL_SYNTHESIZER"; then
+        models+=("$(claude_synthesis_model)")
+    fi
+    if is_builtin_claude_agent "$FALLBACK_SYNTHESIZER"; then
+        models+=("${FALLBACK_MODEL:-${AGENT_MODELS[$FALLBACK_SYNTHESIZER]:-}}")
+    fi
+    if [[ "$scope" == all ]]; then
+        for agent in "${REVIEW_AGENTS[@]}"; do
+            ! is_builtin_claude_agent "$agent" || models+=("${AGENT_MODELS[$agent]:-}")
+        done
+    fi
+    for model in "${models[@]}"; do
+        [[ -z "${seen["m:${model}"]:-}" ]] || continue
+        seen["m:${model}"]=1
+        printf '%s\n' "$model"
+    done
+}
+
+check_claude_quota_before_run() {
+    local scope=$1 model shortfalls="" summaries=""
+    local -a models=()
+
+    [[ -n "$QUOTA_CLAUDE_MINIMUM" ]] || return 0
+    mapfile -t models < <(claude_run_models "$scope")
+    for model in "${models[@]}"; do
+        if claude_model_short "$model"; then
+            shortfalls+="${shortfalls:+; }${CLAUDE_QUOTA_SHORTFALL}"
+        fi
+        [[ -z "$CLAUDE_QUOTA_SUMMARY" ]] || summaries+="${summaries:+; }${CLAUDE_QUOTA_SUMMARY}"
+    done
+    if [[ -n "$shortfalls" ]]; then
+        die "Claude quota is below quota.claude.minimum_remaining_percent: ${shortfalls}. Not starting a run that uses Claude"
+    fi
+    [[ -z "$summaries" ]] || log "Claude quota: ${summaries}"
+}
+
+# Before a phase, each built-in Claude agent's model is read, once per model; an
+# agent whose model has a window below its minimum is not started for the
+# phase and counts as a reviewer the phase lost, as a Codex one does.
+claude_agents_short_of_quota() {
+    local phase=$1
+    shift
+    local agent model shortfalls=""
+    local -A verdict=()
+
+    CLAUDE_QUOTA_SKIPPED_AGENTS=()
+    CLAUDE_QUOTA_SHORTFALL=""
+    [[ -n "$QUOTA_CLAUDE_MINIMUM" ]] || return 0
+    for agent in "$@"; do
+        is_builtin_claude_agent "$agent" || continue
+        model=${AGENT_MODELS[$agent]:-}
+        if [[ -z "${verdict["m:${model}"]:-}" ]]; then
+            if claude_model_short "$model"; then
+                verdict["m:${model}"]=short
+                shortfalls+="${shortfalls:+; }${CLAUDE_QUOTA_SHORTFALL}"
+            else
+                verdict["m:${model}"]=enough
+            fi
+        fi
+        [[ "${verdict["m:${model}"]}" != short ]] || CLAUDE_QUOTA_SKIPPED_AGENTS+=("$agent")
+    done
+    CLAUDE_QUOTA_SHORTFALL=$shortfalls
+    (( ${#CLAUDE_QUOTA_SKIPPED_AGENTS[@]} > 0 )) || return 0
+    log "Claude quota is below its minimum before the ${phase} (${shortfalls}); not starting ${CLAUDE_QUOTA_SKIPPED_AGENTS[*]} for it"
+}
+
 usage() {
     cat >&2 <<EOF
 Usage: ${0##*/} [--config <file>] <pull-request-number>
@@ -1302,7 +1574,7 @@ Usage: ${0##*/} [--config <file>] <pull-request-number>
        ${0##*/} [--config <file>] --show-config
        ${0##*/} [--config <file>] contract-test [--agent <name>]... [--phase <primary|cross|final|all>] [--output <directory>]
        ${0##*/} [--config <file>] findings [--run <timestamp>] [--include <confirmed|uncertain|all>] <pull-request-number>
-       ${0##*/} [--config <file>] quota [codex] [--json]
+       ${0##*/} [--config <file>] quota [codex|claude] [--json]
        ${0##*/} [--config <file>] prune [--apply]
        ${0##*/} [--config <file>] stats [--since <YYYY-MM-DD>] [--until <YYYY-MM-DD>] [--repo <owner/name>] [--json]
        ${0##*/} --version
@@ -2017,8 +2289,9 @@ describe_configuration_problems() {
             ((keys_unsorted - ["$schema", "agents", "default_repository", "execution", "finalization", "language", "languages", "profiles", "prompts", "quota", "reporting", "repositories", "review_repository", "reviews_directory", "reviewers", "status", "status_interval_seconds", "synthesizer", "timezone"])[]
                 | "unknown top-level key \(tojson)"),
             (if .quota == null then empty
-             elif (.quota | type) != "object" or ((.quota | keys) - ["codex"] | length) > 0
-             then "quota may hold only codex"
+             elif (.quota | type) != "object" or ((.quota | keys) - ["codex", "claude"] | length) > 0
+             then "quota may hold only codex and claude"
+             elif .quota.codex == null then empty
              elif (.quota.codex | type) != "object" or ((.quota.codex | keys) - ["minimum_remaining_percent"] | length) > 0
              then "quota.codex may hold only minimum_remaining_percent"
              elif (.quota.codex.minimum_remaining_percent | type) == "object" then
@@ -2035,6 +2308,25 @@ describe_configuration_problems() {
              elif (.quota.codex.minimum_remaining_percent | type) != "number"
                   or .quota.codex.minimum_remaining_percent < 0 or .quota.codex.minimum_remaining_percent > 100
              then "quota.codex.minimum_remaining_percent is \(.quota.codex.minimum_remaining_percent | tojson); it must be a number from 0 to 100, or an object with a minimum per window such as {\"5h\": 15, \"weekly\": 3}"
+             else empty end),
+            (if (.quota | type) != "object" or .quota.claude == null then empty
+             elif (.quota.claude | type) != "object" or (.quota.claude | has("minimum_remaining_percent") | not)
+                  or ((.quota.claude | keys) - ["minimum_remaining_percent"] | length) > 0
+             then "quota.claude may hold only minimum_remaining_percent"
+             elif (.quota.claude.minimum_remaining_percent | type) == "object" then
+                 (.quota.claude.minimum_remaining_percent
+                  | if length == 0
+                    then "quota.claude.minimum_remaining_percent is {}; give at least one window a minimum, or remove quota.claude to check nothing"
+                    else to_entries[]
+                        | if (.key | IN("5h", "weekly", "fable", "opus", "sonnet") | not)
+                          then "quota.claude.minimum_remaining_percent has an unknown Claude window \(.key | tojson); a window is named the way `review-pr quota claude` prints it: 5h, weekly, fable, opus or sonnet"
+                          elif (.value | type) != "number" or .value < 0 or .value > 100
+                          then "quota.claude.minimum_remaining_percent[\(.key | tojson)] is \(.value | tojson); it must be a number from 0 to 100"
+                          else empty end
+                    end)
+             elif (.quota.claude.minimum_remaining_percent | type) != "number"
+                  or .quota.claude.minimum_remaining_percent < 0 or .quota.claude.minimum_remaining_percent > 100
+             then "quota.claude.minimum_remaining_percent is \(.quota.claude.minimum_remaining_percent | tojson); it must be a number from 0 to 100, or an object with a minimum per window such as {\"5h\": 15, \"weekly\": 3, \"fable\": 3}"
              else empty end),
             (if (.timezone != null) and ((.timezone | type) != "string")
              then "timezone is \(.timezone | tojson); it must be a timezone name such as \"Europe/Warsaw\""
@@ -2225,12 +2517,20 @@ die_with_configuration_problems() {
                 (if has("final") then (.final | type == "string" and valid_language_override) else true end))
          else true end) and
         (if has("quota") then
-            (.quota | type == "object" and ((keys - ["codex"]) | length == 0) and
+            (.quota | type == "object" and ((keys - ["codex", "claude"]) | length == 0) and
                 (if has("codex") then (.codex | type == "object" and ((keys - ["minimum_remaining_percent"]) | length == 0) and
                     (.minimum_remaining_percent |
                         (type == "number" and . >= 0 and . <= 100) or
                         (type == "object" and length > 0 and
                             all(to_entries[]; (.key | codex_window_key) and (.value | type == "number" and . >= 0 and . <= 100)))))
+                 else true end) and
+                (if has("claude") then (.claude | type == "object" and has("minimum_remaining_percent")
+                    and ((keys - ["minimum_remaining_percent"]) | length == 0) and
+                    (.minimum_remaining_percent |
+                        (type == "number" and . >= 0 and . <= 100) or
+                        (type == "object" and length > 0 and
+                            all(to_entries[]; (.key | IN("5h", "weekly", "fable", "opus", "sonnet"))
+                                and (.value | type == "number" and . >= 0 and . <= 100)))))
                  else true end))
          else true end) and
         (if has("reporting") then
@@ -2405,6 +2705,7 @@ die_with_configuration_problems() {
         | (legacy_sections | tostring) as $legacy
         | assign("REVIEW_PR_TIMEZONE"; .timezone // ""),
           assign("QUOTA_CODEX_MINIMUM"; .quota.codex.minimum_remaining_percent // ""),
+          assign("QUOTA_CLAUDE_MINIMUM"; .quota.claude.minimum_remaining_percent // ""),
           assign("config_reviews_directory"; .reviews_directory // ""),
           assign("config_has_repositories"; has("repositories")),
           (if has("repositories") then
@@ -4609,6 +4910,7 @@ show_configuration() {
         printf 'Timezone: system default (%s)\n' "$(review_pr_date '+%Z')"
     fi
     printf 'Codex quota minimum: %s\n' "$(describe_codex_quota_minimum)"
+    printf 'Claude quota minimum: %s\n' "$(describe_quota_minimum "$QUOTA_CLAUDE_MINIMUM")"
     printf 'Global language: %s\n' "$GLOBAL_REVIEW_LANGUAGE"
     printf 'Primary review language: %s (%s)\n' "$PRIMARY_REVIEW_LANGUAGE" "$PRIMARY_REVIEW_LANGUAGE_NAME"
     printf 'Cross-review language: %s (%s)\n' "$CROSS_REVIEW_LANGUAGE" "$CROSS_REVIEW_LANGUAGE_NAME"
@@ -11326,12 +11628,18 @@ run_review_phase() {
     PHASE_ATTEMPT_FAILURES=()
     prepare_dashboard_phase "$dashboard_section" "${agents[@]}"
     codex_agents_short_of_quota "$phase" "${agents[@]}"
-    if (( ${#CODEX_QUOTA_SKIPPED_AGENTS[@]} > 0 )); then
+    claude_agents_short_of_quota "$phase" "${agents[@]}"
+    if (( ${#CODEX_QUOTA_SKIPPED_AGENTS[@]} + ${#CLAUDE_QUOTA_SKIPPED_AGENTS[@]} > 0 )); then
         round_agents=()
         for agent in "${agents[@]}"; do
             if [[ " ${CODEX_QUOTA_SKIPPED_AGENTS[*]} " == *" ${agent} "* ]]; then
                 now=$EPOCHSECONDS
                 exhausted_failures+=("${agent} (Codex quota below its minimum: ${CODEX_QUOTA_SHORTFALL}; 0 attempts)")
+                PHASE_AGENT_STATUSES[$agent]=failed
+                set_dashboard_status "$dashboard_section" "$agent" FAILED "" "$now" "$now" ""
+            elif [[ " ${CLAUDE_QUOTA_SKIPPED_AGENTS[*]} " == *" ${agent} "* ]]; then
+                now=$EPOCHSECONDS
+                exhausted_failures+=("${agent} (Claude quota below its minimum: ${CLAUDE_QUOTA_SHORTFALL}; 0 attempts)")
                 PHASE_AGENT_STATUSES[$agent]=failed
                 set_dashboard_status "$dashboard_section" "$agent" FAILED "" "$now" "$now" ""
             else
@@ -13853,6 +14161,10 @@ run_comparison_synthesis() {
         COMPARISON_FAILURE_REASON="Codex quota below its minimum before the standalone comparison: ${CODEX_QUOTA_SHORTFALL}"
         return 1
     fi
+    if is_builtin_claude_agent "$FINAL_SYNTHESIZER" && claude_model_short "$(claude_synthesis_model)"; then
+        COMPARISON_FAILURE_REASON="Claude quota below its minimum before the standalone comparison: ${CLAUDE_QUOTA_SHORTFALL}"
+        return 1
+    fi
     new_temp_file "comparison-prompt"; comparison_prompt=$NEW_TEMP_FILE
     new_temp_file "comparison-output"; comparison_output=$NEW_TEMP_FILE
     new_temp_file "comparison-log"; comparison_log=$NEW_TEMP_FILE
@@ -14434,6 +14746,10 @@ run_final_synthesis() {
         FINAL_FAILURE_REASON="Codex quota below its minimum before the final synthesis: ${CODEX_QUOTA_SHORTFALL}"
         return 1
     fi
+    if is_builtin_claude_agent "$FINAL_SYNTHESIZER" && claude_model_short "$(claude_synthesis_model)"; then
+        FINAL_FAILURE_REASON="Claude quota below its minimum before the final synthesis: ${CLAUDE_QUOTA_SHORTFALL}"
+        return 1
+    fi
     survivor_agents primary primary_sources
     survivor_agents cross cross_sources
     FINAL_PROMPT_ARGUMENTS=()
@@ -14877,9 +15193,13 @@ if [[ "$CONTRACT_TEST_MODE" == true ]]; then
     if run_contract_test; then exit 0; else exit 1; fi
 fi
 if [[ "$QUOTA_MODE" == true ]]; then
-    (( $# == 0 )) || [[ $# == 1 && "$1" == codex ]] || die 'quota takes an optional provider, and codex is the one it knows'
+    (( $# == 0 )) || [[ $# == 1 && ( "$1" == codex || "$1" == claude ) ]] \
+        || die 'quota takes an optional provider: codex or claude'
     [[ "$SHOW_CONFIG" == false && "$RERUN_FINAL" == false && "$FORCE_RERUN" == false && -z "$RUN_SELECTOR" ]] \
         || die 'quota cannot be combined with PR workflow options'
+    if [[ "${1:-}" == claude ]]; then
+        if show_claude_quota; then exit 0; else exit $?; fi
+    fi
     if show_quota; then exit 0; else exit $?; fi
 fi
 [[ "$QUOTA_JSON" == false || "$STATS_MODE" == true ]] || die '--json is only valid for the quota and stats subcommands'
@@ -14967,8 +15287,10 @@ fi
 
 if [[ "$RERUN_FINAL" == true ]]; then
     check_codex_quota_before_run synthesizers
+    check_claude_quota_before_run synthesizers
 else
     check_codex_quota_before_run all
+    check_claude_quota_before_run all
 fi
 
 open_run_history

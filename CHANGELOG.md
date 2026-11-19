@@ -4,6 +4,19 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Added
+
+- `quota.claude.minimum_remaining_percent` checks Claude's plan limits the way the Codex setting
+  checks Codex's, and is off until it is set. review-pr asks Claude Code for one word with nothing
+  loaded, once for each Claude model a step would use (about a thousand tokens, cached for a
+  minute), and reads the limits it reports: the `5h` and `weekly` windows and, for a model with a
+  weekly limit of its own, `fable`, `opus` or `sonnet`. A run that would start a Claude model short
+  of quota is refused; before each phase a Claude reviewer short of quota is set aside under the
+  reviewer quorum, and a Claude synthesizer short of quota fails the final or the comparison. An
+  agent with its own `runner` or `command` is not checked, and a quota that cannot be read stops
+  nothing. `review-pr quota claude [--json]` shows the readings; `review-pr quota` stays Codex only.
+- The README opens with a diagram of the `N → N → 1` pipeline.
+
 ## [1.30.0] - 2026-11-18
 
 ### Added

@@ -525,4 +525,49 @@ for unknown in week 5H 7d 24h 300m; do
     assert_true "and the refusal lists the names a window has" grep -q '5h, weekly' <<<"$unknown_error"
 done
 
+# quota.claude.minimum_remaining_percent has the same shape, with the windows
+# Claude Code reports: 5h, weekly, and the weekly limit of a model that has
+# one of its own. It is off until it is configured, and Codex's stays apart.
+claude_quota_config() {
+    local name=$1 value=$2
+    jq --argjson minimum "$value" '.quota = {claude: {minimum_remaining_percent: $minimum}}' \
+        "$config_file" >"$test_root/claude-quota-${name}.json"
+    printf '%s\n' "$test_root/claude-quota-${name}.json"
+}
+assert_file_contains <("$repo_root/bin/review-pr" --config "$(claude_quota_config number 15)" --show-config) \
+    'Claude quota minimum: 15% of every window' 'a single Claude minimum applies to every window'
+assert_file_contains <("$repo_root/bin/review-pr" --config "$(claude_quota_config windows '{"5h": 15, "weekly": 3, "fable": 3}')" --show-config) \
+    'Claude quota minimum: 5h 15%, weekly 3%, fable 3%; other windows unchecked' 'an object sets a Claude minimum per window'
+assert_file_contains <("$repo_root/bin/review-pr" --config "$(claude_quota_config models '{"opus": 5, "sonnet": 5}')" --show-config) \
+    'Claude quota minimum: opus 5%, sonnet 5%; other windows unchecked' 'the Opus and Sonnet weekly windows can be named too'
+assert_file_contains <("$repo_root/bin/review-pr" --config "$config_file" --show-config) \
+    'Claude quota minimum: off' 'without quota.claude nothing is checked'
+both_quotas="$test_root/both-quotas.json"
+jq '.quota = {codex: {minimum_remaining_percent: 15}, claude: {minimum_remaining_percent: {"5h": 10}}}' "$config_file" >"$both_quotas"
+assert_file_contains <("$repo_root/bin/review-pr" --config "$both_quotas" --show-config) \
+    'Codex quota minimum: 15% of every window' 'Codex and Claude minimums are configured side by side'
+assert_file_contains <("$repo_root/bin/review-pr" --config "$both_quotas" --show-config) \
+    'Claude quota minimum: 5h 10%; other windows unchecked' 'each provider keeps its own'
+for invalid in '"15"' 101 -1 '{}' '{"5h": 120}' '{"5h": "15"}' '{"weekly": null}' '[15]'; do
+    assert_file_contains <(config_error "$(claude_quota_config invalid "$invalid")") 'quota.claude.minimum_remaining_percent' \
+        "a Claude minimum of ${invalid} is refused, naming the key"
+done
+for unknown in week 7d five_hour seven_day_overage_included Fable; do
+    unknown_error=$(config_error "$(claude_quota_config unknown "{\"${unknown}\": 3}")")
+    assert_true "a Claude window named ${unknown} is refused" grep -q "unknown Claude window \"${unknown}\"" <<<"$unknown_error"
+    assert_true "and the refusal lists the Claude window names" grep -q '5h, weekly, fable, opus or sonnet' <<<"$unknown_error"
+done
+claude_empty="$test_root/claude-quota-empty.json"
+jq '.quota = {claude: {}}' "$config_file" >"$claude_empty"
+assert_file_contains <(config_error "$claude_empty") 'quota.claude may hold only minimum_remaining_percent' \
+    'a quota.claude without its minimum is refused'
+claude_extra="$test_root/claude-quota-extra.json"
+jq '.quota = {claude: {minimum_remaining_percent: 5, model: "x"}}' "$config_file" >"$claude_extra"
+assert_file_contains <(config_error "$claude_extra") 'quota.claude may hold only minimum_remaining_percent' \
+    'and so is one with another key'
+quota_other="$test_root/quota-other-provider.json"
+jq '.quota = {gemini: {minimum_remaining_percent: 5}}' "$config_file" >"$quota_other"
+assert_file_contains <(config_error "$quota_other") 'quota may hold only codex and claude' \
+    'a provider review-pr cannot read is refused'
+
 printf '%s assertions passed.\n' "$TEST_ASSERTIONS"

@@ -287,6 +287,33 @@ A key is a window's name as `review-pr quota` prints it: `5h`, `weekly`, another
 
 An agent counts as Codex when its `type`, or its key when it has no `type`, is `codex`. Without `quota.codex`, nothing is checked.
 
+## Claude quota
+
+The Claude check is off until `quota.claude` is set; without it review-pr starts no probe and writes no log line about it.
+
+```json
+{
+  "quota": {"claude": {"minimum_remaining_percent": {"5h": 15, "weekly": 3, "fable": 3}}}
+}
+```
+
+Claude Code reports the plan's limits with every call, in a `rate_limit_event` line of its `stream-json` output. To read them, review-pr runs `claude -p` with nothing loaded -- no tools, MCP servers, settings, hooks or slash commands, in an empty directory -- and asks for one word: about a thousand tokens and a few seconds. It cannot use `--bare`, which reads no plan login. Each distinct model is probed once, and a reading is cached for a minute under `${XDG_CACHE_HOME:-$HOME/.cache}/review-pr/quota-claude-<model>.json`; nothing older is used, since every other Claude Code session on the account draws on the same limits.
+
+Every call reports the `5h` and `weekly` windows. A call to a model with a weekly limit of its own adds that window: `fable` (Claude Code's `seven_day_overage_included`, which it labels "Fable limit"), `opus` or `sonnet`. A minimum for such a window is checked only when a model that reports it is used. What is left is 100 minus the utilization in whole percent; a window Claude Code marks `rejected`, or used to its limit or past it, has nothing left. A number instead of an object is the minimum of every window; a key outside `5h`, `weekly`, `fable`, `opus` and `sonnet` is refused when the configuration loads, and so is an empty object.
+
+The checks run at the four points the Codex ones do:
+
+- A run -- new, resumed, or `--rerun-final` -- that would start a Claude model with a window below its minimum is refused, naming the model, the window, what is left, the minimum and its reset. The synthesizer (on `finalization.model` when one is set), the fallback synthesizer (on `finalization.fallback_model` when one is set) and the enabled reviewers count; for a `--rerun-final`, only the two synthesizers.
+- Before the primary review and the cross-review, a Claude reviewer whose model is short of quota is not started for that phase and counts as a reviewer the phase lost, so the [quorum](#reviewer-quorum) decides whether the run goes on. Two reviewers on one model share one probe.
+- Before the final synthesis and the standalone comparison, a Claude synthesizer short of quota fails that step before it starts; the inputs stay for `--run` to resume.
+- A quota that cannot be read -- Claude Code missing or logged out, a probe that fails, prints no `rate_limit_event`, or outlives `REVIEW_PR_QUOTA_TIMEOUT_SECONDS` -- is not treated as exhausted: the run goes on and the log says the check could not be made.
+
+A model's own weekly window is read only when the agent names its model: an agent without `model` runs on the default its Claude Code settings pick, while the probe loads no settings and reads the CLI's built-in default, so a minimum for `fable`, `opus` or `sonnet` may not be checked for it, and the log says so.
+
+An agent counts as Claude when its `type`, or its key when it has no `type`, is `claude` and review-pr runs it through its own Claude Code invocation. An agent with a `runner` or `command` of its own is not checked: it may use another account or a gateway that the probe, with the default login, would not see.
+
+`review-pr quota claude` prints the readings for the models a run of the configuration would use, one block per model, and `--json` prints them as one array. It exits 0 when every model was read, 1 when one was unavailable, and 2 when one answered in a shape review-pr does not know. `review-pr quota` without a provider, and `review-pr quota codex`, never probe Claude.
+
 ## Built-in agents, models, and reasoning effort
 
 `effort` may also be `auto`, which means the same as leaving it empty: no effort flag is sent and the CLI uses its own default. It is a name for that, not a value forwarded to the provider — neither CLI accepts `auto` as a level. `claude --effort auto` warns that the value is unknown and falls back to its default, and Codex answers the request with HTTP 400.

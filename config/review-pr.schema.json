@@ -170,6 +170,47 @@
               ]
             }
           }
+        },
+        "claude": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimum_remaining_percent"
+          ],
+          "properties": {
+            "minimum_remaining_percent": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "The minimum share left of every Claude plan window."
+                },
+                {
+                  "type": "object",
+                  "minProperties": 1,
+                  "propertyNames": {
+                    "pattern": "^(5h|weekly|fable|opus|sonnet)$"
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "description": "A minimum per window: 5h, weekly, or the weekly limit of a model that has one of its own (fable, opus, sonnet). A window the object does not name has no minimum."
+                }
+              ],
+              "description": "Off unless set. Before a run and before every phase, review-pr asks Claude Code for one word with each Claude model the step would use, about a thousand tokens and a few seconds, and reads the plan limits it reports. A run that would start a Claude agent is refused when a window has less left than its minimum; a Claude reviewer short of quota is set aside under the reviewer quorum, and a Claude synthesizer short of quota fails its phase. A model's own weekly window is reported only for that model. Agents with their own runner or command are not checked. When the quota cannot be read, the run goes on with a warning.",
+              "examples": [
+                15,
+                {
+                  "5h": 15,
+                  "weekly": 3,
+                  "fable": 3
+                }
+              ]
+            }
+          }
         }
       }
     },

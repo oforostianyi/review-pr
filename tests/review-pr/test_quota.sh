@@ -205,7 +205,7 @@ assert_eq '1|Codex: quota unavailable (not logged in)' "${cli_status}|${table}" 
 fixture '{"jsonrpc":"2.0","id":2,"result":{"somethingElse":true}}'
 cli_status=0; quota_cli >/dev/null || cli_status=$?
 assert_eq 2 "$cli_status" 'an answer of unknown shape exits 2'
-assert_false 'a provider review-pr does not know is refused' quota_cli claude
+assert_false 'a provider review-pr does not know is refused' quota_cli gemini
 assert_false 'and so is an option the command does not take' quota_cli --bogus
 PATH=$original_path
 

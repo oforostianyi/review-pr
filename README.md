@@ -1,5 +1,7 @@
 # review-pr
 
+![review-pr diagram. Headline: Multiple agents, cross-checked findings, one report. N → N → 1. A pull request goes to three independent AI reviews, their findings pass through cross-review and end up in one report with confirmed, uncertain and refuted items.](docs/images/review-pr-diagram.webp)
+
 `review-pr` runs a configurable `N → N → 1` pull-request review pipeline in dedicated Git checkouts, with an optional standalone comparison report after the core final synthesis. It supports Claude Code, Codex, Pi, and custom command-line adapters. This package installs the same orchestrator on Linux and macOS; it does not bundle or purchase agent CLIs or models. This release is version `1.30.0`.
 
 The public core is repository- and language-agnostic. Repository-specific profiles, prompts, and
@@ -646,8 +648,8 @@ given to:
   `--reviews-dir`.
 - `REVIEW_PR_SCRATCH_DIR=<path>` or `work` chooses where a run keeps its intermediate files; see
   below.
-- `REVIEW_PR_QUOTA_TIMEOUT_SECONDS=<n>` sets how long `review-pr quota` and the quota check wait
-  for `codex app-server` to answer; the default is 20.
+- `REVIEW_PR_QUOTA_TIMEOUT_SECONDS=<n>` sets how long `review-pr quota` and the quota checks wait
+  for `codex app-server` or the Claude Code probe to answer; the default is 20.
 - `REVIEW_PR_BASH=<path>` names the Bash 5.1 or newer that the launcher and installer use.
 
 ```bash
@@ -720,6 +722,26 @@ One number is the minimum of every window. Since a review spends far more of the
 ```
 
 Every window with a minimum counts: the run stops before it starts, naming the window, its minimum and its reset time. The quota is read again before every phase, since one review spends a good share of the five-hour window: a Codex reviewer whose quota has run below the threshold is not started for that phase and counts as a reviewer the phase lost, so the quorum decides whether the run goes on without it; a Codex synthesizer short of quota fails the final or the comparison before it starts, with every input kept for `--run` to resume. A quota that cannot be read is not treated as exhausted; the run goes on and the log says the check could not be made. Without the key nothing is checked.
+
+## Check the Claude quota before a run
+
+On a Claude plan with extra usage turned on, a review chain that runs past the plan's limits is billed rather than stopped, and every other Claude Code session on the account draws on the same limits. The Claude check is off until the configuration asks for it:
+
+```json
+"quota": {"claude": {"minimum_remaining_percent": {"5h": 15, "weekly": 3, "fable": 3}}}
+```
+
+Claude Code reports the plan's limits with every call. To read them, review-pr asks it for one word with nothing loaded (no tools, MCP servers, settings or hooks), once for each Claude model the step would use: about a thousand tokens and a few seconds per model, cached for a minute in `${XDG_CACHE_HOME:-~/.cache}/review-pr/quota-claude-<model>.json`. Every call reports the `5h` and `weekly` windows; a call to a model with a weekly limit of its own adds that window (`fable`, `opus` or `sonnet`), so such a minimum is checked only for that model. One number instead of an object is the minimum of every window.
+
+The checks run where the Codex ones do: a run whose synthesizer, fallback synthesizer or reviewers would start a Claude model short of quota is refused, naming the model, the window and its reset; before each phase a Claude reviewer short of quota is set aside under the reviewer quorum; a Claude synthesizer short of quota fails the final or the comparison before it starts. Only agents review-pr runs through its own Claude Code invocation are checked: one with a `runner` or `command` of its own may use another account. A quota that cannot be read (Claude Code missing or logged out, no answer within `REVIEW_PR_QUOTA_TIMEOUT_SECONDS`) does not stop anything; the log says the check could not be made.
+
+`review-pr quota claude` shows the same readings for the models a run of the configuration would use, and `--json` prints them as an array. `review-pr quota` without a provider stays Codex only, so nothing is spent on a probe unless Claude is asked for.
+
+```text
+Claude claude-opus-5-5
+  5h             70% left   resets Thu 19 Nov 01:20
+  weekly         40% left   resets Sun 22 Nov 15:00
+```
 
 ## Reviewing the same head again
 
