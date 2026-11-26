@@ -4,6 +4,13 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+### Fixed
+
+- A stream whose terminal `complete` record counts fewer findings than it wrote is accepted with
+  the count raised to the findings, and the console says so, instead of paying a schema repair
+  that only rewrote the number; some Codex models undercount by one or two. A count above the
+  findings still fails, since records may be missing.
+
 ## [1.31.0] - 2026-11-19
 
 ### Added

@@ -490,7 +490,9 @@ keys remain language-independent.
   is missing or names other agents than its `source_refs` gets the agents of those refs, the only
   value it can have; one whose refs are themselves unusable still fails.
   All of these are filled in before validation, without a model, and the console says so; a key a
-  `complete` record carries that the contract does not define is dropped the same way. A repair
+  `complete` record carries that the contract does not define is dropped the same way, and a
+  `finding_count` lower than the finding records before the one terminal `complete` record is
+  raised to their number (a count above them still fails: records may be missing). A repair
   baseline, an amendment request and the findings a continuation keeps get the same values, the
   primary `contributing_agents` included, and the same correction of a mislabelled `source_refs`
   agent key, so a repair, amendment or continuation that keeps a draft as it was still matches

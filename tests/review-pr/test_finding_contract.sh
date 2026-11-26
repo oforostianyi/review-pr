@@ -1803,6 +1803,69 @@ assert_true 'a complete record with a key the contract does not define is accept
 assert_eq 'Two actionable findings were identified.' "$(jq -r '.summary' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
     'and what it does define is kept'
 
+# A complete record that counts fewer findings than the stream wrote is raised
+# to the count of records before it instead of costing a repair pass: every
+# record is there, the reviewer only miscounted them. A count above the records
+# may mean records were lost, so it still fails.
+undercount="$test_root/undercount.ndjson"
+{
+    sed -n '1,2p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.finding_count = 1'
+} >"$undercount"
+REPORT_STEM=fixture-undercount
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-undercount-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-undercount-codex-findings.json"
+undercount_status=0
+process_primary_ndjson_output "$undercount" codex 2>"$test_root/undercount.log" || undercount_status=$?
+assert_eq 0 "$undercount_status" 'a complete record that undercounts its findings is accepted'
+assert_eq 2 "$(jq '.finding_count' "${PRIMARY_FINDINGS_OUTPUTS[codex]}")" \
+    'with the count of the findings the stream wrote'
+assert_file_contains "$test_root/undercount.log" \
+    'Corrected finding_count 1 to 2 in the complete record of the primary stream from codex' \
+    'and the correction is logged'
+overcount="$test_root/overcount-source.ndjson"
+{
+    sed -n '1,2p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.finding_count = 3'
+} >"$overcount"
+REPORT_STEM=fixture-overcount
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-overcount-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-overcount-codex-findings.json"
+assert_false 'a complete record that counts more findings than the stream wrote is rejected' \
+    process_primary_ndjson_output "$overcount" codex
+printf '%s\n' "$FINDING_CONTRACT_FAILURE_REASON" >"$test_root/overcount-reason.txt"
+assert_file_contains "$test_root/overcount-reason.txt" 'complete.finding_count_mismatch[3!=2]' \
+    'as a count mismatch, which the repair handles'
+undercount_broken="$test_root/undercount-broken-source.ndjson"
+{
+    sed -n '1p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c 'del(.title)'
+    sed -n '2p' "$test_dir/fixtures/primary-findings-valid.ndjson"
+    sed -n '3p' "$test_dir/fixtures/primary-findings-valid.ndjson" | jq -c '.finding_count = 1'
+} >"$undercount_broken"
+REPORT_STEM=fixture-undercount-broken
+PRIMARY_RAW_OUTPUTS[codex]="$test_root/fixture-undercount-broken-codex-raw.ndjson"
+PRIMARY_FINDINGS_OUTPUTS[codex]="$test_root/fixture-undercount-broken-codex-findings.json"
+assert_false 'an undercount next to a broken finding is still rejected' \
+    process_primary_ndjson_output "$undercount_broken" codex
+two_complete="$test_root/undercount-two-complete.json"
+jq -s '[.[0], .[2], .[1], (.[2] | .finding_count = 0)]' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$two_complete"
+correct_undercounted_finding_count primary codex "$two_complete" true
+assert_eq '2 0' "$(jq -r '[.[] | select(.record == "complete") | .finding_count] | join(" ")' "$two_complete")" \
+    'a stream with two complete records is left for validation to reject'
+for undercount_phase in cross final; do
+    jq -s '[.[0], .[1], (.[2] | .finding_count = 0)]' \
+        "$test_dir/fixtures/primary-findings-valid.ndjson" >"$test_root/undercount-${undercount_phase}.json"
+    correct_undercounted_finding_count "$undercount_phase" synthesizer "$test_root/undercount-${undercount_phase}.json" true
+    assert_eq 2 "$(jq '.[-1].finding_count' "$test_root/undercount-${undercount_phase}.json")" \
+        "the ${undercount_phase} stream gets the same correction"
+done
+jq -s '[.[0], {record: "resolution"}, .[1], (.[2] | .finding_count = 1)]' \
+    "$test_dir/fixtures/primary-findings-valid.ndjson" >"$test_root/undercount-resolution.json"
+correct_undercounted_finding_count final synthesizer "$test_root/undercount-resolution.json" true
+assert_eq 2 "$(jq '.[-1].finding_count' "$test_root/undercount-resolution.json")" \
+    'a resolution record in a final baseline is not counted as a finding'
+
 # A key that only says how a finding is presented is filled in, not failed on.
 no_feedback="$test_root/no-feedback-source.ndjson"
 {

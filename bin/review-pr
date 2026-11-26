@@ -5848,6 +5848,33 @@ drop_unknown_complete_keys() {
     [[ "$quiet" == true ]] || log "Dropped ${extra}, which the contract does not define, from the complete record in the ${phase} stream${agent:+ from ${agent}}"
 }
 
+# A reviewer that writes every finding and then counts fewer in its complete
+# record has lost nothing: a Codex model that undercounted by one or two made
+# the review pay a schema repair that only rewrote the number. When the stream
+# ends in its one complete record, a count below the findings before it is
+# raised to them, aloud. A count above them may mean records went missing, so
+# it is left for validation to reject, as is a stream with no complete record,
+# more than one, or one that is not last.
+correct_undercounted_finding_count() {
+    local phase=$1 agent=$2 records_file=$3 quiet=${4:-false} declared actual corrected_file
+
+    # Resolution records share the final stream until processing splits them
+    # off, and a repair baseline still holds them; they are not findings.
+    declared=$(jq -r 'def findings: [.[] | objects | select(.record != "complete" and .record != "resolution")] | length;
+        if type == "array" and length >= 1 and (.[-1] | type == "object" and .record == "complete")
+            and ([.[] | objects | select(.record == "complete")] | length) == 1
+            and (.[-1].finding_count | type == "number" and floor == . and . >= 0)
+            and .[-1].finding_count < findings
+        then .[-1].finding_count else empty end' "$records_file" 2>/dev/null) || return 0
+    [[ -n "$declared" ]] || return 0
+    new_temp_file "${phase}-complete-count"; corrected_file=$NEW_TEMP_FILE
+    jq '.[-1].finding_count = ([.[] | objects | select(.record != "complete" and .record != "resolution")] | length)' \
+        "$records_file" >"$corrected_file" || return 0
+    actual=$(jq '.[-1].finding_count' "$corrected_file") || return 0
+    mv -- "$corrected_file" "$records_file"
+    [[ "$quiet" == true ]] || log "Corrected finding_count ${declared} to ${actual} in the complete record of the ${phase} stream${agent:+ from ${agent}}"
+}
+
 log_leading_prose() {
     local count=$1 phase=$2 agent=$3
     local noun=lines
@@ -6289,6 +6316,7 @@ process_primary_ndjson_output() {
     records_file=$records_array_file
     fill_presentation_defaults primary "$agent" "$records_file"
     drop_unknown_complete_keys primary "$agent" "$records_file"
+    correct_undercounted_finding_count primary "$agent" "$records_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings primary "$records_file" "$agent"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
         return 1
@@ -6639,6 +6667,7 @@ process_cross_ndjson_output() {
     records_file=$records_array_file
     fill_presentation_defaults cross "$agent" "$records_file"
     drop_unknown_complete_keys cross "$agent" "$records_file"
+    correct_undercounted_finding_count cross "$agent" "$records_file"
     repair_ndjson_source_ref_agents cross "$agent" "$records_file" "$expected_refs_file"
     if [[ "$NDJSON_SALVAGE_MODE" == true ]] && ! filter_valid_ndjson_findings cross "$records_file" "$agent" "$expected_refs_file"; then
         FINDING_CONTRACT_FAILURE_REASON=salvage_found_no_usable_findings
@@ -7973,6 +8002,7 @@ process_final_ndjson_output() {
     jq '[.[] | select(.record != "resolution")]' "$records_array_file" >"$records_file"
     fill_presentation_defaults final "$FINAL_SYNTHESIZER" "$records_file"
     drop_unknown_complete_keys final "$FINAL_SYNTHESIZER" "$records_file"
+    correct_undercounted_finding_count final "$FINAL_SYNTHESIZER" "$records_file"
     repair_ndjson_source_ref_agents final '' "$records_file" "$expected_refs_file"
     if [[ "$DISPUTE_RESOLUTION_ENABLED" != true ]] && (( $(jq 'length' "$resolutions_file") > 0 )); then
         FINDING_CONTRACT_FAILURE_REASON=unexpected_resolution_records
@@ -8126,6 +8156,7 @@ normalize_records_as_processed() {
     # the repair and the amendment and went straight to salvage.
     fill_presentation_defaults "$phase" "$agent" "$array_file" true
     drop_unknown_complete_keys "$phase" "$agent" "$array_file" true
+    correct_undercounted_finding_count "$phase" "$agent" "$array_file" true
     if [[ -n "$expected_refs_file" && -s "$expected_refs_file" ]]; then
         new_temp_file "${phase}-baseline-source-ref-agents"; corrected_file=$NEW_TEMP_FILE
         if normalize_ndjson_source_ref_agents "$array_file" "$expected_refs_file" "$corrected_file" 2>/dev/null \
