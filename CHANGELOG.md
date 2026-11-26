@@ -4,6 +4,8 @@ All notable changes to `review-pr` are documented in this file. The project foll
 
 ## [Unreleased]
 
+## [1.31.1] - 2026-11-26
+
 ### Fixed
 
 - A stream whose terminal `complete` record counts fewer findings than it wrote is accepted with
